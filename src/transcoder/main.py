@@ -7,7 +7,6 @@ Main entry point for the transcoder application.
 
 from __future__ import annotations
 
-import fcntl
 import logging
 import os
 import signal
@@ -16,6 +15,16 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+# Cross-platform file locking
+if sys.platform == 'win32':
+    import msvcrt
+    LOCK_EX = msvcrt.LK_NBLCK
+    LOCK_UN = msvcrt.LK_UNLCK
+else:
+    import fcntl
+    LOCK_EX = fcntl.LOCK_EX | fcntl.LOCK_NB
+    LOCK_UN = fcntl.LOCK_UN
 
 import click
 from rich.console import Console
@@ -88,12 +97,13 @@ class Daemon:
         """Acquire exclusive lock to prevent multiple instances."""
         try:
             self.config.lockfile_path.parent.mkdir(parents=True, exist_ok=True)
-            self._lock_fd = os.open(
-                str(self.config.lockfile_path),
-                os.O_RDWR | os.O_CREAT,
-            )
-            fcntl.flock(self._lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            os.write(self._lock_fd, str(os.getpid()).encode())
+            self._lock_fd = open(str(self.config.lockfile_path), 'w')
+            if sys.platform == 'win32':
+                msvcrt.locking(self._lock_fd.fileno(), LOCK_EX, 1)
+            else:
+                fcntl.flock(self._lock_fd.fileno(), LOCK_EX)
+            self._lock_fd.write(str(os.getpid()))
+            self._lock_fd.flush()
             return True
         except (OSError, IOError):
             return False
@@ -102,8 +112,11 @@ class Daemon:
         """Release exclusive lock."""
         if self._lock_fd is not None:
             try:
-                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
-                os.close(self._lock_fd)
+                if sys.platform == 'win32':
+                    msvcrt.locking(self._lock_fd.fileno(), LOCK_UN, 1)
+                else:
+                    fcntl.flock(self._lock_fd.fileno(), LOCK_UN)
+                self._lock_fd.close()
                 self.config.lockfile_path.unlink(missing_ok=True)
             except Exception:
                 pass
