@@ -1,0 +1,168 @@
+# Dropbox Video Transcoder Configuration
+# ========================================
+# Copy this file to config.yaml and customize as needed.
+# Set DROPBOX_TOKEN environment variable or provide token below.
+
+# Dropbox Settings
+# ----------------
+# Access token - set via environment variable DROPBOX_TOKEN (recommended)
+# or directly here (less secure)
+dropbox_token: "${DROPBOX_TOKEN}"
+
+# Root folder to monitor for videos
+dropbox_root: "/Videos"
+
+# Local Paths
+# -----------
+# Directory for downloading files during processing (use fast NVMe storage)
+local_staging_dir: "/data/transcoder/staging"
+
+# Directory for transcoded output before upload
+local_output_dir: "/data/transcoder/output"
+
+# SQLite database for job queue and state
+database_path: "/data/transcoder/transcoder.db"
+
+# Lock file to prevent multiple instances
+lockfile_path: "/var/run/transcoder.lock"
+
+# Directory for FFmpeg logs
+log_dir: "/var/log/transcoder"
+
+# Encoder Settings
+# ----------------
+# Encoder preference: auto, qsv, nvenc, cpu
+# - auto: Detect and use best available (QSV > NVENC > CPU)
+# - qsv: Force Intel QuickSync (requires Intel iGPU/dGPU)
+# - nvenc: Force NVIDIA NVENC (requires NVIDIA GPU)
+# - cpu: Force CPU encoding with libx265
+encoder_preference: auto
+
+# Transcoding profile: quality or balanced
+# - quality: Uses CQ/CRF mode for best quality per bit (recommended)
+# - balanced: Uses target bitrate mode for predictable file sizes
+profile: quality
+
+# CQ value for hardware encoders (QSV/NVENC) in quality mode
+# Lower = higher quality, larger files. Range: 15-35
+cq_value: 24
+
+# CRF value for CPU (libx265) in quality mode
+# Roughly equivalent to CQ 24. Range: 18-28
+cpu_crf_equivalent: 23
+
+# Size Filter (R5)
+# ----------------
+# Minimum file size in GB. Files smaller than this are skipped.
+# Set to 0 to process all files regardless of size.
+min_size_gb: 6.0
+
+# Bitrate Settings (for balanced profile)
+# ---------------------------------------
+bitrate:
+  target_mbps: 40
+  max_mbps: 60
+  bufsize_mbps: 120
+
+# Stability Settings (R2)
+# -----------------------
+# How to determine if a file is done syncing before processing
+stability:
+  # Seconds between stability checks
+  poll_interval_sec: 300  # 5 minutes
+
+  # Number of consecutive stable checks required
+  checks_required: 3
+
+  # Minimum age (seconds) since first stable check
+  min_age_sec: 900  # 15 minutes
+
+# Concurrency Settings
+# --------------------
+concurrency:
+  # Seconds between full folder scans
+  scan_interval_sec: 600  # 10 minutes
+
+  # Number of parallel download workers
+  download_workers: 2
+
+  # Number of parallel transcode workers
+  # Note: Hardware encoders may limit actual parallelism
+  transcode_workers: 2
+
+  # Number of parallel upload workers
+  upload_workers: 2
+
+# Watchdog Settings
+# -----------------
+# Timeouts and retry limits for job monitoring
+watchdog:
+  # Download timeout in seconds
+  download_timeout_sec: 7200  # 2 hours
+
+  # Transcode timeout in seconds (long for huge files)
+  transcode_timeout_sec: 86400  # 24 hours
+
+  # Upload timeout in seconds
+  upload_timeout_sec: 7200  # 2 hours
+
+  # Maximum retry attempts with exponential backoff
+  max_retries: 10
+
+# File Patterns
+# -------------
+# Video file extensions to process
+video_extensions:
+  - ".mp4"
+  - ".mov"
+  - ".MP4"
+  - ".MOV"
+
+# Glob patterns to exclude (R4: always includes h265 folders)
+exclude_patterns:
+  - "*/h265/*"
+  - "*/.h265/*"
+  - "*/H265/*"
+  - "*/temp/*"
+  - "*/.tmp/*"
+
+# Behavior Flags
+# --------------
+# Upload transcoded files back to Dropbox
+upload_to_dropbox: true
+
+# Delete local staging files after successful upload
+delete_staging_after_upload: true
+
+# DANGEROUS: Allow deleting original files after transcoding
+# Only enable if you have verified backups!
+allow_delete_original: false
+
+# Safety delay (hours) before deleting original
+delete_original_delay_hours: 168  # 1 week
+
+# Allow fallback to MKV container if MP4/MOV has issues
+# Default: false (keeps original extension)
+allow_mkv_fallback: false
+
+# FFmpeg Settings
+# ---------------
+# Path to ffmpeg binary
+ffmpeg_path: "ffmpeg"
+
+# Path to ffprobe binary
+ffprobe_path: "ffprobe"
+
+# Extra arguments to pass to ffmpeg
+ffmpeg_extra_args: []
+
+# GOP size (keyframe interval in frames)
+gop_size: 60
+
+# Audio Settings
+# --------------
+# Codec for audio re-encoding fallback
+audio_fallback_codec: "aac"
+
+# Bitrate for audio re-encoding
+audio_fallback_bitrate: "320k"
