@@ -24,7 +24,7 @@ class TranscoderGUI:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("Dropbox Video Transcoder - H.264 → H.265")
+        self.root.title("HeavyDrops Dropbox Video Transcoder H.264 → H.265")
         self.root.geometry("900x700")
         self.root.minsize(800, 600)
 
