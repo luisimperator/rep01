@@ -30,6 +30,8 @@ class TranscoderGUI:
 
         # State
         self.running = False
+        self.paused = False
+        self.current_process = None  # Current FFmpeg process
         self.worker_thread = None
         self.current_file = None
         self.db_conn = None
@@ -110,9 +112,15 @@ class TranscoderGUI:
         control_frame.pack(fill=tk.X, pady=(0, 10))
 
         self.start_btn = ttk.Button(control_frame, text="▶ START", command=self.toggle_processing, style="Accent.TButton")
-        self.start_btn.pack(side=tk.LEFT, padx=(0, 10))
+        self.start_btn.pack(side=tk.LEFT, padx=(0, 5))
 
-        ttk.Button(control_frame, text="🔍 Scan (Trigger Download)", command=self.scan_and_trigger_download).pack(side=tk.LEFT, padx=(0, 10))
+        self.pause_btn = ttk.Button(control_frame, text="⏸ PAUSE", command=self.toggle_pause, state=tk.DISABLED)
+        self.pause_btn.pack(side=tk.LEFT, padx=(0, 5))
+
+        self.stop_btn = ttk.Button(control_frame, text="⏹ STOP", command=self.stop_all, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=(0, 10))
+
+        ttk.Button(control_frame, text="🔍 Scan", command=self.scan_and_trigger_download).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="📁 Open Folder", command=self.open_folder).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🔄 Reset Failed", command=self.reset_failed).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🗑 Clear History", command=self.clear_history).pack(side=tk.LEFT)
@@ -338,19 +346,77 @@ class TranscoderGUI:
             self.log("History cleared", "warning")
 
     def toggle_processing(self):
-        """Start or stop processing."""
-        if self.running:
-            self.running = False
-            self.start_btn.config(text="▶ START")
-            self.progress_var.set(0)
-            self.log("Stopping...", "warning")
-        else:
+        """Start processing."""
+        if not self.running:
             self.running = True
-            self.start_btn.config(text="⏹ STOP")
+            self.paused = False
+            self.start_btn.config(state=tk.DISABLED)
+            self.pause_btn.config(state=tk.NORMAL, text="⏸ PAUSE")
+            self.stop_btn.config(state=tk.NORMAL)
             self.progress_var.set(0)
             self.worker_thread = threading.Thread(target=self.process_loop, daemon=True)
             self.worker_thread.start()
             self.log("Started monitoring", "success")
+
+    def toggle_pause(self):
+        """Pause or resume encoding."""
+        if self.paused:
+            # Resume
+            self.paused = False
+            self.pause_btn.config(text="⏸ PAUSE")
+            self.resume_ffmpeg()
+            self.log("Resumed encoding", "success")
+        else:
+            # Pause
+            self.paused = True
+            self.pause_btn.config(text="▶ RESUME")
+            self.pause_ffmpeg()
+            self.log("Paused encoding (FFmpeg suspended)", "warning")
+
+    def stop_all(self):
+        """Stop all encoding immediately."""
+        self.running = False
+        self.paused = False
+
+        # Kill FFmpeg process if running
+        if self.current_process:
+            try:
+                self.current_process.terminate()
+                self.log("FFmpeg process terminated", "warning")
+            except:
+                pass
+
+        self.start_btn.config(state=tk.NORMAL)
+        self.pause_btn.config(state=tk.DISABLED, text="⏸ PAUSE")
+        self.stop_btn.config(state=tk.DISABLED)
+        self.progress_var.set(0)
+        self.current_file_label.config(text="Idle")
+        self.progress_label.config(text="")
+        self.log("Stopped all encoding", "warning")
+
+    def pause_ffmpeg(self):
+        """Suspend the FFmpeg process (Windows)."""
+        if self.current_process and self.current_process.poll() is None:
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                handle = kernel32.OpenProcess(0x1F0FFF, False, self.current_process.pid)
+                kernel32.DebugActiveProcess(self.current_process.pid)
+                self.log(f"FFmpeg process {self.current_process.pid} suspended", "info")
+            except Exception as e:
+                # Fallback: just set paused flag, loop will wait
+                self.log(f"Soft pause (process continues until next file): {e}", "warning")
+
+    def resume_ffmpeg(self):
+        """Resume the FFmpeg process (Windows)."""
+        if self.current_process and self.current_process.poll() is None:
+            try:
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                kernel32.DebugActiveProcessStop(self.current_process.pid)
+                self.log(f"FFmpeg process {self.current_process.pid} resumed", "info")
+            except Exception as e:
+                self.log(f"Resume note: {e}", "info")
 
     def scan_and_trigger_download(self):
         """Scan folder and trigger Dropbox to download files (without encoding)."""
@@ -406,14 +472,29 @@ class TranscoderGUI:
     def process_loop(self):
         """Main processing loop."""
         while self.running:
+            # Wait while paused
+            while self.paused and self.running:
+                time.sleep(0.5)
+
+            if not self.running:
+                break
+
             self.scan_and_process()
+
             for _ in range(30):  # Wait 30 seconds between scans
                 if not self.running:
                     break
+                # Also check pause during wait
+                while self.paused and self.running:
+                    time.sleep(0.5)
                 time.sleep(1)
 
+        # Reset UI when stopped
         self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
         self.root.after(0, lambda: self.progress_var.set(0))
+        self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+        self.root.after(0, lambda: self.pause_btn.config(state=tk.DISABLED, text="⏸ PAUSE"))
+        self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
 
     def scan_and_process(self):
         """Scan folder and process files."""
@@ -560,9 +641,10 @@ class TranscoderGUI:
             # Log the command for debugging
             self.root.after(0, lambda: self.log(f"CMD: {' '.join(cmd[:6])}...", "info"))
 
-            process = subprocess.Popen(
+            self.current_process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
             )
+            process = self.current_process
 
             last_lines = []  # Keep last few lines for error reporting
             for line in process.stdout:
@@ -607,6 +689,7 @@ class TranscoderGUI:
             self.root.after(0, lambda: self.log(f"Traceback: {traceback.format_exc()}", "error"))
             self.mark_processed(input_path, "", "error", 0, 0)
 
+        self.current_process = None
         self.root.after(0, lambda: self.progress_var.set(0))
         self.root.after(0, lambda: self.progress_label.config(text=""))
         self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
