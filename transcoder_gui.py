@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 import json
+import re
 import sqlite3
 import threading
 from pathlib import Path
@@ -132,7 +133,9 @@ class TranscoderGUI:
         self.current_file_label = ttk.Label(progress_frame, text="Idle", font=("", 9))
         self.current_file_label.pack(fill=tk.X)
 
-        self.progress_bar = ttk.Progressbar(progress_frame, mode='indeterminate')
+        # Progress bar with percentage
+        self.progress_var = tk.DoubleVar(value=0)
+        self.progress_bar = ttk.Progressbar(progress_frame, mode='determinate', variable=self.progress_var, maximum=100)
         self.progress_bar.pack(fill=tk.X, pady=(5, 0))
 
         self.progress_label = ttk.Label(progress_frame, text="", font=("", 8))
@@ -339,12 +342,12 @@ class TranscoderGUI:
         if self.running:
             self.running = False
             self.start_btn.config(text="▶ START")
-            self.progress_bar.stop()
+            self.progress_var.set(0)
             self.log("Stopping...", "warning")
         else:
             self.running = True
             self.start_btn.config(text="⏹ STOP")
-            self.progress_bar.start()
+            self.progress_var.set(0)
             self.worker_thread = threading.Thread(target=self.process_loop, daemon=True)
             self.worker_thread.start()
             self.log("Started monitoring", "success")
@@ -410,7 +413,7 @@ class TranscoderGUI:
                 time.sleep(1)
 
         self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
-        self.root.after(0, self.progress_bar.stop)
+        self.root.after(0, lambda: self.progress_var.set(0))
 
     def scan_and_process(self):
         """Scan folder and process files."""
@@ -547,6 +550,12 @@ class TranscoderGUI:
         cmd = self.build_ffmpeg_command(input_path, temp_path)
         self.root.after(0, lambda: self.log(f"Encoding with {self.encoder.get()}..."))
 
+        # Get video duration for progress calculation
+        duration = self.get_duration(probe_data)
+
+        # Reset progress bar
+        self.root.after(0, lambda: self.progress_var.set(0))
+
         try:
             # Log the command for debugging
             self.root.after(0, lambda: self.log(f"CMD: {' '.join(cmd[:6])}...", "info"))
@@ -561,7 +570,15 @@ class TranscoderGUI:
                 if len(last_lines) > 10:
                     last_lines.pop(0)
                 if 'time=' in line:
-                    self.root.after(0, lambda l=line: self.progress_label.config(text=l.strip()[-80:]))
+                    # Parse time and calculate progress
+                    current_time = self.parse_ffmpeg_time(line)
+                    if duration > 0 and current_time >= 0:
+                        progress = min(100, (current_time / duration) * 100)
+                        self.root.after(0, lambda p=progress: self.progress_var.set(p))
+                        self.root.after(0, lambda p=progress: self.progress_label.config(
+                            text=f"{p:.1f}% - {line.strip()[-60:]}"))
+                    else:
+                        self.root.after(0, lambda l=line: self.progress_label.config(text=l.strip()[-80:]))
 
             process.wait()
 
@@ -590,6 +607,7 @@ class TranscoderGUI:
             self.root.after(0, lambda: self.log(f"Traceback: {traceback.format_exc()}", "error"))
             self.mark_processed(input_path, "", "error", 0, 0)
 
+        self.root.after(0, lambda: self.progress_var.set(0))
         self.root.after(0, lambda: self.progress_label.config(text=""))
         self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
 
@@ -612,6 +630,37 @@ class TranscoderGUI:
                 codec = stream.get('codec_name', '').lower()
                 return codec in ('hevc', 'h265')
         return False
+
+    def get_duration(self, probe_data: dict) -> float:
+        """Get video duration in seconds from probe data."""
+        try:
+            # Try format duration first
+            if 'format' in probe_data and 'duration' in probe_data['format']:
+                return float(probe_data['format']['duration'])
+            # Try stream duration
+            for stream in probe_data.get('streams', []):
+                if stream.get('codec_type') == 'video' and 'duration' in stream:
+                    return float(stream['duration'])
+        except (ValueError, TypeError):
+            pass
+        return 0
+
+    def parse_ffmpeg_time(self, line: str) -> float:
+        """Parse time from FFmpeg output line. Returns seconds or -1 if not found."""
+        try:
+            # Match time=HH:MM:SS.mm or time=SS.mm
+            match = re.search(r'time=(\d+):(\d+):(\d+)\.(\d+)', line)
+            if match:
+                h, m, s, ms = match.groups()
+                return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 100
+            # Try simpler format time=SS.mm
+            match = re.search(r'time=(\d+)\.(\d+)', line)
+            if match:
+                s, ms = match.groups()
+                return int(s) + int(ms) / 100
+        except:
+            pass
+        return -1
 
     def build_ffmpeg_command(self, input_path: Path, output_path: Path) -> list:
         """Build FFmpeg command."""
