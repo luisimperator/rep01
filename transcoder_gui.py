@@ -445,23 +445,77 @@ class TranscoderGUI:
 
             self.process_file(video_path)
 
+    def wait_for_file_ready(self, file_path: Path, timeout_minutes: int = 60) -> bool:
+        """
+        Wait for a file to be fully downloaded from Dropbox.
+        Returns True if file is ready, False if timeout or stopped.
+        """
+        max_wait = timeout_minutes * 60  # Convert to seconds
+        waited = 0
+        check_interval = 5  # Check every 5 seconds
+
+        while waited < max_wait and self.running:
+            try:
+                # Try to read some bytes - this triggers Dropbox download
+                with open(file_path, 'rb') as f:
+                    f.read(1024)  # Read 1KB
+
+                # Get current size
+                current_size = file_path.stat().st_size
+
+                # If file is very small, it might be a placeholder - wait
+                if current_size < 10000:  # Less than 10KB is probably a placeholder
+                    self.root.after(0, lambda: self.log(
+                        f"Waiting for Dropbox download... ({waited}s)", "info"))
+                    time.sleep(check_interval)
+                    waited += check_interval
+                    continue
+
+                # Wait a bit and check if size is stable (file finished downloading)
+                time.sleep(3)
+                new_size = file_path.stat().st_size
+
+                if current_size == new_size:
+                    # File is stable and ready
+                    return True
+                else:
+                    # Still downloading
+                    progress_mb = new_size / (1024**2)
+                    self.root.after(0, lambda p=progress_mb: self.log(
+                        f"Downloading from Dropbox... {p:.1f} MB", "info"))
+                    time.sleep(check_interval)
+                    waited += check_interval
+
+            except PermissionError:
+                # File is being used by Dropbox - wait
+                self.root.after(0, lambda: self.log(
+                    f"File locked by Dropbox, waiting... ({waited}s)", "info"))
+                time.sleep(check_interval)
+                waited += check_interval
+
+            except Exception as e:
+                self.root.after(0, lambda err=e: self.log(f"Error waiting for file: {err}", "warning"))
+                time.sleep(check_interval)
+                waited += check_interval
+
+        if waited >= max_wait:
+            self.root.after(0, lambda: self.log(
+                f"Timeout waiting for file download ({timeout_minutes} min)", "error"))
+        return False
+
     def process_file(self, input_path: Path):
         """Process a single file."""
+        self.root.after(0, lambda: self.current_file_label.config(
+            text=f"Processing: {input_path.name}"))
+        self.root.after(0, lambda: self.log(f"Processing: {input_path.name}"))
+
+        # Wait for file to be fully downloaded from Dropbox
+        if not self.wait_for_file_ready(input_path):
+            return
+
         size_gb = input_path.stat().st_size / (1024**3)
         self.root.after(0, lambda: self.current_file_label.config(
             text=f"Processing: {input_path.name} ({size_gb:.2f} GB)"))
-        self.root.after(0, lambda: self.log(f"Processing: {input_path.name}"))
-
-        # Check if file is stable
-        try:
-            size1 = input_path.stat().st_size
-            time.sleep(3)
-            size2 = input_path.stat().st_size
-            if size1 != size2:
-                self.root.after(0, lambda: self.log("File still syncing, skipping for now", "warning"))
-                return
-        except:
-            return
 
         # Probe video
         probe_data = self.probe_video(input_path)
