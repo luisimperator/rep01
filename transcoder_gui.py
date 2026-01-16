@@ -111,6 +111,7 @@ class TranscoderGUI:
         self.start_btn = ttk.Button(control_frame, text="▶ START", command=self.toggle_processing, style="Accent.TButton")
         self.start_btn.pack(side=tk.LEFT, padx=(0, 10))
 
+        ttk.Button(control_frame, text="🔍 Scan (Trigger Download)", command=self.scan_and_trigger_download).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="📁 Open Folder", command=self.open_folder).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🔄 Reset Failed", command=self.reset_failed).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🗑 Clear History", command=self.clear_history).pack(side=tk.LEFT)
@@ -347,6 +348,57 @@ class TranscoderGUI:
             self.worker_thread = threading.Thread(target=self.process_loop, daemon=True)
             self.worker_thread.start()
             self.log("Started monitoring", "success")
+
+    def scan_and_trigger_download(self):
+        """Scan folder and trigger Dropbox to download files (without encoding)."""
+        threading.Thread(target=self._do_scan_trigger, daemon=True).start()
+
+    def _do_scan_trigger(self):
+        """Worker for scan and trigger download."""
+        folder = Path(self.watch_folder.get())
+
+        if not folder.exists():
+            self.root.after(0, lambda: self.log(f"Folder not found: {folder}", "error"))
+            return
+
+        self.root.after(0, lambda: self.log(f"Scanning {folder} to trigger downloads..."))
+
+        # Find video files
+        video_files = []
+        for ext in ['.mp4', '.mov', '.MP4', '.MOV', '.mkv', '.MKV', '.avi', '.AVI']:
+            for f in folder.rglob(f'*{ext}'):
+                if 'h265' not in str(f).lower():
+                    video_files.append(f)
+
+        self.root.after(0, lambda: self.log(f"Found {len(video_files)} video files"))
+
+        triggered = 0
+        already_local = 0
+        errors = 0
+
+        for video_path in video_files:
+            try:
+                # Try to read 1 byte from the file - this triggers Dropbox download
+                with open(video_path, 'rb') as f:
+                    f.read(1)
+
+                # Check file size to see if it's fully downloaded
+                size = video_path.stat().st_size
+                if size > 1000:  # More than 1KB means probably downloaded
+                    already_local += 1
+                else:
+                    triggered += 1
+                    self.root.after(0, lambda p=video_path.name: self.log(f"Triggered download: {p}", "info"))
+            except PermissionError:
+                # File is being synced by Dropbox
+                triggered += 1
+                self.root.after(0, lambda p=video_path.name: self.log(f"Syncing: {p}", "info"))
+            except Exception as e:
+                errors += 1
+                self.root.after(0, lambda p=video_path.name, err=e: self.log(f"Error accessing {p}: {err}", "warning"))
+
+        self.root.after(0, lambda: self.log(
+            f"Scan complete: {already_local} local, {triggered} triggered, {errors} errors", "success"))
 
     def process_loop(self):
         """Main processing loop."""
