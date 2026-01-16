@@ -18,6 +18,9 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 
 class TranscoderGUI:
+    # Settings file path
+    SETTINGS_FILE = Path(r"C:\transcoder\settings.json")
+
     def __init__(self, root):
         self.root = root
         self.root.title("Dropbox Video Transcoder - H.264 → H.265")
@@ -32,6 +35,7 @@ class TranscoderGUI:
 
         # Default settings
         self.watch_folder = tk.StringVar(value=r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
+        self.log_folder = tk.StringVar(value=r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter\logs")
         self.min_size_gb = tk.DoubleVar(value=0)
         self.encoder = tk.StringVar(value="cpu")
         self.cq_value = tk.IntVar(value=24)
@@ -40,10 +44,16 @@ class TranscoderGUI:
         self.files_processed = tk.IntVar(value=0)
         self.total_saved_gb = tk.DoubleVar(value=0)
 
+        # Load saved settings
+        self.load_settings()
+
         self.setup_ui()
         self.setup_database()
         self.load_stats()
         self.check_ffmpeg()
+
+        # Save settings when window closes
+        self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def setup_ui(self):
         """Create the UI."""
@@ -84,6 +94,13 @@ class TranscoderGUI:
         size_frame.grid(row=3, column=1, sticky=tk.W, pady=5)
         ttk.Spinbox(size_frame, from_=0, to=100, textvariable=self.min_size_gb, width=10).pack(side=tk.LEFT)
         ttk.Label(size_frame, text="(0 = process all files)", font=("", 8)).pack(side=tk.LEFT, padx=(10, 0))
+
+        # Log folder
+        ttk.Label(settings_frame, text="Log Folder:").grid(row=4, column=0, sticky=tk.W, pady=5)
+        log_frame = ttk.Frame(settings_frame)
+        log_frame.grid(row=4, column=1, sticky=tk.EW, pady=5)
+        ttk.Entry(log_frame, textvariable=self.log_folder, width=60).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(log_frame, text="Browse", command=self.browse_log_folder).pack(side=tk.LEFT, padx=(5, 0))
 
         settings_frame.columnconfigure(1, weight=1)
 
@@ -163,6 +180,75 @@ class TranscoderGUI:
         folder = filedialog.askdirectory(initialdir=self.watch_folder.get())
         if folder:
             self.watch_folder.set(folder)
+            self.save_settings()
+
+    def browse_log_folder(self):
+        """Open log folder browser dialog."""
+        folder = filedialog.askdirectory(initialdir=self.log_folder.get())
+        if folder:
+            self.log_folder.set(folder)
+            self.save_settings()
+
+    def load_settings(self):
+        """Load settings from file."""
+        try:
+            if self.SETTINGS_FILE.exists():
+                with open(self.SETTINGS_FILE, 'r', encoding='utf-8') as f:
+                    settings = json.load(f)
+                    self.watch_folder.set(settings.get('watch_folder', self.watch_folder.get()))
+                    self.log_folder.set(settings.get('log_folder', self.log_folder.get()))
+                    self.encoder.set(settings.get('encoder', self.encoder.get()))
+                    self.cq_value.set(settings.get('cq_value', self.cq_value.get()))
+                    self.min_size_gb.set(settings.get('min_size_gb', self.min_size_gb.get()))
+        except Exception:
+            pass  # Use defaults if settings can't be loaded
+
+    def save_settings(self):
+        """Save settings to file."""
+        try:
+            self.SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            settings = {
+                'watch_folder': self.watch_folder.get(),
+                'log_folder': self.log_folder.get(),
+                'encoder': self.encoder.get(),
+                'cq_value': self.cq_value.get(),
+                'min_size_gb': self.min_size_gb.get()
+            }
+            with open(self.SETTINGS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(settings, f, indent=2)
+        except Exception:
+            pass  # Silently fail if can't save
+
+    def on_close(self):
+        """Handle window close."""
+        self.save_settings()
+        self.running = False
+        self.root.destroy()
+
+    def write_success_log(self, input_path: Path, output_path: Path, input_size: int, output_size: int):
+        """Write successful encoding to log file."""
+        try:
+            log_folder = Path(self.log_folder.get())
+            log_folder.mkdir(parents=True, exist_ok=True)
+            log_file = log_folder / "encoding_history.log"
+
+            reduction = (1 - output_size / input_size) * 100 if input_size > 0 else 0
+            input_gb = input_size / (1024**3)
+            output_gb = output_size / (1024**3)
+            saved_gb = (input_size - output_size) / (1024**3)
+
+            log_entry = (
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
+                f"SUCCESS | {input_path.name} | "
+                f"{input_gb:.2f}GB -> {output_gb:.2f}GB | "
+                f"Saved: {saved_gb:.2f}GB ({reduction:.1f}%) | "
+                f"Encoder: {self.encoder.get()} CQ:{self.cq_value.get()}\n"
+            )
+
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(log_entry)
+        except Exception as e:
+            self.root.after(0, lambda: self.log(f"Could not write to log file: {e}", "warning"))
 
     def open_folder(self):
         """Open watch folder in explorer."""
@@ -382,6 +468,7 @@ class TranscoderGUI:
                 self.root.after(0, lambda: self.log(
                     f"Done! {reduction:.1f}% smaller", "success"))
                 self.mark_processed(input_path, str(output_path), "done", input_size, output_size)
+                self.write_success_log(input_path, output_path, input_size, output_size)
             else:
                 # Show the actual error from FFmpeg
                 error_msg = "\n".join(last_lines[-5:]) if last_lines else "Unknown error"
