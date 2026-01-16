@@ -94,9 +94,6 @@ class TranscoderGUI:
         self.start_btn = ttk.Button(control_frame, text="▶ START", command=self.toggle_processing, style="Accent.TButton")
         self.start_btn.pack(side=tk.LEFT, padx=(0, 10))
 
-        self.scan_btn = ttk.Button(control_frame, text="🔍 Scan Now", command=self.scan_once)
-        self.scan_btn.pack(side=tk.LEFT, padx=(0, 10))
-
         ttk.Button(control_frame, text="📁 Open Folder", command=self.open_folder).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🔄 Reset Failed", command=self.reset_failed).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🗑 Clear History", command=self.clear_history).pack(side=tk.LEFT)
@@ -265,11 +262,6 @@ class TranscoderGUI:
             self.worker_thread.start()
             self.log("Started monitoring", "success")
 
-    def scan_once(self):
-        """Run a single scan."""
-        if not self.running:
-            threading.Thread(target=self.scan_and_process, daemon=True).start()
-
     def process_loop(self):
         """Main processing loop."""
         while self.running:
@@ -433,27 +425,29 @@ class TranscoderGUI:
         encoder = self.encoder.get()
         cq = self.cq_value.get()
 
-        # Use -f mp4 to explicitly set format (needed for .tmp extension)
+        # -map 0:v = video streams, -map 0:a? = audio (optional, ? means don't fail if no audio)
+        # This avoids copying timecode/data tracks that can't go in MP4
+        # -f mp4 explicitly sets format (needed for .tmp extension)
         if encoder == 'nvenc':
             return [
                 'ffmpeg', '-hide_banner', '-y', '-i', str(input_path),
-                '-map', '0', '-map_metadata', '0',
+                '-map', '0:v', '-map', '0:a?', '-map_metadata', '0',
                 '-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc:v', 'vbr', '-cq:v', str(cq),
-                '-c:a', 'copy', '-c:s', 'copy', '-f', 'mp4', str(output_path)
+                '-c:a', 'copy', '-f', 'mp4', str(output_path)
             ]
         elif encoder == 'qsv':
             return [
                 'ffmpeg', '-hide_banner', '-y', '-hwaccel', 'qsv', '-i', str(input_path),
-                '-map', '0', '-map_metadata', '0',
+                '-map', '0:v', '-map', '0:a?', '-map_metadata', '0',
                 '-c:v', 'hevc_qsv', '-preset', 'medium', '-global_quality:v', str(cq),
-                '-c:a', 'copy', '-c:s', 'copy', '-f', 'mp4', str(output_path)
+                '-c:a', 'copy', '-f', 'mp4', str(output_path)
             ]
         else:  # cpu
             return [
                 'ffmpeg', '-hide_banner', '-y', '-i', str(input_path),
-                '-map', '0', '-map_metadata', '0',
+                '-map', '0:v', '-map', '0:a?', '-map_metadata', '0',
                 '-c:v', 'libx265', '-preset', 'medium', '-crf', str(cq),
-                '-c:a', 'copy', '-c:s', 'copy', '-f', 'mp4', str(output_path)
+                '-c:a', 'copy', '-f', 'mp4', str(output_path)
             ]
 
 
