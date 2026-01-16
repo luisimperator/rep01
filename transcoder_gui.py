@@ -433,26 +433,27 @@ class TranscoderGUI:
         encoder = self.encoder.get()
         cq = self.cq_value.get()
 
+        # Use -f mp4 to explicitly set format (needed for .tmp extension)
         if encoder == 'nvenc':
             return [
                 'ffmpeg', '-hide_banner', '-y', '-i', str(input_path),
                 '-map', '0', '-map_metadata', '0',
                 '-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc:v', 'vbr', '-cq:v', str(cq),
-                '-c:a', 'copy', '-c:s', 'copy', str(output_path)
+                '-c:a', 'copy', '-c:s', 'copy', '-f', 'mp4', str(output_path)
             ]
         elif encoder == 'qsv':
             return [
                 'ffmpeg', '-hide_banner', '-y', '-hwaccel', 'qsv', '-i', str(input_path),
                 '-map', '0', '-map_metadata', '0',
                 '-c:v', 'hevc_qsv', '-preset', 'medium', '-global_quality:v', str(cq),
-                '-c:a', 'copy', '-c:s', 'copy', str(output_path)
+                '-c:a', 'copy', '-c:s', 'copy', '-f', 'mp4', str(output_path)
             ]
         else:  # cpu
             return [
                 'ffmpeg', '-hide_banner', '-y', '-i', str(input_path),
                 '-map', '0', '-map_metadata', '0',
                 '-c:v', 'libx265', '-preset', 'medium', '-crf', str(cq),
-                '-c:a', 'copy', '-c:s', 'copy', str(output_path)
+                '-c:a', 'copy', '-c:s', 'copy', '-f', 'mp4', str(output_path)
             ]
 
 
