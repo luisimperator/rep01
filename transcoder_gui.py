@@ -43,6 +43,7 @@ class TranscoderGUI:
         self.setup_ui()
         self.setup_database()
         self.load_stats()
+        self.check_ffmpeg()
 
     def setup_ui(self):
         """Create the UI."""
@@ -74,7 +75,7 @@ class TranscoderGUI:
         quality_frame = ttk.Frame(settings_frame)
         quality_frame.grid(row=2, column=1, sticky=tk.W, pady=5)
         ttk.Scale(quality_frame, from_=18, to=30, variable=self.cq_value, orient=tk.HORIZONTAL, length=200).pack(side=tk.LEFT)
-        ttk.Label(quality_frame, textvariable=self.cq_value, width=3).pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Spinbox(quality_frame, from_=15, to=35, textvariable=self.cq_value, width=5).pack(side=tk.LEFT, padx=(10, 0))
         ttk.Label(quality_frame, text="(lower = better quality, larger file)", font=("", 8)).pack(side=tk.LEFT, padx=(10, 0))
 
         # Min size
@@ -97,6 +98,7 @@ class TranscoderGUI:
         self.scan_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Button(control_frame, text="📁 Open Folder", command=self.open_folder).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(control_frame, text="🔄 Reset Failed", command=self.reset_failed).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🗑 Clear History", command=self.clear_history).pack(side=tk.LEFT)
 
         # Stats
@@ -135,6 +137,29 @@ class TranscoderGUI:
         self.log_text.tag_config("error", foreground="red")
 
         self.log("Ready. Set your watch folder and click START.")
+
+    def check_ffmpeg(self):
+        """Check if FFmpeg is installed and accessible."""
+        try:
+            result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=10)
+            if result.returncode == 0:
+                # Extract version info
+                version_line = result.stdout.split('\n')[0] if result.stdout else 'unknown'
+                self.log(f"FFmpeg found: {version_line[:60]}", "success")
+            else:
+                self.log("FFmpeg found but returned error", "warning")
+        except FileNotFoundError:
+            self.log("ERROR: FFmpeg not found! Please install FFmpeg.", "error")
+            self.log("Download from: https://ffmpeg.org/download.html", "error")
+            self.log("Or use: winget install ffmpeg", "info")
+            messagebox.showerror("FFmpeg Not Found",
+                "FFmpeg is not installed or not in PATH.\n\n"
+                "Please install FFmpeg:\n"
+                "1. Download from https://ffmpeg.org/download.html\n"
+                "2. Or run: winget install ffmpeg\n\n"
+                "After installing, restart this application.")
+        except Exception as e:
+            self.log(f"Error checking FFmpeg: {e}", "warning")
 
     def browse_folder(self):
         """Open folder browser dialog."""
@@ -204,6 +229,18 @@ class TranscoderGUI:
               datetime.now().isoformat()))
         self.db_conn.commit()
         self.load_stats()
+
+    def reset_failed(self):
+        """Reset failed files so they can be retried."""
+        cursor = self.db_conn.execute("SELECT COUNT(*) FROM processed WHERE status = 'error'")
+        count = cursor.fetchone()[0]
+        if count == 0:
+            messagebox.showinfo("Info", "No failed files to reset.")
+            return
+        if messagebox.askyesno("Confirm", f"Reset {count} failed files for retry?"):
+            self.db_conn.execute("DELETE FROM processed WHERE status = 'error'")
+            self.db_conn.commit()
+            self.log(f"Reset {count} failed files for retry", "success")
 
     def clear_history(self):
         """Clear processing history."""
@@ -327,11 +364,18 @@ class TranscoderGUI:
         self.root.after(0, lambda: self.log(f"Encoding with {self.encoder.get()}..."))
 
         try:
+            # Log the command for debugging
+            self.root.after(0, lambda: self.log(f"CMD: {' '.join(cmd[:6])}...", "info"))
+
             process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
             )
 
+            last_lines = []  # Keep last few lines for error reporting
             for line in process.stdout:
+                last_lines.append(line.strip())
+                if len(last_lines) > 10:
+                    last_lines.pop(0)
                 if 'time=' in line:
                     self.root.after(0, lambda l=line: self.progress_label.config(text=l.strip()[-80:]))
 
@@ -347,13 +391,18 @@ class TranscoderGUI:
                     f"Done! {reduction:.1f}% smaller", "success"))
                 self.mark_processed(input_path, str(output_path), "done", input_size, output_size)
             else:
-                self.root.after(0, lambda: self.log("Encoding failed", "error"))
+                # Show the actual error from FFmpeg
+                error_msg = "\n".join(last_lines[-5:]) if last_lines else "Unknown error"
+                self.root.after(0, lambda: self.log(f"Encoding failed (code {process.returncode})", "error"))
+                self.root.after(0, lambda e=error_msg: self.log(f"FFmpeg output: {e}", "error"))
                 self.mark_processed(input_path, "", "error", 0, 0)
                 if temp_path.exists():
                     temp_path.unlink()
 
         except Exception as e:
             self.root.after(0, lambda: self.log(f"Error: {e}", "error"))
+            import traceback
+            self.root.after(0, lambda: self.log(f"Traceback: {traceback.format_exc()}", "error"))
             self.mark_processed(input_path, "", "error", 0, 0)
 
         self.root.after(0, lambda: self.progress_label.config(text=""))
