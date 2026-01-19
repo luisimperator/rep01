@@ -436,7 +436,7 @@ class TranscoderGUI:
         video_files = []
         for ext in ['.mp4', '.mov', '.MP4', '.MOV', '.mkv', '.MKV', '.avi', '.AVI']:
             for f in folder.rglob(f'*{ext}'):
-                if 'h265' not in str(f).lower():
+                if 'h265' not in str(f).lower() and 'h264' not in str(f).lower():
                     video_files.append(f)
 
         self.root.after(0, lambda: self.log(f"Found {len(video_files)} video files"))
@@ -510,7 +510,7 @@ class TranscoderGUI:
         video_files = []
         for ext in ['.mp4', '.mov', '.MP4', '.MOV']:
             for f in folder.rglob(f'*{ext}'):
-                if 'h265' not in str(f).lower():
+                if 'h265' not in str(f).lower() and 'h264' not in str(f).lower():
                     video_files.append(f)
 
         self.root.after(0, lambda: self.log(f"Found {len(video_files)} video files"))
@@ -672,8 +672,36 @@ class TranscoderGUI:
 
                 self.root.after(0, lambda: self.log(
                     f"Done! {reduction:.1f}% smaller", "success"))
-                self.mark_processed(input_path, str(output_path), "done", input_size, output_size)
-                self.write_success_log(input_path, output_path, input_size, output_size)
+
+                # Reorganize files:
+                # 1. Move original H.264 to h264/ folder
+                # 2. Move H.265 from h265/ to original location
+                try:
+                    h264_folder = input_path.parent / 'h264'
+                    h264_folder.mkdir(parents=True, exist_ok=True)
+                    h264_backup_path = h264_folder / input_path.name
+
+                    # Move original to h264/
+                    input_path.rename(h264_backup_path)
+                    self.root.after(0, lambda: self.log(
+                        f"Moved original to h264/{input_path.name}", "info"))
+
+                    # Move h265 output to original location
+                    final_path = input_path  # Same name/location as original
+                    output_path.rename(final_path)
+                    self.root.after(0, lambda: self.log(
+                        f"Moved H.265 to original location", "info"))
+
+                    # Update output_path for logging
+                    self.mark_processed(h264_backup_path, str(final_path), "done", input_size, output_size)
+                    self.write_success_log(h264_backup_path, final_path, input_size, output_size)
+
+                except Exception as move_err:
+                    self.root.after(0, lambda e=move_err: self.log(
+                        f"File reorganization failed: {e}", "error"))
+                    # Still mark as done since encoding succeeded
+                    self.mark_processed(input_path, str(output_path), "done", input_size, output_size)
+                    self.write_success_log(input_path, output_path, input_size, output_size)
             else:
                 # Show the actual error from FFmpeg
                 error_msg = "\n".join(last_lines[-5:]) if last_lines else "Unknown error"
