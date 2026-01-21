@@ -245,6 +245,33 @@ class TranscoderGUI:
         self.running = False
         self.root.destroy()
 
+    def set_dropbox_online_only(self, file_path: Path):
+        """
+        Mark a file as online-only in Dropbox to free up local space.
+        Uses Windows attrib command to set Unpinned attribute.
+        """
+        try:
+            # Use attrib to mark as Unpinned (+U) and remove Pinned (-P)
+            # This tells Dropbox to make the file online-only
+            result = subprocess.run(
+                ['attrib', '+U', '-P', str(file_path)],
+                capture_output=True, text=True, timeout=30
+            )
+            if result.returncode == 0:
+                self.root.after(0, lambda p=file_path.name: self.log(
+                    f"Marked as online-only: {p}", "info"))
+                return True
+            else:
+                self.root.after(0, lambda: self.log(
+                    f"Could not set online-only (attrib failed)", "warning"))
+        except FileNotFoundError:
+            self.root.after(0, lambda: self.log(
+                "attrib command not found", "warning"))
+        except Exception as e:
+            self.root.after(0, lambda err=e: self.log(
+                f"Error setting online-only: {err}", "warning"))
+        return False
+
     def notify_queue_finished(self):
         """Play beep and unminimize window when encoding queue finishes."""
         # Beep sound
@@ -724,6 +751,9 @@ class TranscoderGUI:
                     input_path.rename(h264_backup_path)
                     self.root.after(0, lambda: self.log(
                         f"Moved original to h264/{input_path.name}", "info"))
+
+                    # Mark h264 backup as online-only to free up local space
+                    self.set_dropbox_online_only(h264_backup_path)
 
                     # Move h265 output to original location
                     final_path = input_path  # Same name/location as original
