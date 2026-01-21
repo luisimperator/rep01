@@ -17,6 +17,13 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
+# Windows-specific for beep sound
+try:
+    import winsound
+    HAS_WINSOUND = True
+except ImportError:
+    HAS_WINSOUND = False
+
 
 class TranscoderGUI:
     # Settings file path
@@ -35,12 +42,13 @@ class TranscoderGUI:
         self.worker_thread = None
         self.current_file = None
         self.db_conn = None
+        self.files_in_batch = 0  # Track files processed in current batch
 
         # Default settings
         self.watch_folder = tk.StringVar(value=r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
         self.log_folder = tk.StringVar(value=r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter\logs")
         self.min_size_gb = tk.DoubleVar(value=0)
-        self.encoder = tk.StringVar(value="cpu")
+        self.encoder = tk.StringVar(value="nvenc")
         self.cq_value = tk.IntVar(value=24)
 
         # Stats
@@ -236,6 +244,29 @@ class TranscoderGUI:
         self.save_settings()
         self.running = False
         self.root.destroy()
+
+    def notify_queue_finished(self):
+        """Play beep and unminimize window when encoding queue finishes."""
+        # Beep sound
+        if HAS_WINSOUND:
+            try:
+                # Play 3 beeps
+                winsound.Beep(800, 200)  # frequency, duration_ms
+                time.sleep(0.1)
+                winsound.Beep(1000, 200)
+                time.sleep(0.1)
+                winsound.Beep(1200, 300)
+            except:
+                pass
+
+        # Unminimize and bring to front
+        def bring_to_front():
+            self.root.deiconify()  # Restore if minimized
+            self.root.lift()       # Bring to front
+            self.root.focus_force()  # Force focus
+            self.log("✓ Queue finished! All files processed.", "success")
+
+        self.root.after(0, bring_to_front)
 
     def write_success_log(self, input_path: Path, output_path: Path, input_size: int, output_size: int):
         """Write successful encoding to log file."""
@@ -515,6 +546,9 @@ class TranscoderGUI:
 
         self.root.after(0, lambda: self.log(f"Found {len(video_files)} video files"))
 
+        # Track files processed in this scan
+        files_processed_this_scan = 0
+
         for video_path in video_files:
             if not self.running and self.worker_thread:
                 break
@@ -528,6 +562,11 @@ class TranscoderGUI:
                 continue
 
             self.process_file(video_path)
+            files_processed_this_scan += 1
+
+        # Notify user if we finished processing files and queue is empty
+        if files_processed_this_scan > 0:
+            self.notify_queue_finished()
 
     def wait_for_file_ready(self, file_path: Path, timeout_minutes: int = 60) -> bool:
         """
