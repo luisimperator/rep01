@@ -501,31 +501,40 @@ class TranscoderGUI:
 
         triggered = 0
         already_local = 0
-        errors = 0
+        cloud_files = 0
 
         for video_path in video_files:
             try:
-                # Try to read 1 byte from the file - this triggers Dropbox download
-                with open(video_path, 'rb') as f:
-                    f.read(1)
-
-                # Check file size to see if it's fully downloaded
+                # Check file size first
                 size = video_path.stat().st_size
-                if size > 1000:  # More than 1KB means probably downloaded
+
+                # If file is very small, it's probably online-only
+                if size < 1000:
+                    cloud_files += 1
+                    self._trigger_dropbox_download(video_path)
+                    continue
+
+                # Try to read 1 byte from the file - this triggers Dropbox download
+                try:
+                    with open(video_path, 'rb') as f:
+                        f.read(1)
                     already_local += 1
-                else:
-                    triggered += 1
-                    self.root.after(0, lambda p=video_path.name: self.log(f"Triggered download: {p}", "info"))
+                except OSError as e:
+                    if e.errno == 22:  # Invalid argument - cloud file
+                        cloud_files += 1
+                        self._trigger_dropbox_download(video_path)
+                    else:
+                        raise
+
             except PermissionError:
                 # File is being synced by Dropbox
                 triggered += 1
-                self.root.after(0, lambda p=video_path.name: self.log(f"Syncing: {p}", "info"))
-            except Exception as e:
-                errors += 1
-                self.root.after(0, lambda p=video_path.name, err=e: self.log(f"Error accessing {p}: {err}", "warning"))
+            except Exception:
+                # Silent - don't spam log with errors for each file
+                cloud_files += 1
 
         self.root.after(0, lambda: self.log(
-            f"Scan complete: {already_local} local, {triggered} triggered, {errors} errors", "success"))
+            f"Scan complete: {already_local} local, {cloud_files} cloud (downloading), {triggered} syncing", "success"))
 
     def process_loop(self):
         """Main processing loop."""
@@ -602,30 +611,56 @@ class TranscoderGUI:
         """
         max_wait = timeout_minutes * 60  # Convert to seconds
         waited = 0
-        check_interval = 5  # Check every 5 seconds
+        check_interval = 10  # Check every 10 seconds
+        download_triggered = False
 
         while waited < max_wait and self.running:
             try:
-                # Try to read some bytes - this triggers Dropbox download
-                with open(file_path, 'rb') as f:
-                    f.read(1024)  # Read 1KB
+                # First check if file exists and get its size
+                if not file_path.exists():
+                    self.root.after(0, lambda: self.log(
+                        f"File not found, skipping", "warning"))
+                    return False
 
-                # Get current size
+                # Get file size - this works even for online-only files
                 current_size = file_path.stat().st_size
 
-                # If file is very small, it might be a placeholder - wait
-                if current_size < 10000:  # Less than 10KB is probably a placeholder
-                    self.root.after(0, lambda: self.log(
-                        f"Waiting for Dropbox download... ({waited}s)", "info"))
+                # If file is very small, it's probably a placeholder
+                if current_size < 10000:  # Less than 10KB
+                    if not download_triggered:
+                        self.root.after(0, lambda: self.log(
+                            f"Online-only file detected, triggering download...", "info"))
+                        self._trigger_dropbox_download(file_path)
+                        download_triggered = True
+                    self.root.after(0, lambda w=waited: self.log(
+                        f"Waiting for Dropbox download... ({w}s)", "info"))
                     time.sleep(check_interval)
                     waited += check_interval
                     continue
+
+                # Try to read some bytes to verify file is accessible
+                try:
+                    with open(file_path, 'rb') as f:
+                        f.read(1024)  # Read 1KB
+                except OSError as e:
+                    if e.errno == 22:  # Invalid argument - online-only file
+                        if not download_triggered:
+                            self.root.after(0, lambda: self.log(
+                                f"Cloud file detected, triggering download...", "info"))
+                            self._trigger_dropbox_download(file_path)
+                            download_triggered = True
+                        self.root.after(0, lambda w=waited: self.log(
+                            f"Waiting for cloud file... ({w}s)", "info"))
+                        time.sleep(check_interval)
+                        waited += check_interval
+                        continue
+                    raise
 
                 # Wait a bit and check if size is stable (file finished downloading)
                 time.sleep(3)
                 new_size = file_path.stat().st_size
 
-                if current_size == new_size:
+                if current_size == new_size and current_size > 10000:
                     # File is stable and ready
                     return True
                 else:
@@ -638,20 +673,44 @@ class TranscoderGUI:
 
             except PermissionError:
                 # File is being used by Dropbox - wait
-                self.root.after(0, lambda: self.log(
-                    f"File locked by Dropbox, waiting... ({waited}s)", "info"))
+                self.root.after(0, lambda w=waited: self.log(
+                    f"File locked by Dropbox, waiting... ({w}s)", "info"))
                 time.sleep(check_interval)
                 waited += check_interval
 
             except Exception as e:
-                self.root.after(0, lambda err=e: self.log(f"Error waiting for file: {err}", "warning"))
-                time.sleep(check_interval)
-                waited += check_interval
+                # For other errors, skip this file for now
+                self.root.after(0, lambda err=e: self.log(
+                    f"Cannot access file: {err} - skipping for now", "warning"))
+                return False
 
         if waited >= max_wait:
             self.root.after(0, lambda: self.log(
                 f"Timeout waiting for file download ({timeout_minutes} min)", "error"))
         return False
+
+    def _trigger_dropbox_download(self, file_path: Path):
+        """
+        Try to trigger Dropbox to download a cloud-only file.
+        Uses multiple methods since different Dropbox versions behave differently.
+        """
+        try:
+            # Method 1: Use attrib to remove Unpinned attribute (request download)
+            subprocess.run(
+                ['attrib', '-U', '+P', str(file_path)],
+                capture_output=True, timeout=10
+            )
+        except:
+            pass
+
+        try:
+            # Method 2: Use PowerShell to access the file (triggers download)
+            subprocess.run(
+                ['powershell', '-Command', f'Get-Content -Path "{file_path}" -TotalCount 1 -ErrorAction SilentlyContinue'],
+                capture_output=True, timeout=30
+            )
+        except:
+            pass
 
     def process_file(self, input_path: Path):
         """Process a single file."""
