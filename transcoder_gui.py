@@ -11,6 +11,7 @@ import time
 import json
 import re
 import sqlite3
+import shutil
 import threading
 from pathlib import Path
 from datetime import datetime
@@ -606,88 +607,65 @@ class TranscoderGUI:
 
     def wait_for_file_ready(self, file_path: Path, timeout_minutes: int = 60) -> bool:
         """
-        Wait for a file to be fully downloaded from Dropbox.
-        Returns True if file is ready, False if timeout or stopped.
+        Check if a file is ready (fully downloaded from Dropbox).
+        If file is online-only, triggers download and returns False immediately
+        so the program can continue with other files.
+        Returns True if file is ready, False if not ready yet.
         """
-        max_wait = timeout_minutes * 60  # Convert to seconds
-        waited = 0
-        check_interval = 10  # Check every 10 seconds
-        download_triggered = False
-
-        while waited < max_wait and self.running:
-            try:
-                # First check if file exists and get its size
-                if not file_path.exists():
-                    self.root.after(0, lambda: self.log(
-                        f"File not found, skipping", "warning"))
-                    return False
-
-                # Get file size - this works even for online-only files
-                current_size = file_path.stat().st_size
-
-                # If file is very small, it's probably a placeholder
-                if current_size < 10000:  # Less than 10KB
-                    if not download_triggered:
-                        self.root.after(0, lambda: self.log(
-                            f"Online-only file detected, triggering download...", "info"))
-                        self._trigger_dropbox_download(file_path)
-                        download_triggered = True
-                    self.root.after(0, lambda w=waited: self.log(
-                        f"Waiting for Dropbox download... ({w}s)", "info"))
-                    time.sleep(check_interval)
-                    waited += check_interval
-                    continue
-
-                # Try to read some bytes to verify file is accessible
-                try:
-                    with open(file_path, 'rb') as f:
-                        f.read(1024)  # Read 1KB
-                except OSError as e:
-                    if e.errno == 22:  # Invalid argument - online-only file
-                        if not download_triggered:
-                            self.root.after(0, lambda: self.log(
-                                f"Cloud file detected, triggering download...", "info"))
-                            self._trigger_dropbox_download(file_path)
-                            download_triggered = True
-                        self.root.after(0, lambda w=waited: self.log(
-                            f"Waiting for cloud file... ({w}s)", "info"))
-                        time.sleep(check_interval)
-                        waited += check_interval
-                        continue
-                    raise
-
-                # Wait a bit and check if size is stable (file finished downloading)
-                time.sleep(3)
-                new_size = file_path.stat().st_size
-
-                if current_size == new_size and current_size > 10000:
-                    # File is stable and ready
-                    return True
-                else:
-                    # Still downloading
-                    progress_mb = new_size / (1024**2)
-                    self.root.after(0, lambda p=progress_mb: self.log(
-                        f"Downloading from Dropbox... {p:.1f} MB", "info"))
-                    time.sleep(check_interval)
-                    waited += check_interval
-
-            except PermissionError:
-                # File is being used by Dropbox - wait
-                self.root.after(0, lambda w=waited: self.log(
-                    f"File locked by Dropbox, waiting... ({w}s)", "info"))
-                time.sleep(check_interval)
-                waited += check_interval
-
-            except Exception as e:
-                # For other errors, skip this file for now
-                self.root.after(0, lambda err=e: self.log(
-                    f"Cannot access file: {err} - skipping for now", "warning"))
+        try:
+            # First check if file exists
+            if not file_path.exists():
+                self.root.after(0, lambda: self.log(
+                    f"File not found, skipping", "warning"))
                 return False
 
-        if waited >= max_wait:
+            # Get file size - this works even for online-only files
+            current_size = file_path.stat().st_size
+
+            # If file is very small, it's probably a placeholder (online-only)
+            if current_size < 10000:  # Less than 10KB
+                self.root.after(0, lambda: self.log(
+                    f"Online-only file, triggering download and moving to next...", "info"))
+                self._trigger_dropbox_download(file_path)
+                return False  # Skip for now, will retry next scan
+
+            # Try to read some bytes to verify file is accessible
+            try:
+                with open(file_path, 'rb') as f:
+                    f.read(1024)  # Read 1KB
+            except OSError as e:
+                if e.errno == 22:  # Invalid argument - online-only file
+                    self.root.after(0, lambda: self.log(
+                        f"Cloud file detected, triggering download and moving to next...", "info"))
+                    self._trigger_dropbox_download(file_path)
+                    return False  # Skip for now, will retry next scan
+                raise
+
+            # Check if size is stable (file finished downloading)
+            time.sleep(2)
+            new_size = file_path.stat().st_size
+
+            if current_size == new_size and current_size > 10000:
+                # File is stable and ready
+                return True
+            else:
+                # Still downloading - skip and come back later
+                progress_mb = new_size / (1024**2)
+                self.root.after(0, lambda p=progress_mb: self.log(
+                    f"File still downloading ({p:.1f} MB), moving to next...", "info"))
+                return False
+
+        except PermissionError:
+            # File is being used by Dropbox - skip for now
             self.root.after(0, lambda: self.log(
-                f"Timeout waiting for file download ({timeout_minutes} min)", "error"))
-        return False
+                f"File locked by Dropbox, moving to next...", "info"))
+            return False
+
+        except Exception as e:
+            # For other errors, skip this file for now
+            self.root.after(0, lambda err=e: self.log(
+                f"Cannot access file: {err} - skipping", "warning"))
+            return False
 
     def _trigger_dropbox_download(self, file_path: Path):
         """
@@ -801,22 +779,23 @@ class TranscoderGUI:
                 # Reorganize files:
                 # 1. Move original H.264 to h264/ folder
                 # 2. Move H.265 from h265/ to original location
+                # Using shutil.move() to ensure proper move (not copy) for Dropbox
                 try:
                     h264_folder = input_path.parent / 'h264'
                     h264_folder.mkdir(parents=True, exist_ok=True)
                     h264_backup_path = h264_folder / input_path.name
 
-                    # Move original to h264/
-                    input_path.rename(h264_backup_path)
+                    # Move original to h264/ using shutil.move for proper Dropbox move
+                    shutil.move(str(input_path), str(h264_backup_path))
                     self.root.after(0, lambda: self.log(
                         f"Moved original to h264/{input_path.name}", "info"))
 
                     # Mark h264 backup as online-only to free up local space
                     self.set_dropbox_online_only(h264_backup_path)
 
-                    # Move h265 output to original location
+                    # Move h265 output to original location using shutil.move
                     final_path = input_path  # Same name/location as original
-                    output_path.rename(final_path)
+                    shutil.move(str(output_path), str(final_path))
                     self.root.after(0, lambda: self.log(
                         f"Moved H.265 to original location", "info"))
 
