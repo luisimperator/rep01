@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.0.6"
+VERSION = "1.0.7"
 
 import socket
 import subprocess
@@ -1149,19 +1149,10 @@ class TranscoderGUI:
             wav_backup_path = wav_folder / wav_path.name
             shutil.move(str(wav_path), str(wav_backup_path))
             self.root.after(0, lambda: self.log(
-                "WAV moved to backup, waiting 30s for Dropbox sync...", "info"))
+                "WAV moved to backup, will delete in 30s...", "info"))
 
-            # Wait 30 seconds for Dropbox to sync the move
-            time.sleep(30)
-
-            # Delete the WAV backup (user said these files are not important)
-            try:
-                wav_backup_path.unlink()
-                self.root.after(0, lambda: self.log(
-                    "Original WAV deleted after sync wait", "info"))
-            except Exception as e:
-                self.root.after(0, lambda err=e: self.log(
-                    f"Could not delete WAV: {err}", "warning"))
+            # Schedule deletion in background (don't block processing)
+            self._schedule_wav_deletion(wav_backup_path)
 
             # Mark as processed
             self.mark_processed(wav_path, str(mp3_path), "done", input_size, output_size)
@@ -1175,6 +1166,22 @@ class TranscoderGUI:
             self.root.after(0, lambda err=e: self.log(
                 f"Error converting {wav_path.name}: {err}", "error"))
             return False
+
+    def _schedule_wav_deletion(self, wav_path: Path):
+        """Schedule WAV file deletion after 30 seconds (in background thread)."""
+        def delete_after_delay():
+            time.sleep(30)  # Wait for Dropbox to sync
+            try:
+                if wav_path.exists():
+                    wav_path.unlink()
+                    self.root.after(0, lambda p=wav_path.name: self.log(
+                        f"WAV deleted: {p}", "info"))
+            except Exception as e:
+                self.root.after(0, lambda err=e: self.log(
+                    f"Could not delete WAV: {err}", "warning"))
+
+        # Run in background thread
+        threading.Thread(target=delete_after_delay, daemon=True).start()
 
     def _verify_mp3(self, mp3_path: Path) -> bool:
         """Verify MP3 file is valid using ffprobe."""
