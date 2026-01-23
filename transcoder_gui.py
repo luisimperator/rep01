@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.1.5"
+VERSION = "1.1.6"
 
 import socket
 import subprocess
@@ -305,6 +305,28 @@ class TranscoderGUI:
         self.save_settings()
         self.running = False
         self.root.destroy()
+
+    def _move_with_retry(self, src: Path, dst: Path, max_retries: int = 5, delay: float = 2.0):
+        """
+        Move file with retry logic to handle file locks (FFmpeg/Dropbox).
+        Waits between retries to give other processes time to release the file.
+        """
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                shutil.move(str(src), str(dst))
+                return  # Success
+            except PermissionError as e:
+                last_error = e
+                if attempt < max_retries - 1:
+                    self.root.after(0, lambda a=attempt+1, d=delay: self.log(
+                        f"File locked, retry {a}/{max_retries-1} in {d}s...", "info"))
+                    time.sleep(delay)
+            except Exception as e:
+                raise e  # Re-raise non-permission errors immediately
+
+        # All retries failed
+        raise last_error
 
     def set_dropbox_online_only(self, file_path: Path):
         """
@@ -1591,23 +1613,23 @@ class TranscoderGUI:
             # Reorganize files:
             # 1. Move original H.264 to h264/ folder
             # 2. Move H.265 from h265/ to original location
-            # Using shutil.move() to ensure proper move (not copy) for Dropbox
+            # Using shutil.move() with retry to handle file locks (FFmpeg/Dropbox)
             try:
                 h264_folder = input_path.parent / 'h264'
                 h264_folder.mkdir(parents=True, exist_ok=True)
                 h264_backup_path = h264_folder / input_path.name
 
-                # Move original to h264/ using shutil.move for proper Dropbox move
-                shutil.move(str(input_path), str(h264_backup_path))
+                # Move original to h264/ with retry
+                self._move_with_retry(input_path, h264_backup_path)
                 self.root.after(0, lambda: self.log(
                     f"Moved original to h264/{input_path.name}", "info"))
 
                 # Mark h264 backup as online-only to free up local space
                 self.set_dropbox_online_only(h264_backup_path)
 
-                # Move h265 output to original location using shutil.move
+                # Move h265 output to original location with retry
                 final_path = input_path  # Same name/location as original
-                shutil.move(str(output_path), str(final_path))
+                self._move_with_retry(output_path, final_path)
                 self.root.after(0, lambda: self.log(
                     f"Moved H.265 to original location", "info"))
 
