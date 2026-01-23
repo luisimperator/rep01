@@ -572,6 +572,13 @@ class TranscoderGUI:
             self.root.after(0, lambda: self.log(f"Folder not found: {folder}", "error"))
             return
 
+        # Check disk space before starting
+        free_gb = self.get_free_disk_space(folder)
+        if free_gb < 5:  # Less than 5GB free
+            self.root.after(0, lambda g=free_gb: self.log(
+                f"Low disk space ({g:.1f} GB free). Waiting...", "warning"))
+            return
+
         self.root.after(0, lambda: self.log(f"Scanning {folder}..."))
 
         # Find video files
@@ -581,29 +588,60 @@ class TranscoderGUI:
                 if 'h265' not in str(f).lower() and 'h264' not in str(f).lower():
                     video_files.append(f)
 
-        self.root.after(0, lambda: self.log(f"Found {len(video_files)} video files"))
+        # Filter to only unprocessed files and sort by size (smaller first)
+        pending_files = []
+        for f in video_files:
+            if not self.is_processed(f):
+                try:
+                    size = f.stat().st_size
+                    if size / (1024**3) >= self.min_size_gb.get():
+                        pending_files.append((f, size))
+                except:
+                    pass
+
+        # Sort by size (ascending) - smaller files first for faster feedback
+        pending_files.sort(key=lambda x: x[1])
+
+        total_pending = len(pending_files)
+        self.root.after(0, lambda t=total_pending, a=len(video_files): self.log(
+            f"Found {a} videos, {t} pending"))
 
         # Track files processed in this scan
         files_processed_this_scan = 0
 
-        for video_path in video_files:
-            if not self.running and self.worker_thread:
+        for idx, (video_path, file_size) in enumerate(pending_files):
+            if not self.running:
                 break
 
-            if self.is_processed(video_path):
-                continue
+            # Check disk space before each file
+            free_gb = self.get_free_disk_space(folder)
+            if free_gb < 5:
+                self.root.after(0, lambda g=free_gb: self.log(
+                    f"Low disk space ({g:.1f} GB). Pausing...", "warning"))
+                break
 
-            size_gb = video_path.stat().st_size / (1024**3)
-            if size_gb < self.min_size_gb.get():
-                self.mark_processed(video_path, "", "skipped_small", video_path.stat().st_size, 0)
-                continue
+            # Update queue counter
+            self.root.after(0, lambda i=idx+1, t=total_pending:
+                self.current_file_label.config(text=f"Queue: {i}/{t}"))
 
-            self.process_file(video_path)
+            self.process_file(video_path, queue_pos=idx+1, queue_total=total_pending)
             files_processed_this_scan += 1
 
         # Notify user if we finished processing files and queue is empty
         if files_processed_this_scan > 0:
             self.notify_queue_finished()
+
+    def get_free_disk_space(self, path: Path) -> float:
+        """Get free disk space in GB for the drive containing path."""
+        try:
+            import ctypes
+            free_bytes = ctypes.c_ulonglong(0)
+            ctypes.windll.kernel32.GetDiskFreeSpaceExW(
+                str(path), None, None, ctypes.pointer(free_bytes)
+            )
+            return free_bytes.value / (1024**3)
+        except:
+            return 999  # Assume enough space if can't check
 
     def wait_for_file_ready(self, file_path: Path, timeout_minutes: int = 60) -> bool:
         """
@@ -690,11 +728,12 @@ class TranscoderGUI:
         except:
             pass
 
-    def process_file(self, input_path: Path):
+    def process_file(self, input_path: Path, queue_pos: int = 0, queue_total: int = 0):
         """Process a single file."""
-        self.root.after(0, lambda: self.current_file_label.config(
-            text=f"Processing: {input_path.name}"))
-        self.root.after(0, lambda: self.log(f"Processing: {input_path.name}"))
+        queue_str = f"[{queue_pos}/{queue_total}] " if queue_pos else ""
+        self.root.after(0, lambda q=queue_str: self.current_file_label.config(
+            text=f"{q}Processing: {input_path.name}"))
+        self.root.after(0, lambda q=queue_str: self.log(f"{q}Processing: {input_path.name}"))
 
         # Wait for file to be fully downloaded from Dropbox
         if not self.wait_for_file_ready(input_path):
@@ -731,99 +770,93 @@ class TranscoderGUI:
         output_folder.mkdir(parents=True, exist_ok=True)
         temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
 
-        cmd = self.build_ffmpeg_command(input_path, temp_path)
-        self.root.after(0, lambda: self.log(f"Encoding with {self.encoder.get()}..."))
-
         # Get video duration for progress calculation
         duration = self.get_duration(probe_data)
 
-        # Reset progress bar
-        self.root.after(0, lambda: self.progress_var.set(0))
+        # Try encoding with current encoder, fallback to CPU if fails
+        encoder = self.encoder.get()
+        encoders_to_try = [encoder]
+        if encoder != 'cpu':
+            encoders_to_try.append('cpu')  # Add CPU as fallback
 
-        try:
-            # Log the command for debugging
-            self.root.after(0, lambda: self.log(f"CMD: {' '.join(cmd[:6])}...", "info"))
+        encoding_success = False
+        for try_encoder in encoders_to_try:
+            if not self.running:
+                break
 
-            self.current_process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
-            )
-            process = self.current_process
+            self.root.after(0, lambda e=try_encoder: self.log(f"Encoding with {e}..."))
+            cmd = self.build_ffmpeg_command(input_path, temp_path, encoder=try_encoder)
 
-            last_lines = []  # Keep last few lines for error reporting
-            for line in process.stdout:
-                last_lines.append(line.strip())
-                if len(last_lines) > 10:
-                    last_lines.pop(0)
-                if 'time=' in line:
-                    # Parse time and calculate progress
-                    current_time = self.parse_ffmpeg_time(line)
-                    if duration > 0 and current_time >= 0:
-                        progress = min(100, (current_time / duration) * 100)
-                        self.root.after(0, lambda p=progress: self.progress_var.set(p))
-                        self.root.after(0, lambda p=progress: self.progress_label.config(
-                            text=f"{p:.1f}% - {line.strip()[-60:]}"))
-                    else:
-                        self.root.after(0, lambda l=line: self.progress_label.config(text=l.strip()[-80:]))
+            # Reset progress bar
+            self.root.after(0, lambda: self.progress_var.set(0))
 
-            process.wait()
+            success, error_msg = self._run_ffmpeg(cmd, duration)
 
-            if process.returncode == 0 and temp_path.exists():
-                temp_path.rename(output_path)
-                input_size = input_path.stat().st_size
-                output_size = output_path.stat().st_size
-                reduction = (1 - output_size/input_size) * 100
-
-                self.root.after(0, lambda: self.log(
-                    f"Done! {reduction:.1f}% smaller", "success"))
-
-                # Reorganize files:
-                # 1. Move original H.264 to h264/ folder
-                # 2. Move H.265 from h265/ to original location
-                # Using shutil.move() to ensure proper move (not copy) for Dropbox
-                try:
-                    h264_folder = input_path.parent / 'h264'
-                    h264_folder.mkdir(parents=True, exist_ok=True)
-                    h264_backup_path = h264_folder / input_path.name
-
-                    # Move original to h264/ using shutil.move for proper Dropbox move
-                    shutil.move(str(input_path), str(h264_backup_path))
+            if success and temp_path.exists():
+                # Verify output file is valid
+                if self._verify_output(temp_path):
+                    encoding_success = True
+                    break
+                else:
                     self.root.after(0, lambda: self.log(
-                        f"Moved original to h264/{input_path.name}", "info"))
-
-                    # Mark h264 backup as online-only to free up local space
-                    self.set_dropbox_online_only(h264_backup_path)
-
-                    # Move h265 output to original location using shutil.move
-                    final_path = input_path  # Same name/location as original
-                    shutil.move(str(output_path), str(final_path))
-                    self.root.after(0, lambda: self.log(
-                        f"Moved H.265 to original location", "info"))
-
-                    # Update output_path for logging
-                    self.mark_processed(h264_backup_path, str(final_path), "done", input_size, output_size)
-                    self.write_success_log(h264_backup_path, final_path, input_size, output_size)
-
-                except Exception as move_err:
-                    self.root.after(0, lambda e=move_err: self.log(
-                        f"File reorganization failed: {e}", "error"))
-                    # Still mark as done since encoding succeeded
-                    self.mark_processed(input_path, str(output_path), "done", input_size, output_size)
-                    self.write_success_log(input_path, output_path, input_size, output_size)
+                        f"Output verification failed with {try_encoder}", "warning"))
+                    if temp_path.exists():
+                        temp_path.unlink()
             else:
-                # Show the actual error from FFmpeg
-                error_msg = "\n".join(last_lines[-5:]) if last_lines else "Unknown error"
-                self.root.after(0, lambda: self.log(f"Encoding failed (code {process.returncode})", "error"))
-                self.root.after(0, lambda e=error_msg: self.log(f"FFmpeg output: {e}", "error"))
-                self.mark_processed(input_path, "", "error", 0, 0)
+                self.root.after(0, lambda e=try_encoder: self.log(
+                    f"Encoding failed with {e}", "warning"))
+                if try_encoder != encoders_to_try[-1]:
+                    self.root.after(0, lambda: self.log("Trying fallback encoder...", "info"))
                 if temp_path.exists():
                     temp_path.unlink()
 
-        except Exception as e:
-            self.root.after(0, lambda: self.log(f"Error: {e}", "error"))
-            import traceback
-            self.root.after(0, lambda: self.log(f"Traceback: {traceback.format_exc()}", "error"))
+        if encoding_success:
+            temp_path.rename(output_path)
+            input_size = input_path.stat().st_size
+            output_size = output_path.stat().st_size
+            reduction = (1 - output_size/input_size) * 100
+
+            self.root.after(0, lambda r=reduction: self.log(
+                f"Done! {r:.1f}% smaller", "success"))
+
+            # Reorganize files:
+            # 1. Move original H.264 to h264/ folder
+            # 2. Move H.265 from h265/ to original location
+            # Using shutil.move() to ensure proper move (not copy) for Dropbox
+            try:
+                h264_folder = input_path.parent / 'h264'
+                h264_folder.mkdir(parents=True, exist_ok=True)
+                h264_backup_path = h264_folder / input_path.name
+
+                # Move original to h264/ using shutil.move for proper Dropbox move
+                shutil.move(str(input_path), str(h264_backup_path))
+                self.root.after(0, lambda: self.log(
+                    f"Moved original to h264/{input_path.name}", "info"))
+
+                # Mark h264 backup as online-only to free up local space
+                self.set_dropbox_online_only(h264_backup_path)
+
+                # Move h265 output to original location using shutil.move
+                final_path = input_path  # Same name/location as original
+                shutil.move(str(output_path), str(final_path))
+                self.root.after(0, lambda: self.log(
+                    f"Moved H.265 to original location", "info"))
+
+                # Update output_path for logging
+                self.mark_processed(h264_backup_path, str(final_path), "done", input_size, output_size)
+                self.write_success_log(h264_backup_path, final_path, input_size, output_size)
+
+            except Exception as move_err:
+                self.root.after(0, lambda e=move_err: self.log(
+                    f"File reorganization failed: {e}", "error"))
+                # Still mark as done since encoding succeeded
+                self.mark_processed(input_path, str(output_path), "done", input_size, output_size)
+                self.write_success_log(input_path, output_path, input_size, output_size)
+        else:
+            self.root.after(0, lambda: self.log("All encoders failed!", "error"))
             self.mark_processed(input_path, "", "error", 0, 0)
 
+        # Cleanup
         self.current_process = None
         self.root.after(0, lambda: self.progress_var.set(0))
         self.root.after(0, lambda: self.progress_label.config(text=""))
@@ -880,9 +913,124 @@ class TranscoderGUI:
             pass
         return -1
 
-    def build_ffmpeg_command(self, input_path: Path, output_path: Path) -> list:
+    def _format_eta(self, seconds: float) -> str:
+        """Format seconds into human-readable ETA string."""
+        if seconds < 0:
+            return "calculating..."
+        if seconds < 60:
+            return f"{int(seconds)}s"
+        elif seconds < 3600:
+            m, s = divmod(int(seconds), 60)
+            return f"{m}m {s}s"
+        else:
+            h, remainder = divmod(int(seconds), 3600)
+            m, s = divmod(remainder, 60)
+            return f"{h}h {m}m"
+
+    def _run_ffmpeg(self, cmd: list, duration: float) -> tuple:
+        """
+        Run FFmpeg command and track progress.
+        Returns (success: bool, error_msg: str)
+        """
+        try:
+            self.root.after(0, lambda: self.log(f"CMD: {' '.join(cmd[:6])}...", "info"))
+
+            self.current_process = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+            )
+            process = self.current_process
+
+            last_lines = []
+            start_time = time.time()
+            last_video_time = 0
+
+            for line in process.stdout:
+                if not self.running:
+                    process.terminate()
+                    return False, "Stopped by user"
+
+                last_lines.append(line.strip())
+                if len(last_lines) > 10:
+                    last_lines.pop(0)
+
+                if 'time=' in line:
+                    current_time = self.parse_ffmpeg_time(line)
+                    if duration > 0 and current_time >= 0:
+                        progress = min(100, (current_time / duration) * 100)
+                        self.root.after(0, lambda p=progress: self.progress_var.set(p))
+
+                        # Calculate ETA
+                        elapsed = time.time() - start_time
+                        if current_time > 0 and elapsed > 2:  # After 2 seconds
+                            speed = current_time / elapsed  # video seconds per real second
+                            remaining_video = duration - current_time
+                            if speed > 0:
+                                eta_seconds = remaining_video / speed
+                                eta_str = self._format_eta(eta_seconds)
+                                self.root.after(0, lambda p=progress, e=eta_str:
+                                    self.progress_label.config(text=f"{p:.1f}% - ETA: {e}"))
+                            else:
+                                self.root.after(0, lambda p=progress:
+                                    self.progress_label.config(text=f"{p:.1f}%"))
+                        else:
+                            self.root.after(0, lambda p=progress:
+                                self.progress_label.config(text=f"{p:.1f}%"))
+                    else:
+                        self.root.after(0, lambda l=line: self.progress_label.config(
+                            text=l.strip()[-80:]))
+
+            process.wait()
+
+            if process.returncode == 0:
+                return True, ""
+            else:
+                error_msg = "\n".join(last_lines[-5:]) if last_lines else "Unknown error"
+                return False, error_msg
+
+        except Exception as e:
+            return False, str(e)
+        finally:
+            self.current_process = None
+
+    def _verify_output(self, output_path: Path) -> bool:
+        """
+        Verify output file is a valid video using ffprobe.
+        Returns True if file is valid and playable.
+        """
+        try:
+            # Check file exists and has reasonable size
+            if not output_path.exists():
+                return False
+            if output_path.stat().st_size < 1000:  # Less than 1KB
+                return False
+
+            # Use ffprobe to check if file is valid
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                 '-show_entries', 'stream=codec_name', '-of', 'csv=p=0',
+                 str(output_path)],
+                capture_output=True, text=True, timeout=30
+            )
+
+            # Should return 'hevc' or 'h265' for valid output
+            codec = result.stdout.strip().lower()
+            if codec in ('hevc', 'h265'):
+                self.root.after(0, lambda: self.log("Output verified: valid HEVC", "info"))
+                return True
+            else:
+                self.root.after(0, lambda c=codec: self.log(
+                    f"Verification failed: codec={c}", "warning"))
+                return False
+
+        except Exception as e:
+            self.root.after(0, lambda err=e: self.log(
+                f"Verification error: {err}", "warning"))
+            return False
+
+    def build_ffmpeg_command(self, input_path: Path, output_path: Path, encoder: str = None) -> list:
         """Build FFmpeg command."""
-        encoder = self.encoder.get()
+        if encoder is None:
+            encoder = self.encoder.get()
         cq = self.cq_value.get()
 
         # -map 0:v = video streams, -map 0:a? = audio (optional, ? means don't fail if no audio)
