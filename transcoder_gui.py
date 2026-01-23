@@ -17,8 +17,9 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.0"
+VERSION = "1.1"
 
+import socket
 import subprocess
 import sys
 import time
@@ -144,6 +145,7 @@ class TranscoderGUI:
         self.stop_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Button(control_frame, text="🔍 Scan", command=self.scan_and_trigger_download).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(control_frame, text="📊 Report", command=self.generate_report).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="📁 Open Folder", command=self.open_folder).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🔄 Reset Failed", command=self.reset_failed).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🗑 Clear History", command=self.clear_history).pack(side=tk.LEFT)
@@ -310,12 +312,20 @@ class TranscoderGUI:
 
         self.root.after(0, bring_to_front)
 
+    def get_machine_name(self) -> str:
+        """Get machine name for log files."""
+        try:
+            return socket.gethostname()
+        except:
+            return "unknown"
+
     def write_success_log(self, input_path: Path, output_path: Path, input_size: int, output_size: int):
         """Write successful encoding to log file."""
         try:
             log_folder = Path(self.log_folder.get())
             log_folder.mkdir(parents=True, exist_ok=True)
-            log_file = log_folder / "encoding_history.log"
+            machine_name = self.get_machine_name()
+            log_file = log_folder / f"encoding_history_{machine_name}.log"
 
             reduction = (1 - output_size / input_size) * 100 if input_size > 0 else 0
             input_gb = input_size / (1024**3)
@@ -342,6 +352,327 @@ class TranscoderGUI:
             subprocess.Popen(f'explorer "{folder}"')
         else:
             messagebox.showerror("Error", "Folder does not exist")
+
+    def generate_report(self):
+        """Generate a technical report of the folder contents."""
+        threading.Thread(target=self._do_generate_report, daemon=True).start()
+
+    def _do_generate_report(self):
+        """Worker for generating the technical report."""
+        folder = Path(self.watch_folder.get())
+
+        if not folder.exists():
+            self.root.after(0, lambda: messagebox.showerror("Error", "Folder does not exist"))
+            return
+
+        self.root.after(0, lambda: self.log("Generating report... please wait", "info"))
+        self.root.after(0, lambda: self.current_file_label.config(text="Scanning folder for report..."))
+
+        try:
+            # Collect data
+            video_extensions = ['.mp4', '.mov', '.mkv', '.avi', '.MP4', '.MOV', '.MKV', '.AVI']
+
+            all_videos = []
+            h264_backups = []
+            h265_outputs = []
+
+            # Scan all video files
+            for ext in video_extensions:
+                for f in folder.rglob(f'*{ext}'):
+                    try:
+                        size = f.stat().st_size
+                        rel_path = str(f.relative_to(folder))
+
+                        # Check if it's in h264 backup folder
+                        if '/h264/' in rel_path or '\\h264\\' in rel_path:
+                            h264_backups.append((f, size))
+                        # Check if it's in h265 output folder
+                        elif '/h265/' in rel_path or '\\h265\\' in rel_path:
+                            h265_outputs.append((f, size))
+                        else:
+                            all_videos.append((f, size))
+                    except:
+                        pass
+
+            # Get database stats
+            cursor = self.db_conn.execute(
+                "SELECT COUNT(*), SUM(input_size), SUM(output_size) FROM processed WHERE status = 'done'"
+            )
+            db_row = cursor.fetchone()
+            db_count = db_row[0] or 0
+            db_input_total = db_row[1] or 0
+            db_output_total = db_row[2] or 0
+
+            # Get orphan entries (files in DB but no longer exist)
+            cursor = self.db_conn.execute("SELECT input_path FROM processed WHERE status = 'done'")
+            orphan_count = 0
+            for row in cursor:
+                if not Path(row[0]).exists():
+                    orphan_count += 1
+
+            # Separate pending from already processed
+            pending_videos = []
+            for f, size in all_videos:
+                if not self.is_processed(f):
+                    pending_videos.append((f, size))
+
+            # Check which pending files are local vs cloud
+            local_pending = []
+            cloud_pending = []
+            confirmed_h264 = []
+
+            for f, size in pending_videos:
+                try:
+                    # Try to read 1 byte to check if file is local
+                    if size < 10000:  # Small file = placeholder
+                        cloud_pending.append((f, size))
+                        continue
+
+                    try:
+                        with open(f, 'rb') as fp:
+                            fp.read(1)
+                        local_pending.append((f, size))
+
+                        # For local files, try to confirm codec with ffprobe
+                        try:
+                            result = subprocess.run(
+                                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+                                 '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', str(f)],
+                                capture_output=True, text=True, timeout=5
+                            )
+                            codec = result.stdout.strip().lower()
+                            if codec in ('h264', 'avc', 'avc1'):
+                                confirmed_h264.append((f, size))
+                        except:
+                            pass
+                    except OSError as e:
+                        if e.errno == 22:  # Cloud file
+                            cloud_pending.append((f, size))
+                        else:
+                            cloud_pending.append((f, size))
+                except:
+                    cloud_pending.append((f, size))
+
+            # Calculate sizes
+            total_pending_size = sum(s for _, s in pending_videos)
+            local_pending_size = sum(s for _, s in local_pending)
+            cloud_pending_size = sum(s for _, s in cloud_pending)
+            confirmed_h264_size = sum(s for _, s in confirmed_h264)
+            h264_backup_size = sum(s for _, s in h264_backups)
+            h265_output_size = sum(s for _, s in h265_outputs)
+
+            # Calculate compression ratio from database
+            if db_input_total > 0:
+                compression_ratio = (1 - db_output_total / db_input_total) * 100
+                space_saved = db_input_total - db_output_total
+            else:
+                compression_ratio = 46  # Estimated default
+                space_saved = 0
+
+            # Estimate future savings
+            estimated_savings = total_pending_size * (compression_ratio / 100)
+
+            # Size distribution
+            size_small = [(f, s) for f, s in pending_videos if s < 100 * 1024 * 1024]
+            size_medium = [(f, s) for f, s in pending_videos if 100 * 1024 * 1024 <= s < 1024 * 1024 * 1024]
+            size_large = [(f, s) for f, s in pending_videos if 1024 * 1024 * 1024 <= s < 5 * 1024 * 1024 * 1024]
+            size_xlarge = [(f, s) for f, s in pending_videos if s >= 5 * 1024 * 1024 * 1024]
+
+            # Extension distribution
+            ext_dist = {}
+            for f, s in pending_videos:
+                ext = f.suffix.lower()
+                if ext not in ext_dist:
+                    ext_dist[ext] = {'count': 0, 'size': 0}
+                ext_dist[ext]['count'] += 1
+                ext_dist[ext]['size'] += s
+
+            # Top folders by pending size
+            folder_sizes = {}
+            for f, s in pending_videos:
+                parent = str(f.parent.relative_to(folder))
+                if parent not in folder_sizes:
+                    folder_sizes[parent] = {'count': 0, 'size': 0}
+                folder_sizes[parent]['count'] += 1
+                folder_sizes[parent]['size'] += s
+
+            top_folders = sorted(folder_sizes.items(), key=lambda x: x[1]['size'], reverse=True)[:10]
+
+            # Helper function for formatting
+            def fmt_size(bytes_val):
+                if bytes_val >= 1024**4:
+                    return f"{bytes_val / (1024**4):.2f} TB"
+                elif bytes_val >= 1024**3:
+                    return f"{bytes_val / (1024**3):.2f} GB"
+                elif bytes_val >= 1024**2:
+                    return f"{bytes_val / (1024**2):.1f} MB"
+                else:
+                    return f"{bytes_val / 1024:.0f} KB"
+
+            def pct_bar(pct, width=20):
+                filled = int(pct / 100 * width)
+                return '█' * filled + '░' * (width - filled)
+
+            # Build report
+            machine_name = self.get_machine_name()
+            timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+
+            report = []
+            report.append("╔" + "═" * 78 + "╗")
+            report.append(f"║{'RELATÓRIO TÉCNICO - HeavyDrops Transcoder v' + VERSION:^78}║")
+            report.append(f"║{'Máquina: ' + machine_name:^78}║")
+            report.append(f"║{'Gerado em: ' + timestamp:^78}║")
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║  Pasta: {str(folder)[:68]:<68}  ║")
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║{'RESUMO GERAL':^78}║")
+            report.append("╠" + "═" * 78 + "╣")
+
+            total_all = len(all_videos) + len(h264_backups) + len(h265_outputs)
+            total_size_all = sum(s for _, s in all_videos) + h264_backup_size + h265_output_size
+
+            report.append(f"║  Total de vídeos encontrados: {total_all:>8} arquivos  │  {fmt_size(total_size_all):>12}  ║")
+            report.append(f"║  ├─ Pendentes para conversão: {len(pending_videos):>8} arquivos  │  {fmt_size(total_pending_size):>12}  ║")
+            report.append(f"║  ├─ Já convertidos (no banco):{db_count:>8} arquivos  │  {fmt_size(db_output_total):>12}  ║")
+            report.append(f"║  └─ Backups em pastas h264/:  {len(h264_backups):>8} arquivos  │  {fmt_size(h264_backup_size):>12}  ║")
+
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║{'ECONOMIA DE ESPAÇO':^78}║")
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║  Taxa média de compressão alcançada:        {compression_ratio:>5.1f}% (baseado em {db_count} arquivos)  ║")
+            report.append(f"║  Espaço economizado até agora:              {fmt_size(space_saved):>15}              ║")
+            report.append(f"║  Economia estimada após conversão total:    {fmt_size(estimated_savings):>15}              ║")
+
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║{'DISPONIBILIDADE DOS ARQUIVOS (Dropbox Smart Sync)':^78}║")
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║  Pendentes disponíveis localmente:  {len(local_pending):>6} arquivos  │  {fmt_size(local_pending_size):>12}  ║")
+            report.append(f"║  Pendentes somente na nuvem:        {len(cloud_pending):>6} arquivos  │  {fmt_size(cloud_pending_size):>12}  ║")
+            report.append(f"║  ► Prontos para conversão imediata: {len(local_pending):>6} arquivos                     ║")
+
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║{'VERIFICAÇÃO DE CODEC (apenas arquivos locais)':^78}║")
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║  Confirmado H.264 (via ffprobe):    {len(confirmed_h264):>6} arquivos  │  {fmt_size(confirmed_h264_size):>12}  ║")
+            report.append(f"║  Presumido H.264 (não verificado):  {len(pending_videos) - len(confirmed_h264):>6} arquivos  │  {fmt_size(total_pending_size - confirmed_h264_size):>12}  ║")
+
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║{'DISTRIBUIÇÃO POR TAMANHO (Pendentes)':^78}║")
+            report.append("╠" + "═" * 78 + "╣")
+
+            if len(pending_videos) > 0:
+                pct_small = sum(s for _, s in size_small) / total_pending_size * 100 if total_pending_size > 0 else 0
+                pct_medium = sum(s for _, s in size_medium) / total_pending_size * 100 if total_pending_size > 0 else 0
+                pct_large = sum(s for _, s in size_large) / total_pending_size * 100 if total_pending_size > 0 else 0
+                pct_xlarge = sum(s for _, s in size_xlarge) / total_pending_size * 100 if total_pending_size > 0 else 0
+
+                report.append(f"║  Pequenos   (< 100 MB):   {len(size_small):>5} arq │ {fmt_size(sum(s for _,s in size_small)):>10} │ {pct_bar(pct_small, 10)} {pct_small:>4.0f}%  ║")
+                report.append(f"║  Médios     (100MB-1GB):  {len(size_medium):>5} arq │ {fmt_size(sum(s for _,s in size_medium)):>10} │ {pct_bar(pct_medium, 10)} {pct_medium:>4.0f}%  ║")
+                report.append(f"║  Grandes    (1GB-5GB):    {len(size_large):>5} arq │ {fmt_size(sum(s for _,s in size_large)):>10} │ {pct_bar(pct_large, 10)} {pct_large:>4.0f}%  ║")
+                report.append(f"║  Muito grandes (> 5GB):   {len(size_xlarge):>5} arq │ {fmt_size(sum(s for _,s in size_xlarge)):>10} │ {pct_bar(pct_xlarge, 10)} {pct_xlarge:>4.0f}%  ║")
+            else:
+                report.append(f"║  {'Nenhum arquivo pendente':^74}  ║")
+
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║{'DISTRIBUIÇÃO POR EXTENSÃO (Pendentes)':^78}║")
+            report.append("╠" + "═" * 78 + "╣")
+
+            if ext_dist:
+                sorted_ext = sorted(ext_dist.items(), key=lambda x: x[1]['size'], reverse=True)
+                for ext, data in sorted_ext[:5]:
+                    pct = data['size'] / total_pending_size * 100 if total_pending_size > 0 else 0
+                    report.append(f"║  {ext:<6}  {data['count']:>6} arquivos │ {fmt_size(data['size']):>10} │ {pct_bar(pct, 15)} {pct:>4.0f}%  ║")
+            else:
+                report.append(f"║  {'Nenhum arquivo pendente':^74}  ║")
+
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║{'TOP 10 PASTAS COM MAIS CONTEÚDO PENDENTE':^78}║")
+            report.append("╠" + "═" * 78 + "╣")
+
+            if top_folders:
+                for i, (folder_name, data) in enumerate(top_folders, 1):
+                    folder_display = folder_name[:45] if len(folder_name) <= 45 else "..." + folder_name[-42:]
+                    report.append(f"║  {i:>2}. {folder_display:<45} {data['count']:>4} arq │ {fmt_size(data['size']):>10}  ║")
+            else:
+                report.append(f"║  {'Nenhuma pasta com arquivos pendentes':^74}  ║")
+
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║{'SAÚDE DO BANCO DE DADOS':^78}║")
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║  Registros no banco:                        {db_count:>8}                         ║")
+            report.append(f"║  Backups h264 encontrados:                  {len(h264_backups):>8}  {'✓' if len(h264_backups) >= db_count else '⚠'}                        ║")
+            report.append(f"║  Entradas órfãs (arquivo não existe mais):  {orphan_count:>8}  {'✓' if orphan_count == 0 else '⚠'}                        ║")
+
+            report.append("╠" + "═" * 78 + "╣")
+            report.append(f"║{'ALERTAS':^78}║")
+            report.append("╠" + "═" * 78 + "╣")
+
+            alerts = []
+            if len(size_xlarge) > 0:
+                alerts.append(f"⚠ {len(size_xlarge)} arquivo(s) muito grande(s) (>5GB) podem demorar bastante")
+            if orphan_count > 0:
+                alerts.append(f"⚠ {orphan_count} entrada(s) órfã(s) no banco podem ser limpas")
+            if len(cloud_pending) > len(local_pending):
+                alerts.append(f"⚠ Maioria dos arquivos está na nuvem ({len(cloud_pending)} de {len(pending_videos)})")
+            if not alerts:
+                alerts.append("✓ Nenhum alerta - tudo OK!")
+
+            for alert in alerts[:5]:
+                report.append(f"║  {alert:<74}  ║")
+
+            report.append("╚" + "═" * 78 + "╝")
+
+            # Display report
+            report_text = "\n".join(report)
+
+            # Save report to file
+            log_folder = Path(self.log_folder.get())
+            log_folder.mkdir(parents=True, exist_ok=True)
+            report_file = log_folder / f"report_{machine_name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.txt"
+            with open(report_file, 'w', encoding='utf-8') as f:
+                f.write(report_text)
+
+            # Show in new window
+            def show_report_window():
+                report_win = tk.Toplevel(self.root)
+                report_win.title(f"Relatório Técnico - {folder.name}")
+                report_win.geometry("700x800")
+
+                text_widget = scrolledtext.ScrolledText(report_win, font=("Consolas", 9), wrap=tk.NONE)
+                text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+                text_widget.insert(tk.END, report_text)
+                text_widget.config(state=tk.DISABLED)
+
+                # Buttons frame
+                btn_frame = ttk.Frame(report_win)
+                btn_frame.pack(fill=tk.X, padx=10, pady=(0, 10))
+
+                ttk.Button(btn_frame, text="Salvar como...",
+                    command=lambda: self._save_report_as(report_text)).pack(side=tk.LEFT, padx=(0, 5))
+                ttk.Button(btn_frame, text="Fechar",
+                    command=report_win.destroy).pack(side=tk.RIGHT)
+                ttk.Label(btn_frame, text=f"Salvo em: {report_file.name}",
+                    font=("", 8)).pack(side=tk.LEFT, padx=10)
+
+            self.root.after(0, show_report_window)
+            self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
+            self.root.after(0, lambda: self.log(f"Report saved: {report_file.name}", "success"))
+
+        except Exception as e:
+            self.root.after(0, lambda err=e: self.log(f"Error generating report: {err}", "error"))
+            self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
+
+    def _save_report_as(self, report_text: str):
+        """Save report to a user-selected location."""
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            initialfile=f"report_{self.get_machine_name()}_{datetime.now().strftime('%Y%m%d')}.txt"
+        )
+        if file_path:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.write(report_text)
+            self.log(f"Report saved to: {file_path}", "success")
 
     def log(self, message, tag="info"):
         """Add message to log."""
