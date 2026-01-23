@@ -27,33 +27,53 @@ $TempDir = "$env:TEMP\heavydrops_install"
 Write-Host "[1/5] Preparing installation..." -ForegroundColor Green
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
-# Download FFmpeg
-Write-Host "[2/5] Downloading FFmpeg (this may take a few minutes)..." -ForegroundColor Green
-$ffmpegZip = "$TempDir\ffmpeg.zip"
-try {
-    # Use TLS 1.2
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Check if FFmpeg is already installed
+$ffmpegInstalled = $false
+$ffmpegExe = "$FFmpegDir\ffmpeg.exe"
 
-    $ProgressPreference = 'SilentlyContinue'  # Faster download
-    Invoke-WebRequest -Uri $FFmpegUrl -OutFile $ffmpegZip -UseBasicParsing
-    Write-Host "   Download complete!" -ForegroundColor Gray
-} catch {
-    Write-Host "   Failed to download FFmpeg. Trying alternative method..." -ForegroundColor Yellow
+# Check in expected location
+if (Test-Path $ffmpegExe) {
+    Write-Host "[2/5] FFmpeg already installed at: $FFmpegDir" -ForegroundColor Green
+    Write-Host "   Skipping download" -ForegroundColor Gray
+    $ffmpegInstalled = $true
+}
+# Check in PATH
+elseif (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
+    Write-Host "[2/5] FFmpeg already available in PATH" -ForegroundColor Green
+    Write-Host "   Skipping download" -ForegroundColor Gray
+    $ffmpegInstalled = $true
+}
 
-    # Try using winget as fallback
+# Download FFmpeg only if not installed
+if (-not $ffmpegInstalled) {
+    Write-Host "[2/5] Downloading FFmpeg (this may take a few minutes)..." -ForegroundColor Green
+    $ffmpegZip = "$TempDir\ffmpeg.zip"
     try {
-        winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-agreements
-        Write-Host "   FFmpeg installed via winget!" -ForegroundColor Gray
-        $ffmpegInstalled = $true
+        # Use TLS 1.2
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+        $ProgressPreference = 'SilentlyContinue'  # Faster download
+        Invoke-WebRequest -Uri $FFmpegUrl -OutFile $ffmpegZip -UseBasicParsing
+        Write-Host "   Download complete!" -ForegroundColor Gray
     } catch {
-        Write-Host "ERROR: Could not download FFmpeg. Please install manually:" -ForegroundColor Red
-        Write-Host "   winget install ffmpeg" -ForegroundColor Yellow
-        Read-Host "Press Enter to continue anyway"
+        Write-Host "   Failed to download FFmpeg. Trying alternative method..." -ForegroundColor Yellow
+
+        # Try using winget as fallback
+        try {
+            winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-agreements
+            Write-Host "   FFmpeg installed via winget!" -ForegroundColor Gray
+            $ffmpegInstalled = $true
+        } catch {
+            Write-Host "ERROR: Could not download FFmpeg. Please install manually:" -ForegroundColor Red
+            Write-Host "   winget install ffmpeg" -ForegroundColor Yellow
+            Read-Host "Press Enter to continue anyway"
+        }
     }
 }
 
-# Extract and install FFmpeg
-if (-not $ffmpegInstalled -and (Test-Path $ffmpegZip)) {
+# Extract and install FFmpeg (only if downloaded)
+if (-not $ffmpegInstalled -and (Test-Path -Path "$TempDir\ffmpeg.zip")) {
+    $ffmpegZip = "$TempDir\ffmpeg.zip"
     Write-Host "[3/5] Installing FFmpeg..." -ForegroundColor Green
 
     # Create FFmpeg directory
