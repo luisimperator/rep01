@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 import socket
 import subprocess
@@ -66,6 +66,7 @@ class TranscoderGUI:
         self.min_size_gb = tk.DoubleVar(value=0)
         self.encoder = tk.StringVar(value="nvenc")
         self.cq_value = tk.IntVar(value=24)
+        self.auto_delete_h264 = tk.BooleanVar(value=False)  # Delete h264 backups after verification
 
         # Stats
         self.files_processed = tk.IntVar(value=0)
@@ -128,6 +129,19 @@ class TranscoderGUI:
         log_frame.grid(row=4, column=1, sticky=tk.EW, pady=5)
         ttk.Entry(log_frame, textvariable=self.log_folder, width=60).pack(side=tk.LEFT, fill=tk.X, expand=True)
         ttk.Button(log_frame, text="Browse", command=self.browse_log_folder).pack(side=tk.LEFT, padx=(5, 0))
+
+        # Auto-delete h264 option
+        ttk.Label(settings_frame, text="Options:").grid(row=5, column=0, sticky=tk.W, pady=5)
+        options_frame = ttk.Frame(settings_frame)
+        options_frame.grid(row=5, column=1, sticky=tk.W, pady=5)
+        self.delete_h264_checkbox = ttk.Checkbutton(
+            options_frame,
+            text="Delete h264 backups after 20 min (with verification)",
+            variable=self.auto_delete_h264,
+            command=self._on_delete_h264_toggle
+        )
+        self.delete_h264_checkbox.pack(side=tk.LEFT)
+        ttk.Label(options_frame, text="⚠️ Irreversível!", foreground="red", font=("", 8)).pack(side=tk.LEFT, padx=(10, 0))
 
         settings_frame.columnconfigure(1, weight=1)
 
@@ -226,6 +240,31 @@ class TranscoderGUI:
             self.log_folder.set(folder)
             self.save_settings()
 
+    def _on_delete_h264_toggle(self):
+        """Handle toggle of auto-delete h264 checkbox."""
+        if self.auto_delete_h264.get():
+            # User is enabling - show confirmation
+            result = messagebox.askyesno(
+                "Confirmar Exclusão Automática",
+                "ATENÇÃO: Esta opção irá DELETAR PERMANENTEMENTE os arquivos h264 originais "
+                "após 20 minutos da conversão.\n\n"
+                "Os arquivos serão deletados apenas após:\n"
+                "• Verificação dupla de que o h265 está funcional\n"
+                "• Aguardar 20 minutos para o Dropbox sincronizar\n\n"
+                "Esta ação é IRREVERSÍVEL!\n\n"
+                "Deseja realmente ativar a exclusão automática?",
+                icon='warning'
+            )
+            if not result:
+                # User clicked No - uncheck the box
+                self.auto_delete_h264.set(False)
+            else:
+                self.log("Auto-delete h264 ENABLED - backups will be deleted after verification", "warning")
+                self.save_settings()
+        else:
+            self.log("Auto-delete h264 disabled - backups will be kept", "info")
+            self.save_settings()
+
     def load_settings(self):
         """Load settings from file."""
         try:
@@ -237,6 +276,8 @@ class TranscoderGUI:
                     self.encoder.set(settings.get('encoder', self.encoder.get()))
                     self.cq_value.set(settings.get('cq_value', self.cq_value.get()))
                     self.min_size_gb.set(settings.get('min_size_gb', self.min_size_gb.get()))
+                    # Note: auto_delete_h264 is loaded but defaults to False for safety
+                    self.auto_delete_h264.set(settings.get('auto_delete_h264', False))
         except Exception:
             pass  # Use defaults if settings can't be loaded
 
@@ -249,7 +290,8 @@ class TranscoderGUI:
                 'log_folder': self.log_folder.get(),
                 'encoder': self.encoder.get(),
                 'cq_value': self.cq_value.get(),
-                'min_size_gb': self.min_size_gb.get()
+                'min_size_gb': self.min_size_gb.get(),
+                'auto_delete_h264': self.auto_delete_h264.get()
             }
             with open(self.SETTINGS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, indent=2)
@@ -1183,6 +1225,50 @@ class TranscoderGUI:
         # Run in background thread
         threading.Thread(target=delete_after_delay, daemon=True).start()
 
+    def _schedule_h264_deletion(self, h264_path: Path, h265_path: Path):
+        """
+        Schedule h264 backup deletion after 20 minutes (in background thread).
+        Performs double verification of h265 before deleting.
+        """
+        def delete_after_delay():
+            # Wait 20 minutes for Dropbox to sync
+            time.sleep(20 * 60)  # 20 minutes
+
+            try:
+                # Double verification: check h265 is still valid before deleting h264
+                if not h265_path.exists():
+                    self.root.after(0, lambda: self.log(
+                        f"H265 not found, keeping h264 backup: {h264_path.name}", "warning"))
+                    return
+
+                # Verify h265 is playable
+                if not self._verify_output(h265_path):
+                    self.root.after(0, lambda: self.log(
+                        f"H265 verification failed, keeping h264 backup: {h264_path.name}", "warning"))
+                    return
+
+                # Second verification - check file size is reasonable
+                h265_size = h265_path.stat().st_size
+                if h265_size < 10000:  # Less than 10KB is suspicious
+                    self.root.after(0, lambda: self.log(
+                        f"H265 too small, keeping h264 backup: {h264_path.name}", "warning"))
+                    return
+
+                # All checks passed - delete h264 backup
+                if h264_path.exists():
+                    h264_path.unlink()
+                    self.root.after(0, lambda p=h264_path.name: self.log(
+                        f"H264 backup deleted (verified): {p}", "success"))
+
+            except Exception as e:
+                self.root.after(0, lambda err=e: self.log(
+                    f"Could not delete h264 backup: {err}", "warning"))
+
+        # Run in background thread
+        self.root.after(0, lambda: self.log(
+            f"H264 deletion scheduled for 20 min: {h264_path.name}", "info"))
+        threading.Thread(target=delete_after_delay, daemon=True).start()
+
     def _verify_mp3(self, mp3_path: Path) -> bool:
         """Verify MP3 file is valid using ffprobe."""
         try:
@@ -1428,6 +1514,10 @@ class TranscoderGUI:
                 # Update output_path for logging
                 self.mark_processed(h264_backup_path, str(final_path), "done", input_size, output_size)
                 self.write_success_log(h264_backup_path, final_path, input_size, output_size)
+
+                # Schedule h264 backup deletion if enabled
+                if self.auto_delete_h264.get():
+                    self._schedule_h264_deletion(h264_backup_path, final_path)
 
             except Exception as move_err:
                 self.root.after(0, lambda e=move_err: self.log(
