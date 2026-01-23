@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.0.8"
+VERSION = "1.1"
 
 import socket
 import subprocess
@@ -1454,7 +1454,7 @@ class TranscoderGUI:
                 break
 
             self.root.after(0, lambda e=try_encoder: self.log(f"Encoding with {e}..."))
-            cmd = self.build_ffmpeg_command(input_path, temp_path, encoder=try_encoder)
+            cmd = self.build_ffmpeg_command(input_path, temp_path, encoder=try_encoder, probe_data=probe_data)
 
             # Reset progress bar
             self.root.after(0, lambda: self.progress_var.set(0))
@@ -1728,36 +1728,68 @@ class TranscoderGUI:
                 f"Verification error: {err}", "warning"))
             return False
 
-    def build_ffmpeg_command(self, input_path: Path, output_path: Path, encoder: str = None) -> list:
-        """Build FFmpeg command."""
+    def is_10bit(self, probe_data: dict) -> bool:
+        """Check if video is 10-bit."""
+        try:
+            for stream in probe_data.get('streams', []):
+                if stream.get('codec_type') == 'video':
+                    pix_fmt = stream.get('pix_fmt', '').lower()
+                    bits = stream.get('bits_per_raw_sample', '')
+                    # Common 10-bit pixel formats
+                    if '10' in pix_fmt or '10le' in pix_fmt or '10be' in pix_fmt:
+                        return True
+                    if bits and int(bits) >= 10:
+                        return True
+        except:
+            pass
+        return False
+
+    def build_ffmpeg_command(self, input_path: Path, output_path: Path, encoder: str = None, probe_data: dict = None) -> list:
+        """Build FFmpeg command with 10-bit and metadata preservation."""
         if encoder is None:
             encoder = self.encoder.get()
         cq = self.cq_value.get()
 
-        # -map 0:v = video streams, -map 0:a? = audio (optional, ? means don't fail if no audio)
-        # This avoids copying timecode/data tracks that can't go in MP4
-        # -f mp4 explicitly sets format (needed for .tmp extension)
+        # Check if input is 10-bit
+        is_10bit = self.is_10bit(probe_data) if probe_data else False
+
+        # Base command with comprehensive metadata preservation:
+        # -map 0 = copy ALL streams (video, audio, data/timecode, subtitles)
+        # -map_metadata 0 = copy all metadata from input
+        # -movflags use_metadata_tags = preserve additional metadata tags
+        # -copy_unknown = copy unknown stream types (helps with timecode)
+        base_cmd = [
+            'ffmpeg', '-hide_banner', '-y', '-i', str(input_path),
+            '-map', '0',  # Map ALL streams including data/timecode
+            '-map_metadata', '0',  # Copy all metadata
+            '-movflags', 'use_metadata_tags',  # Preserve additional tags
+        ]
+
         if encoder == 'nvenc':
-            return [
-                'ffmpeg', '-hide_banner', '-y', '-i', str(input_path),
-                '-map', '0:v', '-map', '0:a?', '-map_metadata', '0',
-                '-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc:v', 'vbr', '-cq:v', str(cq),
-                '-c:a', 'copy', '-f', 'mp4', str(output_path)
-            ]
+            video_opts = ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc:v', 'vbr', '-cq:v', str(cq)]
+            if is_10bit:
+                video_opts.extend(['-profile:v', 'main10'])
+                self.root.after(0, lambda: self.log("10-bit video detected, using main10 profile", "info"))
         elif encoder == 'qsv':
-            return [
-                'ffmpeg', '-hide_banner', '-y', '-hwaccel', 'qsv', '-i', str(input_path),
-                '-map', '0:v', '-map', '0:a?', '-map_metadata', '0',
-                '-c:v', 'hevc_qsv', '-preset', 'medium', '-global_quality:v', str(cq),
-                '-c:a', 'copy', '-f', 'mp4', str(output_path)
-            ]
-        else:  # cpu
-            return [
-                'ffmpeg', '-hide_banner', '-y', '-i', str(input_path),
-                '-map', '0:v', '-map', '0:a?', '-map_metadata', '0',
-                '-c:v', 'libx265', '-preset', 'medium', '-crf', str(cq),
-                '-c:a', 'copy', '-f', 'mp4', str(output_path)
-            ]
+            video_opts = ['-c:v', 'hevc_qsv', '-preset', 'medium', '-global_quality:v', str(cq)]
+            if is_10bit:
+                video_opts.extend(['-profile:v', 'main10'])
+                self.root.after(0, lambda: self.log("10-bit video detected, using main10 profile", "info"))
+        else:  # cpu (libx265)
+            video_opts = ['-c:v', 'libx265', '-preset', 'medium', '-crf', str(cq)]
+            if is_10bit:
+                # libx265 handles 10-bit natively, but we ensure it with profile
+                video_opts.extend(['-profile:v', 'main10'])
+                self.root.after(0, lambda: self.log("10-bit video detected, using main10 profile", "info"))
+
+        # Audio: copy without re-encoding
+        # Data streams (timecode): copy
+        audio_data_opts = ['-c:a', 'copy', '-c:d', 'copy']
+
+        # Output format
+        output_opts = ['-f', 'mp4', str(output_path)]
+
+        return base_cmd + video_opts + audio_data_opts + output_opts
 
 
 def main():
