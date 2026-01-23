@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 import socket
 import subprocess
@@ -370,15 +370,18 @@ class TranscoderGUI:
 
         try:
             # Collect data
-            video_extensions = ['.mp4', '.mov', '.mkv', '.avi', '.MP4', '.MOV', '.MKV', '.AVI']
+            video_extensions = ['.mp4', '.MP4']
 
             all_videos = []
             h264_backups = []
             h265_outputs = []
 
-            # Scan all video files
+            # Scan all video files (skip ._ metadata files from macOS/ATEM)
             for ext in video_extensions:
                 for f in folder.rglob(f'*{ext}'):
+                    # Skip macOS/ATEM metadata files
+                    if f.name.startswith('._'):
+                        continue
                     try:
                         size = f.stat().st_size
                         rel_path = str(f.relative_to(folder))
@@ -834,11 +837,12 @@ class TranscoderGUI:
 
         self.root.after(0, lambda: self.log(f"Scanning {folder} to trigger downloads..."))
 
-        # Find video files
+        # Find video files (only .mp4, skip ._ metadata files from macOS/ATEM)
         video_files = []
-        for ext in ['.mp4', '.mov', '.MP4', '.MOV', '.mkv', '.MKV', '.avi', '.AVI']:
+        for ext in ['.mp4', '.MP4']:
             for f in folder.rglob(f'*{ext}'):
-                if 'h265' not in str(f).lower() and 'h264' not in str(f).lower():
+                # Skip h265/h264 folders, and macOS/ATEM metadata files starting with ._
+                if 'h265' not in str(f).lower() and 'h264' not in str(f).lower() and not f.name.startswith('._'):
                     video_files.append(f)
 
         self.root.after(0, lambda: self.log(f"Found {len(video_files)} video files"))
@@ -924,11 +928,12 @@ class TranscoderGUI:
 
         self.root.after(0, lambda: self.log(f"Scanning {folder}..."))
 
-        # Find video files
+        # Find video files (only .mp4, skip ._ metadata files from macOS/ATEM)
         video_files = []
-        for ext in ['.mp4', '.mov', '.MP4', '.MOV']:
+        for ext in ['.mp4', '.MP4']:
             for f in folder.rglob(f'*{ext}'):
-                if 'h265' not in str(f).lower() and 'h264' not in str(f).lower():
+                # Skip h265/h264 folders, and macOS/ATEM metadata files starting with ._
+                if 'h265' not in str(f).lower() and 'h264' not in str(f).lower() and not f.name.startswith('._'):
                     video_files.append(f)
 
         # Filter to only unprocessed files and sort by size (smaller first)
@@ -1099,6 +1104,16 @@ class TranscoderGUI:
             self.mark_processed(input_path, "", "skipped_hevc", input_path.stat().st_size, 0)
             return
 
+        # Check if already well-compressed (low bitrate)
+        # Files with bitrate < 8 Mbps are already efficiently compressed
+        file_size = input_path.stat().st_size
+        bitrate = self.get_bitrate(probe_data, file_size)
+        if bitrate > 0 and bitrate < 8:  # Less than 8 Mbps
+            self.root.after(0, lambda b=bitrate: self.log(
+                f"Already well-compressed ({b:.1f} Mbps), skipping", "info"))
+            self.mark_processed(input_path, "", "skipped_lowbitrate", file_size, 0)
+            return
+
         # Output path
         output_folder = input_path.parent / 'h265'
         output_path = output_folder / input_path.name
@@ -1224,6 +1239,34 @@ class TranscoderGUI:
                 codec = stream.get('codec_name', '').lower()
                 return codec in ('hevc', 'h265')
         return False
+
+    def get_bitrate(self, probe_data: dict, file_size: int) -> float:
+        """
+        Get video bitrate in Mbps from probe data.
+        Returns bitrate in Mbps (megabits per second).
+        """
+        try:
+            # Try to get bitrate from format
+            if 'format' in probe_data and 'bit_rate' in probe_data['format']:
+                bitrate = int(probe_data['format']['bit_rate'])
+                return bitrate / 1_000_000  # Convert to Mbps
+
+            # Try to get bitrate from video stream
+            for stream in probe_data.get('streams', []):
+                if stream.get('codec_type') == 'video' and 'bit_rate' in stream:
+                    bitrate = int(stream['bit_rate'])
+                    return bitrate / 1_000_000  # Convert to Mbps
+
+            # Calculate from file size and duration
+            duration = self.get_duration(probe_data)
+            if duration > 0 and file_size > 0:
+                # file_size is in bytes, duration in seconds
+                # bitrate = (bytes * 8) / seconds = bits/second
+                bitrate = (file_size * 8) / duration
+                return bitrate / 1_000_000  # Convert to Mbps
+        except (ValueError, TypeError, ZeroDivisionError):
+            pass
+        return 0
 
     def get_duration(self, probe_data: dict) -> float:
         """Get video duration in seconds from probe data."""
