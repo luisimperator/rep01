@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 
 import socket
 import subprocess
@@ -136,7 +136,7 @@ class TranscoderGUI:
         options_frame.grid(row=5, column=1, sticky=tk.W, pady=5)
         self.delete_h264_checkbox = ttk.Checkbutton(
             options_frame,
-            text="Delete h264 backups after 20 min (with verification)",
+            text="Delete h264 folder after 20 min (all files verified)",
             variable=self.auto_delete_h264,
             command=self._on_delete_h264_toggle
         )
@@ -246,11 +246,13 @@ class TranscoderGUI:
             # User is enabling - show confirmation
             result = messagebox.askyesno(
                 "Confirmar Exclusão Automática",
-                "ATENÇÃO: Esta opção irá DELETAR PERMANENTEMENTE os arquivos h264 originais "
+                "ATENÇÃO: Esta opção irá DELETAR PERMANENTEMENTE a PASTA h264 inteira "
                 "após 20 minutos da conversão.\n\n"
-                "Os arquivos serão deletados apenas após:\n"
-                "• Verificação dupla de que o h265 está funcional\n"
-                "• Aguardar 20 minutos para o Dropbox sincronizar\n\n"
+                "A pasta só será deletada quando:\n"
+                "• TODOS os arquivos h265 correspondentes existirem\n"
+                "• TODOS os h265 forem verificados como funcionais\n"
+                "• 20 minutos terem passado para o Dropbox sincronizar\n\n"
+                "Isso é importante para a recuperação via histórico do Dropbox.\n\n"
                 "Esta ação é IRREVERSÍVEL!\n\n"
                 "Deseja realmente ativar a exclusão automática?",
                 icon='warning'
@@ -259,7 +261,7 @@ class TranscoderGUI:
                 # User clicked No - uncheck the box
                 self.auto_delete_h264.set(False)
             else:
-                self.log("Auto-delete h264 ENABLED - backups will be deleted after verification", "warning")
+                self.log("Auto-delete h264 ENABLED - folders will be deleted after all files verified", "warning")
                 self.save_settings()
         else:
             self.log("Auto-delete h264 disabled - backups will be kept", "info")
@@ -1248,47 +1250,83 @@ class TranscoderGUI:
 
     def _schedule_h264_deletion(self, h264_path: Path, h265_path: Path):
         """
-        Schedule h264 backup deletion after 20 minutes (in background thread).
-        Performs double verification of h265 before deleting.
+        Schedule h264 FOLDER deletion after 20 minutes (in background thread).
+        Only deletes when ALL files in the folder have valid h265 versions.
         """
-        def delete_after_delay():
+        h264_folder = h264_path.parent
+
+        # Track folders already scheduled to avoid duplicates
+        if not hasattr(self, '_scheduled_h264_folders'):
+            self._scheduled_h264_folders = set()
+
+        # Skip if this folder is already scheduled
+        folder_key = str(h264_folder)
+        if folder_key in self._scheduled_h264_folders:
+            return
+
+        self._scheduled_h264_folders.add(folder_key)
+        parent_folder = h264_folder.parent  # Where h265 files should be
+
+        def delete_folder_after_delay():
             # Wait 20 minutes for Dropbox to sync
             time.sleep(20 * 60)  # 20 minutes
 
             try:
-                # Double verification: check h265 is still valid before deleting h264
-                if not h265_path.exists():
-                    self.root.after(0, lambda: self.log(
-                        f"H265 not found, keeping h264 backup: {h264_path.name}", "warning"))
+                if not h264_folder.exists():
+                    self._scheduled_h264_folders.discard(folder_key)
                     return
 
-                # Verify h265 is playable
-                if not self._verify_output(h265_path):
-                    self.root.after(0, lambda: self.log(
-                        f"H265 verification failed, keeping h264 backup: {h264_path.name}", "warning"))
+                # Get all video files in h264 folder
+                h264_files = list(h264_folder.glob('*.mp4')) + list(h264_folder.glob('*.MP4'))
+
+                if not h264_files:
+                    self._scheduled_h264_folders.discard(folder_key)
                     return
 
-                # Second verification - check file size is reasonable
-                h265_size = h265_path.stat().st_size
-                if h265_size < 10000:  # Less than 10KB is suspicious
-                    self.root.after(0, lambda: self.log(
-                        f"H265 too small, keeping h264 backup: {h264_path.name}", "warning"))
-                    return
+                # Verify ALL h264 files have valid h265 counterparts
+                all_verified = True
+                for h264_file in h264_files:
+                    h265_file = parent_folder / h264_file.name
 
-                # All checks passed - delete h264 backup
-                if h264_path.exists():
-                    h264_path.unlink()
-                    self.root.after(0, lambda p=h264_path.name: self.log(
-                        f"H264 backup deleted (verified): {p}", "success"))
+                    # Check h265 exists
+                    if not h265_file.exists():
+                        self.root.after(0, lambda f=h264_file.name: self.log(
+                            f"H265 not found for {f}, keeping h264 folder", "warning"))
+                        all_verified = False
+                        break
+
+                    # Verify h265 is playable
+                    if not self._verify_output(h265_file):
+                        self.root.after(0, lambda f=h264_file.name: self.log(
+                            f"H265 verification failed for {f}, keeping h264 folder", "warning"))
+                        all_verified = False
+                        break
+
+                    # Check file size is reasonable
+                    if h265_file.stat().st_size < 10000:
+                        self.root.after(0, lambda f=h264_file.name: self.log(
+                            f"H265 too small for {f}, keeping h264 folder", "warning"))
+                        all_verified = False
+                        break
+
+                # All checks passed - delete entire h264 folder
+                if all_verified:
+                    import shutil
+                    shutil.rmtree(h264_folder)
+                    self.root.after(0, lambda p=h264_folder: self.log(
+                        f"H264 folder deleted (all verified): {p.name}", "success"))
+
+                self._scheduled_h264_folders.discard(folder_key)
 
             except Exception as e:
                 self.root.after(0, lambda err=e: self.log(
-                    f"Could not delete h264 backup: {err}", "warning"))
+                    f"Could not delete h264 folder: {err}", "warning"))
+                self._scheduled_h264_folders.discard(folder_key)
 
         # Run in background thread
         self.root.after(0, lambda: self.log(
-            f"H264 deletion scheduled for 20 min: {h264_path.name}", "info"))
-        threading.Thread(target=delete_after_delay, daemon=True).start()
+            f"H264 folder deletion scheduled for 20 min: {h264_folder}", "info"))
+        threading.Thread(target=delete_folder_after_delay, daemon=True).start()
 
     def _verify_mp3(self, mp3_path: Path) -> bool:
         """Verify MP3 file is valid using ffprobe."""
