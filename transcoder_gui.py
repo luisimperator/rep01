@@ -1757,11 +1757,17 @@ class TranscoderGUI:
                 if stream.get('codec_type') == 'video':
                     pix_fmt = stream.get('pix_fmt', '').lower()
                     bits = stream.get('bits_per_raw_sample', '')
-                    # Common 10-bit pixel formats
-                    if '10' in pix_fmt or '10le' in pix_fmt or '10be' in pix_fmt:
+                    # Common 10-bit pixel formats: yuv420p10le, p010le, yuv422p10le, etc.
+                    # Must check for '10' followed by 'le' or 'be' or at end, not just '10' anywhere
+                    if 'p10' in pix_fmt or '10le' in pix_fmt or '10be' in pix_fmt:
                         return True
-                    if bits and int(bits) >= 10:
-                        return True
+                    # Check bits_per_raw_sample
+                    if bits:
+                        try:
+                            if int(bits) >= 10:
+                                return True
+                        except ValueError:
+                            pass
         except:
             pass
         return False
@@ -1775,16 +1781,17 @@ class TranscoderGUI:
         # Check if input is 10-bit
         is_10bit = self.is_10bit(probe_data) if probe_data else False
 
-        # Base command with comprehensive metadata preservation:
-        # -map 0 = copy ALL streams (video, audio, data/timecode, subtitles)
+        # Base command with metadata preservation:
+        # -map 0:v = copy video stream
+        # -map 0:a? = copy audio if exists (? = optional)
         # -map_metadata 0 = copy all metadata from input
         # -movflags use_metadata_tags = preserve additional metadata tags
-        # -copy_unknown = copy unknown stream types (helps with timecode)
         base_cmd = [
             'ffmpeg', '-hide_banner', '-y', '-i', str(input_path),
-            '-map', '0',  # Map ALL streams including data/timecode
+            '-map', '0:v',  # Map video stream
+            '-map', '0:a?',  # Map audio if exists (optional)
             '-map_metadata', '0',  # Copy all metadata
-            '-movflags', 'use_metadata_tags',  # Preserve additional tags
+            '-movflags', '+use_metadata_tags+faststart',  # Preserve metadata + web optimization
         ]
 
         if encoder == 'nvenc':
@@ -1805,13 +1812,12 @@ class TranscoderGUI:
                 self.root.after(0, lambda: self.log("10-bit video detected, using main10 profile", "info"))
 
         # Audio: copy without re-encoding
-        # Data streams (timecode): copy
-        audio_data_opts = ['-c:a', 'copy', '-c:d', 'copy']
+        audio_opts = ['-c:a', 'copy']
 
         # Output format
         output_opts = ['-f', 'mp4', str(output_path)]
 
-        return base_cmd + video_opts + audio_data_opts + output_opts
+        return base_cmd + video_opts + audio_opts + output_opts
 
 
 def main():
