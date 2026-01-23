@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 
 import socket
 import subprocess
@@ -417,39 +417,37 @@ class TranscoderGUI:
                     pending_videos.append((f, size))
 
             # Check which pending files are local vs cloud
+            # IMPORTANT: Don't open files or run ffprobe here - it triggers Dropbox downloads!
+            # Use file attributes instead (attrib command on Windows)
             local_pending = []
             cloud_pending = []
-            confirmed_h264 = []
+            confirmed_h264 = []  # We can't confirm codec without triggering download
 
             for f, size in pending_videos:
                 try:
-                    # Try to read 1 byte to check if file is local
-                    if size < 10000:  # Small file = placeholder
+                    # Method 1: Check if file size is suspiciously small (placeholder)
+                    if size < 10000:  # Less than 10KB = definitely a placeholder
                         cloud_pending.append((f, size))
                         continue
 
+                    # Method 2: Use attrib to check Unpinned attribute (Windows/Dropbox)
+                    # Files with 'U' attribute are online-only
                     try:
-                        with open(f, 'rb') as fp:
-                            fp.read(1)
-                        local_pending.append((f, size))
-
-                        # For local files, try to confirm codec with ffprobe
-                        try:
-                            result = subprocess.run(
-                                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                                 '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', str(f)],
-                                capture_output=True, text=True, timeout=5
-                            )
-                            codec = result.stdout.strip().lower()
-                            if codec in ('h264', 'avc', 'avc1'):
-                                confirmed_h264.append((f, size))
-                        except:
-                            pass
-                    except OSError as e:
-                        if e.errno == 22:  # Cloud file
+                        result = subprocess.run(
+                            ['attrib', str(f)],
+                            capture_output=True, text=True, timeout=5,
+                            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+                        )
+                        # attrib output format: "A  U        C:\path\file.mp4"
+                        # U = Unpinned (online-only), P = Pinned (local)
+                        attrs = result.stdout.strip()[:20] if result.stdout else ""
+                        if 'U' in attrs and 'P' not in attrs:
                             cloud_pending.append((f, size))
                         else:
-                            cloud_pending.append((f, size))
+                            local_pending.append((f, size))
+                    except:
+                        # If attrib fails, assume local based on size
+                        local_pending.append((f, size))
                 except:
                     cloud_pending.append((f, size))
 
@@ -551,10 +549,10 @@ class TranscoderGUI:
             report.append(f"║  ► Prontos para conversão imediata: {len(local_pending):>6} arquivos                     ║")
 
             report.append("╠" + "═" * 78 + "╣")
-            report.append(f"║{'VERIFICAÇÃO DE CODEC (apenas arquivos locais)':^78}║")
+            report.append(f"║{'CODEC DOS ARQUIVOS':^78}║")
             report.append("╠" + "═" * 78 + "╣")
-            report.append(f"║  Confirmado H.264 (via ffprobe):    {len(confirmed_h264):>6} arquivos  │  {fmt_size(confirmed_h264_size):>12}  ║")
-            report.append(f"║  Presumido H.264 (não verificado):  {len(pending_videos) - len(confirmed_h264):>6} arquivos  │  {fmt_size(total_pending_size - confirmed_h264_size):>12}  ║")
+            report.append(f"║  Presumido H.264:  {len(pending_videos):>6} arquivos  │  {fmt_size(total_pending_size):>12}                ║")
+            report.append(f"║  (Verificação de codec desabilitada para não baixar arquivos)            ║")
 
             report.append("╠" + "═" * 78 + "╣")
             report.append(f"║{'DISTRIBUIÇÃO POR TAMANHO (Pendentes)':^78}║")
