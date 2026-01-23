@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.1.4"
+VERSION = "1.1.5"
 
 import socket
 import subprocess
@@ -1032,8 +1032,9 @@ class TranscoderGUI:
                 except:
                     pass
 
-        # Sort by size (ascending) - smaller files first for faster feedback
-        pending_files.sort(key=lambda x: x[1])
+        # Smart sorting: prioritize folders closer to completion
+        # This helps free up space faster (h264 folders are deleted when complete)
+        pending_files = self._sort_by_folder_completion(pending_files)
 
         total_pending = len(pending_files)
         self.root.after(0, lambda t=total_pending, a=len(video_files): self.log(
@@ -1360,6 +1361,46 @@ class TranscoderGUI:
             return free_bytes.value / (1024**3)
         except:
             return 999  # Assume enough space if can't check
+
+    def _sort_by_folder_completion(self, pending_files: list) -> list:
+        """
+        Sort files prioritizing folders that are closer to completion.
+        This helps free up h264 backup folders faster (they're deleted when all files are done).
+
+        Strategy:
+        1. Count pending files per folder
+        2. Sort by (folder_pending_count, file_size)
+        3. Folders with fewer pending files are processed first
+        """
+        if not pending_files:
+            return pending_files
+
+        from collections import defaultdict
+
+        # Group by parent folder and count pending
+        folder_pending_count = defaultdict(int)
+        for f, size in pending_files:
+            folder = f.parent
+            folder_pending_count[folder] += 1
+
+        # Log folder analysis
+        folders_info = [(folder, count) for folder, count in folder_pending_count.items()]
+        folders_info.sort(key=lambda x: x[1])  # Sort by count for logging
+
+        if len(folders_info) > 1:
+            almost_done = [f"{f.name}({c})" for f, c in folders_info[:3] if c <= 5]
+            if almost_done:
+                self.root.after(0, lambda a=almost_done: self.log(
+                    f"Priority folders (almost done): {', '.join(a)}", "info"))
+
+        # Sort files by (folder_pending_count, file_size)
+        # Folders with fewer pending files come first, then smaller files
+        sorted_files = sorted(
+            pending_files,
+            key=lambda x: (folder_pending_count[x[0].parent], x[1])
+        )
+
+        return sorted_files
 
     def wait_for_file_ready(self, file_path: Path, timeout_minutes: int = 60) -> bool:
         """
