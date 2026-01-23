@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.1.7"
+VERSION = "1.1.8"
 
 import socket
 import subprocess
@@ -278,8 +278,9 @@ class TranscoderGUI:
                     self.encoder.set(settings.get('encoder', self.encoder.get()))
                     self.cq_value.set(settings.get('cq_value', self.cq_value.get()))
                     self.min_size_gb.set(settings.get('min_size_gb', self.min_size_gb.get()))
-                    # Note: auto_delete_h264 is loaded but defaults to False for safety
-                    self.auto_delete_h264.set(settings.get('auto_delete_h264', False))
+                    # SAFETY: auto_delete_h264 ALWAYS starts unchecked, never loaded from settings
+                    # User must explicitly enable it each session
+                    self.auto_delete_h264.set(False)
         except Exception:
             pass  # Use defaults if settings can't be loaded
 
