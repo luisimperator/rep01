@@ -1,5 +1,5 @@
 ╔════════════════════════════════════════════════════════════════════════════╗
-║                    HeavyDrops Transcoder v1.1.3                              ║
+║                    HeavyDrops Transcoder v1.1.4                              ║
 ║                    Installation Instructions                                ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
@@ -7,7 +7,7 @@ OPTION 1: Professional Installer (Recommended)
 ══════════════════════════════════════════════
 
 If you have the Setup.exe file:
-1. Run "HeavyDrops_Transcoder_v1.1.3_Setup.exe"
+1. Run "HeavyDrops_Transcoder_v1.1.4_Setup.exe"
 2. Follow the installation wizard
 3. FFmpeg will be downloaded automatically during installation
 4. Done! Launch from Start Menu or Desktop shortcut
@@ -39,7 +39,7 @@ Steps:
 7. Press Ctrl+F9 to compile
 
 8. Find your installer at:
-   installer/output/HeavyDrops_Transcoder_v1.1.3_Setup.exe
+   installer/output/HeavyDrops_Transcoder_v1.1.4_Setup.exe
 
 
 OPTION 3: Quick Portable Setup (No Installer)

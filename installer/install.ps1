@@ -24,7 +24,7 @@ $FFmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffm
 $TempDir = "$env:TEMP\heavydrops_install"
 
 # Create temp directory
-Write-Host "[1/5] Preparing installation..." -ForegroundColor Green
+Write-Host "[1/6] Preparing installation..." -ForegroundColor Green
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
 # Check if FFmpeg is already installed
@@ -33,20 +33,20 @@ $ffmpegExe = "$FFmpegDir\ffmpeg.exe"
 
 # Check in expected location
 if (Test-Path $ffmpegExe) {
-    Write-Host "[2/5] FFmpeg already installed at: $FFmpegDir" -ForegroundColor Green
+    Write-Host "[2/6] FFmpeg already installed at: $FFmpegDir" -ForegroundColor Green
     Write-Host "   Skipping download" -ForegroundColor Gray
     $ffmpegInstalled = $true
 }
 # Check in PATH
 elseif (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
-    Write-Host "[2/5] FFmpeg already available in PATH" -ForegroundColor Green
+    Write-Host "[2/6] FFmpeg already available in PATH" -ForegroundColor Green
     Write-Host "   Skipping download" -ForegroundColor Gray
     $ffmpegInstalled = $true
 }
 
 # Download FFmpeg only if not installed
 if (-not $ffmpegInstalled) {
-    Write-Host "[2/5] Downloading FFmpeg (this may take a few minutes)..." -ForegroundColor Green
+    Write-Host "[2/6] Downloading FFmpeg (this may take a few minutes)..." -ForegroundColor Green
     $ffmpegZip = "$TempDir\ffmpeg.zip"
     try {
         # Use TLS 1.2
@@ -74,7 +74,7 @@ if (-not $ffmpegInstalled) {
 # Extract and install FFmpeg (only if downloaded)
 if (-not $ffmpegInstalled -and (Test-Path -Path "$TempDir\ffmpeg.zip")) {
     $ffmpegZip = "$TempDir\ffmpeg.zip"
-    Write-Host "[3/5] Installing FFmpeg..." -ForegroundColor Green
+    Write-Host "[3/6] Installing FFmpeg..." -ForegroundColor Green
 
     # Create FFmpeg directory
     New-Item -ItemType Directory -Force -Path $FFmpegDir | Out-Null
@@ -97,8 +97,29 @@ if (-not $ffmpegInstalled -and (Test-Path -Path "$TempDir\ffmpeg.zip")) {
     }
 }
 
+# Check and install Python
+$pythonInstalled = $false
+if (Get-Command python -ErrorAction SilentlyContinue) {
+    $pyVer = python --version 2>&1
+    Write-Host "[4/6] Python already installed: $pyVer" -ForegroundColor Green
+    Write-Host "   Skipping installation" -ForegroundColor Gray
+    $pythonInstalled = $true
+} else {
+    Write-Host "[4/6] Installing Python via winget..." -ForegroundColor Green
+    try {
+        winget install --id Python.Python.3.12 -e --accept-source-agreements --accept-package-agreements --silent
+        Write-Host "   Python installed!" -ForegroundColor Gray
+        $pythonInstalled = $true
+        # Refresh PATH
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+    } catch {
+        Write-Host "   Failed to install Python automatically" -ForegroundColor Yellow
+        Write-Host "   Please install manually: winget install Python.Python.3.12" -ForegroundColor Yellow
+    }
+}
+
 # Install the transcoder application
-Write-Host "[4/5] Installing HeavyDrops Transcoder..." -ForegroundColor Green
+Write-Host "[5/6] Installing HeavyDrops Transcoder..." -ForegroundColor Green
 
 # Create install directory
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -136,7 +157,7 @@ python transcoder_gui.py
 Set-Content -Path "$InstallDir\Launch.ps1" -Value $PSLauncherContent
 
 # Create Desktop shortcut
-Write-Host "[5/5] Creating shortcuts..." -ForegroundColor Green
+Write-Host "[6/6] Creating shortcuts..." -ForegroundColor Green
 $WshShell = New-Object -ComObject WScript.Shell
 $Shortcut = $WshShell.CreateShortcut("$env:PUBLIC\Desktop\HeavyDrops Transcoder.lnk")
 $Shortcut.TargetPath = "powershell.exe"
