@@ -1,9 +1,23 @@
 #!/usr/bin/env python3
 """
-Dropbox Video Transcoder - GUI Version
+HeavyDrops Transcoder v1.0
 
+Dropbox Video Transcoder - GUI Version
 Simple graphical interface for local folder transcoding.
+
+Features:
+- H.264 to H.265/HEVC video transcoding
+- Hardware acceleration: NVIDIA NVENC, Intel QSV, CPU fallback
+- Dropbox integration with online-only file handling
+- Auto-organizes files: h264/ backup folder, h265 to original location
+- Marks backups as online-only to free local space
+- Queue management: smaller files first, disk space monitoring
+- Progress bar with ETA, queue counter
+- START/PAUSE/STOP controls
+- Beep notification when queue finishes
 """
+
+VERSION = "1.0"
 
 import subprocess
 import sys
@@ -32,7 +46,7 @@ class TranscoderGUI:
 
     def __init__(self, root):
         self.root = root
-        self.root.title("HeavyDrops Dropbox Video Transcoder H.264 → H.265")
+        self.root.title(f"HeavyDrops Transcoder v{VERSION} - H.264 → H.265")
         self.root.geometry("900x700")
         self.root.minsize(800, 600)
 
