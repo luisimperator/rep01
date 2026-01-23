@@ -387,6 +387,27 @@ class TranscoderGUI:
         except Exception as e:
             self.root.after(0, lambda: self.log(f"Could not write to log file: {e}", "warning"))
 
+    def write_h265_done_log(self, h265_folder: Path, filename: str, input_size: int, output_size: int):
+        """Write 'h265 feito.txt' log file in h265 folder."""
+        try:
+            h265_folder.mkdir(parents=True, exist_ok=True)
+            log_file = h265_folder / "h265 feito.txt"
+
+            reduction = (1 - output_size / input_size) * 100 if input_size > 0 else 0
+            input_mb = input_size / (1024**2)
+            output_mb = output_size / (1024**2)
+
+            log_entry = (
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
+                f"{filename} | "
+                f"{input_mb:.1f}MB -> {output_mb:.1f}MB ({reduction:.1f}% menor)\n"
+            )
+
+            with open(log_file, 'a', encoding='utf-8') as f:
+                f.write(log_entry)
+        except Exception:
+            pass  # Silent fail - not critical
+
     def open_folder(self):
         """Open watch folder in explorer."""
         folder = Path(self.watch_folder.get())
@@ -1514,6 +1535,7 @@ class TranscoderGUI:
                 # Update output_path for logging
                 self.mark_processed(h264_backup_path, str(final_path), "done", input_size, output_size)
                 self.write_success_log(h264_backup_path, final_path, input_size, output_size)
+                self.write_h265_done_log(output_folder, input_path.name, input_size, output_size)
 
                 # Schedule h264 backup deletion if enabled
                 if self.auto_delete_h264.get():
