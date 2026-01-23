@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 import socket
 import subprocess
@@ -837,6 +837,14 @@ class TranscoderGUI:
 
         self.root.after(0, lambda: self.log(f"Scanning {folder} to trigger downloads..."))
 
+        # Check available disk space - reserve 10GB minimum
+        free_gb = self.get_free_disk_space(folder)
+        available_for_download = max(0, (free_gb - 10) * 1024**3)  # Convert to bytes, keep 10GB free
+
+        if free_gb < 15:
+            self.root.after(0, lambda g=free_gb: self.log(
+                f"Low disk space ({g:.1f} GB). Limiting downloads.", "warning"))
+
         # Find video files (only .mp4, skip ._ metadata files from macOS/ATEM)
         video_files = []
         for ext in ['.mp4', '.MP4']:
@@ -848,8 +856,10 @@ class TranscoderGUI:
         self.root.after(0, lambda: self.log(f"Found {len(video_files)} video files"))
 
         triggered = 0
+        triggered_size = 0  # Track size of files we've triggered for download
         already_local = 0
         cloud_files = 0
+        skipped_space = 0
 
         for video_path in video_files:
             try:
@@ -859,7 +869,7 @@ class TranscoderGUI:
                 # If file is very small, it's probably online-only
                 if size < 1000:
                     cloud_files += 1
-                    self._trigger_dropbox_download(video_path)
+                    # Don't trigger download for tiny placeholders - we don't know real size
                     continue
 
                 # Try to read 1 byte from the file - this triggers Dropbox download
@@ -870,7 +880,13 @@ class TranscoderGUI:
                 except OSError as e:
                     if e.errno == 22:  # Invalid argument - cloud file
                         cloud_files += 1
-                        self._trigger_dropbox_download(video_path)
+                        # Check if we have space for this file
+                        if triggered_size + size <= available_for_download:
+                            self._trigger_dropbox_download(video_path)
+                            triggered += 1
+                            triggered_size += size
+                        else:
+                            skipped_space += 1
                     else:
                         raise
 
@@ -881,8 +897,12 @@ class TranscoderGUI:
                 # Silent - don't spam log with errors for each file
                 cloud_files += 1
 
-        self.root.after(0, lambda: self.log(
-            f"Scan complete: {already_local} local, {cloud_files} cloud (downloading), {triggered} syncing", "success"))
+        # Report results
+        triggered_gb = triggered_size / (1024**3)
+        msg = f"Scan: {already_local} local, {triggered} downloading ({triggered_gb:.1f}GB)"
+        if skipped_space > 0:
+            msg += f", {skipped_space} skipped (no space)"
+        self.root.after(0, lambda m=msg: self.log(m, "success"))
 
     def process_loop(self):
         """Main processing loop."""
@@ -975,9 +995,202 @@ class TranscoderGUI:
             self.process_file(video_path, queue_pos=idx+1, queue_total=total_pending)
             files_processed_this_scan += 1
 
+        # Process WAV files in "Audio Source Files" folders
+        audio_processed = self.process_audio_files(folder)
+        files_processed_this_scan += audio_processed
+
         # Notify user if we finished processing files and queue is empty
         if files_processed_this_scan > 0:
             self.notify_queue_finished()
+
+    def process_audio_files(self, base_folder: Path) -> int:
+        """
+        Process WAV files in 'Audio Source Files' folders.
+        Converts WAV to MP3 192kbps, verifies, then deletes original.
+        Returns number of files processed.
+        """
+        if not self.running:
+            return 0
+
+        # Find WAV files ONLY in "Audio Source Files" folders
+        wav_files = []
+        for wav_path in base_folder.rglob('*.wav'):
+            # Skip macOS metadata files
+            if wav_path.name.startswith('._'):
+                continue
+            # Check if it's in an "Audio Source Files" folder
+            if 'Audio Source Files' in str(wav_path):
+                if not self.is_processed(wav_path):
+                    try:
+                        size = wav_path.stat().st_size
+                        wav_files.append((wav_path, size))
+                    except:
+                        pass
+
+        # Also check .WAV extension
+        for wav_path in base_folder.rglob('*.WAV'):
+            if wav_path.name.startswith('._'):
+                continue
+            if 'Audio Source Files' in str(wav_path):
+                if not self.is_processed(wav_path):
+                    try:
+                        size = wav_path.stat().st_size
+                        wav_files.append((wav_path, size))
+                    except:
+                        pass
+
+        if not wav_files:
+            return 0
+
+        # Sort by size (smaller first)
+        wav_files.sort(key=lambda x: x[1])
+
+        self.root.after(0, lambda n=len(wav_files): self.log(
+            f"Found {n} WAV files in Audio Source Files folders", "info"))
+
+        processed = 0
+        for wav_path, size in wav_files:
+            if not self.running:
+                break
+
+            # Check disk space
+            free_gb = self.get_free_disk_space(base_folder)
+            if free_gb < 2:  # WAV to MP3 needs less space
+                self.root.after(0, lambda: self.log(
+                    "Low disk space, pausing audio conversion", "warning"))
+                break
+
+            # Wait for file to be ready (downloaded from Dropbox)
+            if not self.wait_for_file_ready(wav_path):
+                continue
+
+            self.root.after(0, lambda p=wav_path.name: self.log(
+                f"Converting WAV: {p}", "info"))
+
+            # Convert WAV to MP3
+            if self.convert_wav_to_mp3(wav_path):
+                processed += 1
+
+        if processed > 0:
+            self.root.after(0, lambda n=processed: self.log(
+                f"Audio conversion complete: {n} files", "success"))
+
+        return processed
+
+    def convert_wav_to_mp3(self, wav_path: Path) -> bool:
+        """
+        Convert a WAV file to MP3 192kbps.
+        Creates backup in 'wav' folder, converts, verifies, then deletes original.
+        Returns True if successful.
+        """
+        try:
+            # Create wav backup folder and mp3 output path
+            wav_folder = wav_path.parent / 'wav'
+            wav_folder.mkdir(parents=True, exist_ok=True)
+
+            mp3_path = wav_path.with_suffix('.mp3')
+            temp_mp3 = mp3_path.with_suffix('.mp3.tmp')
+
+            # Skip if MP3 already exists
+            if mp3_path.exists():
+                self.root.after(0, lambda: self.log(
+                    "MP3 already exists, skipping", "info"))
+                self.mark_processed(wav_path, str(mp3_path), "skipped_exists",
+                                  wav_path.stat().st_size, mp3_path.stat().st_size)
+                return False
+
+            # Get original file size
+            input_size = wav_path.stat().st_size
+
+            # Build FFmpeg command for WAV to MP3 conversion
+            cmd = [
+                'ffmpeg', '-hide_banner', '-y',
+                '-i', str(wav_path),
+                '-codec:a', 'libmp3lame',
+                '-b:a', '192k',
+                str(temp_mp3)
+            ]
+
+            self.root.after(0, lambda: self.current_file_label.config(
+                text=f"Converting: {wav_path.name}"))
+
+            # Run FFmpeg
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=300  # 5 min timeout
+            )
+
+            if result.returncode != 0:
+                self.root.after(0, lambda: self.log(
+                    f"FFmpeg failed for {wav_path.name}", "error"))
+                if temp_mp3.exists():
+                    temp_mp3.unlink()
+                self.mark_processed(wav_path, "", "error", input_size, 0)
+                return False
+
+            # Verify MP3 is valid
+            if not self._verify_mp3(temp_mp3):
+                self.root.after(0, lambda: self.log(
+                    f"MP3 verification failed: {wav_path.name}", "error"))
+                if temp_mp3.exists():
+                    temp_mp3.unlink()
+                self.mark_processed(wav_path, "", "error", input_size, 0)
+                return False
+
+            # Rename temp to final
+            temp_mp3.rename(mp3_path)
+            output_size = mp3_path.stat().st_size
+
+            # Calculate savings
+            reduction = (1 - output_size / input_size) * 100 if input_size > 0 else 0
+            self.root.after(0, lambda r=reduction: self.log(
+                f"MP3 created, {r:.1f}% smaller", "success"))
+
+            # Move original WAV to backup folder
+            wav_backup_path = wav_folder / wav_path.name
+            shutil.move(str(wav_path), str(wav_backup_path))
+
+            # Delete the WAV backup (user said these files are not important)
+            try:
+                wav_backup_path.unlink()
+                self.root.after(0, lambda: self.log(
+                    "Original WAV deleted", "info"))
+            except Exception as e:
+                self.root.after(0, lambda err=e: self.log(
+                    f"Could not delete WAV: {err}", "warning"))
+
+            # Mark as processed
+            self.mark_processed(wav_path, str(mp3_path), "done", input_size, output_size)
+
+            # Reset UI
+            self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
+
+            return True
+
+        except Exception as e:
+            self.root.after(0, lambda err=e: self.log(
+                f"Error converting {wav_path.name}: {err}", "error"))
+            return False
+
+    def _verify_mp3(self, mp3_path: Path) -> bool:
+        """Verify MP3 file is valid using ffprobe."""
+        try:
+            if not mp3_path.exists():
+                return False
+            if mp3_path.stat().st_size < 1000:  # Less than 1KB
+                return False
+
+            result = subprocess.run(
+                ['ffprobe', '-v', 'error', '-select_streams', 'a:0',
+                 '-show_entries', 'stream=codec_name', '-of', 'csv=p=0',
+                 str(mp3_path)],
+                capture_output=True, text=True, timeout=30
+            )
+
+            codec = result.stdout.strip().lower()
+            return codec == 'mp3'
+
+        except Exception:
+            return False
 
     def get_free_disk_space(self, path: Path) -> float:
         """Get free disk space in GB for the drive containing path."""
