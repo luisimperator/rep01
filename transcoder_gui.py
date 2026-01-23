@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 import socket
 import subprocess
@@ -1148,12 +1148,17 @@ class TranscoderGUI:
             # Move original WAV to backup folder
             wav_backup_path = wav_folder / wav_path.name
             shutil.move(str(wav_path), str(wav_backup_path))
+            self.root.after(0, lambda: self.log(
+                "WAV moved to backup, waiting 30s for Dropbox sync...", "info"))
+
+            # Wait 30 seconds for Dropbox to sync the move
+            time.sleep(30)
 
             # Delete the WAV backup (user said these files are not important)
             try:
                 wav_backup_path.unlink()
                 self.root.after(0, lambda: self.log(
-                    "Original WAV deleted", "info"))
+                    "Original WAV deleted after sync wait", "info"))
             except Exception as e:
                 self.root.after(0, lambda err=e: self.log(
                     f"Could not delete WAV: {err}", "warning"))
