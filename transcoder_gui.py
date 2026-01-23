@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.1.6"
+VERSION = "1.1.7"
 
 import socket
 import subprocess
@@ -1594,8 +1594,15 @@ class TranscoderGUI:
                     if temp_path.exists():
                         temp_path.unlink()
             else:
-                self.root.after(0, lambda e=try_encoder: self.log(
-                    f"Encoding failed with {e}", "warning"))
+                # Log actual FFmpeg error for debugging
+                if error_msg:
+                    # Get last line of error (most relevant)
+                    last_err = error_msg.split('\n')[-1] if error_msg else "Unknown"
+                    self.root.after(0, lambda e=try_encoder, err=last_err: self.log(
+                        f"Encoding failed with {e}: {err[:100]}", "warning"))
+                else:
+                    self.root.after(0, lambda e=try_encoder: self.log(
+                        f"Encoding failed with {e}", "warning"))
                 if try_encoder != encoders_to_try[-1]:
                     self.root.after(0, lambda: self.log("Trying fallback encoder...", "info"))
                 if temp_path.exists():
@@ -1879,9 +1886,6 @@ class TranscoderGUI:
             encoder = self.encoder.get()
         cq = self.cq_value.get()
 
-        # Check if input is 10-bit
-        is_10bit = self.is_10bit(probe_data) if probe_data else False
-
         # Base command with metadata preservation:
         # -map 0:v = copy video stream
         # -map 0:a? = copy audio if exists (? = optional)
@@ -1896,21 +1900,13 @@ class TranscoderGUI:
         ]
 
         if encoder == 'nvenc':
+            # NVENC auto-detects bit depth, no need for profile (causes compatibility issues)
             video_opts = ['-c:v', 'hevc_nvenc', '-preset', 'p5', '-rc:v', 'vbr', '-cq:v', str(cq)]
-            if is_10bit:
-                video_opts.extend(['-profile:v', 'main10'])
-                self.root.after(0, lambda: self.log("10-bit video detected, using main10 profile", "info"))
         elif encoder == 'qsv':
             video_opts = ['-c:v', 'hevc_qsv', '-preset', 'medium', '-global_quality:v', str(cq)]
-            if is_10bit:
-                video_opts.extend(['-profile:v', 'main10'])
-                self.root.after(0, lambda: self.log("10-bit video detected, using main10 profile", "info"))
         else:  # cpu (libx265)
+            # libx265 auto-detects bit depth from input
             video_opts = ['-c:v', 'libx265', '-preset', 'medium', '-crf', str(cq)]
-            if is_10bit:
-                # libx265 handles 10-bit natively, but we ensure it with profile
-                video_opts.extend(['-profile:v', 'main10'])
-                self.root.after(0, lambda: self.log("10-bit video detected, using main10 profile", "info"))
 
         # Audio: copy without re-encoding
         audio_opts = ['-c:a', 'copy']
