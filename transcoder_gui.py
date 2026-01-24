@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.1.9"
+VERSION = "1.1.10"
 
 import socket
 import subprocess
@@ -307,11 +307,13 @@ class TranscoderGUI:
         self.running = False
         self.root.destroy()
 
-    def _move_with_retry(self, src: Path, dst: Path, max_retries: int = 5, delay: float = 2.0):
+    def _move_with_retry(self, src: Path, dst: Path, max_retries: int = 5):
         """
-        Move file with retry logic to handle file locks (FFmpeg/Dropbox).
-        Waits between retries to give other processes time to release the file.
+        Move file with retry logic and exponential backoff.
+        Handles file locks from FFmpeg/Dropbox (can hold locks for 20-60s).
+        Backoff: 2s → 5s → 10s → 20s → 30s
         """
+        delays = [2, 5, 10, 20, 30]  # Exponential backoff
         last_error = None
         for attempt in range(max_retries):
             try:
@@ -320,6 +322,7 @@ class TranscoderGUI:
             except PermissionError as e:
                 last_error = e
                 if attempt < max_retries - 1:
+                    delay = delays[min(attempt, len(delays)-1)]
                     self.root.after(0, lambda a=attempt+1, d=delay: self.log(
                         f"File locked, retry {a}/{max_retries-1} in {d}s...", "info"))
                     time.sleep(delay)
