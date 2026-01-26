@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.1.10"
+VERSION = "1.2"
 
 import socket
 import subprocess
@@ -162,6 +162,7 @@ class TranscoderGUI:
         ttk.Button(control_frame, text="📊 Report", command=self.generate_report).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="📁 Open Folder", command=self.open_folder).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🔄 Reset Failed", command=self.reset_failed).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(control_frame, text="🎵 WAV→MP3", command=self.start_wav_conversion).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🗑 Clear History", command=self.clear_history).pack(side=tk.LEFT)
 
         # Stats
@@ -803,11 +804,46 @@ class TranscoderGUI:
 
     def is_processed(self, path: Path) -> bool:
         """Check if file was already processed."""
+        # First check database
         cursor = self.db_conn.execute(
             "SELECT status FROM processed WHERE input_path = ?", (str(path),)
         )
         row = cursor.fetchone()
-        return row is not None and row[0] in ('done', 'skipped_hevc', 'skipped_exists')
+        if row is not None and row[0] in ('done', 'skipped_hevc', 'skipped_exists'):
+            return True
+
+        # Also check h265 feito.txt and h264 folder (for files processed on other machines)
+        return self._is_in_h265_feito_log(path)
+
+    def _is_in_h265_feito_log(self, path: Path) -> bool:
+        """
+        Check if file appears in h265 feito.txt or has h264 backup.
+        This avoids downloading files that were already converted (possibly on another machine).
+        """
+        try:
+            folder = path.parent
+            filename = path.name
+
+            # Check if h264 backup exists (means file was already processed)
+            h264_folder = folder / 'h264'
+            if h264_folder.exists() and (h264_folder / filename).exists():
+                return True
+
+            # Check h265 feito.txt
+            h265_folder = folder / 'h265'
+            log_file = h265_folder / "h265 feito.txt"
+            if log_file.exists():
+                try:
+                    with open(log_file, 'r', encoding='utf-8') as f:
+                        content = f.read()
+                        if filename in content:
+                            return True
+                except:
+                    pass
+
+            return False
+        except:
+            return False
 
     def mark_processed(self, input_path: Path, output_path: str, status: str,
                       input_size: int = 0, output_size: int = 0):
@@ -840,6 +876,37 @@ class TranscoderGUI:
             self.db_conn.commit()
             self.load_stats()
             self.log("History cleared", "warning")
+
+    def start_wav_conversion(self):
+        """Start WAV→MP3 conversion for files in 'Audio Source Files' folders."""
+        if self.running:
+            messagebox.showwarning("Em execução", "Pare o processo atual antes de iniciar conversão WAV.")
+            return
+
+        folder = Path(self.watch_folder.get())
+        if not folder.exists():
+            messagebox.showerror("Error", "Watch folder not found!")
+            return
+
+        self.log("Starting WAV→MP3 conversion...", "info")
+        self.running = True
+        self.start_btn.config(state=tk.DISABLED)
+
+        def wav_worker():
+            try:
+                count = self.process_audio_files(folder)
+                self.root.after(0, lambda c=count: self.log(
+                    f"WAV conversion finished: {c} files converted", "success"))
+            except Exception as e:
+                self.root.after(0, lambda err=e: self.log(
+                    f"WAV conversion error: {err}", "error"))
+            finally:
+                self.running = False
+                self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
+                self.notify_queue_finished()
+
+        threading.Thread(target=wav_worker, daemon=True).start()
 
     def toggle_processing(self):
         """Start processing."""
@@ -1194,6 +1261,21 @@ class TranscoderGUI:
             # Get original file size
             input_size = wav_path.stat().st_size
 
+            # Check if file is accessible (not online-only)
+            if input_size < 1000:  # WAV files should be larger
+                self.root.after(0, lambda: self.log(
+                    f"WAV file too small (online-only?): {wav_path.name}", "warning"))
+                return False
+
+            # Try to read a bit of the file to ensure it's accessible
+            try:
+                with open(wav_path, 'rb') as f:
+                    f.read(1024)
+            except Exception as e:
+                self.root.after(0, lambda: self.log(
+                    f"WAV not accessible (cloud?): {wav_path.name}", "warning"))
+                return False
+
             # Build FFmpeg command for WAV to MP3 conversion
             cmd = [
                 'ffmpeg', '-hide_banner', '-y',
@@ -1212,8 +1294,10 @@ class TranscoderGUI:
             )
 
             if result.returncode != 0:
-                self.root.after(0, lambda: self.log(
-                    f"FFmpeg failed for {wav_path.name}", "error"))
+                # Log actual error for debugging
+                err_msg = result.stderr.split('\n')[-2] if result.stderr else "Unknown error"
+                self.root.after(0, lambda e=err_msg: self.log(
+                    f"FFmpeg failed: {e[:80]}", "error"))
                 if temp_mp3.exists():
                     temp_mp3.unlink()
                 self.mark_processed(wav_path, "", "error", input_size, 0)
