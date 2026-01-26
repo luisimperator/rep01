@@ -1429,13 +1429,13 @@ class TranscoderGUI:
 
                     # Log deletion timestamp to h265 feito.txt
                     h265_folder = parent_folder / 'h265'
-                    if h265_folder.exists():
-                        log_file = h265_folder / "h265 feito.txt"
-                        try:
-                            with open(log_file, 'a', encoding='utf-8') as f:
-                                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED\n")
-                        except:
-                            pass
+                    h265_folder.mkdir(parents=True, exist_ok=True)
+                    log_file = h265_folder / "h265 feito.txt"
+                    try:
+                        with open(log_file, 'a', encoding='utf-8') as f:
+                            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED\n")
+                    except:
+                        pass
 
                 self._scheduled_h264_folders.discard(folder_key)
 
