@@ -1365,7 +1365,7 @@ class TranscoderGUI:
         parent_folder = wav_folder.parent  # Where MP3 files should be
 
         def delete_folder_after_delay():
-            time.sleep(30)  # Wait for Dropbox to sync
+            time.sleep(3 * 60)  # Wait 3 minutes for Dropbox to sync
 
             try:
                 if not wav_folder.exists():
@@ -1410,6 +1410,16 @@ class TranscoderGUI:
                     shutil.rmtree(wav_folder)
                     self.root.after(0, lambda p=wav_folder: self.log(
                         f"WAV folder deleted (all verified): {p.name}", "success"))
+
+                    # Log deletion timestamp to mp3 feito.txt
+                    mp3_folder = parent_folder / 'mp3'
+                    mp3_folder.mkdir(parents=True, exist_ok=True)
+                    log_file = mp3_folder / "mp3 feito.txt"
+                    try:
+                        with open(log_file, 'a', encoding='utf-8') as f:
+                            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | WAV FOLDER DELETED\n")
+                    except:
+                        pass
 
                 self._scheduled_wav_folders.discard(folder_key)
 
