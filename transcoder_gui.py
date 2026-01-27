@@ -1277,11 +1277,13 @@ class TranscoderGUI:
                 return False
 
             # Build FFmpeg command for WAV to MP3 conversion
+            # Use -f mp3 to specify output format explicitly (needed for .tmp extension)
             cmd = [
                 'ffmpeg', '-hide_banner', '-y',
                 '-i', str(wav_path),
                 '-codec:a', 'libmp3lame',
                 '-b:a', '192k',
+                '-f', 'mp3',
                 str(temp_mp3)
             ]
 
