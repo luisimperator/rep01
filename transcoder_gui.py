@@ -54,6 +54,7 @@ class TranscoderGUI:
         # State
         self.running = False
         self.paused = False
+        self.wav_running = False
         self.current_process = None  # Current FFmpeg process
         self.worker_thread = None
         self.current_file = None
@@ -162,7 +163,10 @@ class TranscoderGUI:
         ttk.Button(control_frame, text="📊 Report", command=self.generate_report).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="📁 Open Folder", command=self.open_folder).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🔄 Reset Failed", command=self.reset_failed).pack(side=tk.LEFT, padx=(0, 10))
-        ttk.Button(control_frame, text="🎵 WAV→MP3", command=self.start_wav_conversion).pack(side=tk.LEFT, padx=(0, 10))
+        ttk.Button(control_frame, text="🎵 WAV→MP3", command=self.start_wav_conversion).pack(side=tk.LEFT, padx=(0, 5))
+        self.stop_wav_btn = ttk.Button(control_frame, text="⏹ STOP WAV", command=self.stop_wav_conversion, state=tk.DISABLED)
+        self.stop_wav_btn.pack(side=tk.LEFT, padx=(0, 5))
+        ttk.Button(control_frame, text="🔍 Scan WAV", command=self.scan_audio_files).pack(side=tk.LEFT, padx=(0, 10))
         ttk.Button(control_frame, text="🗑 Clear History", command=self.clear_history).pack(side=tk.LEFT)
 
         # Stats
@@ -890,7 +894,9 @@ class TranscoderGUI:
 
         self.log("Starting WAV→MP3 conversion...", "info")
         self.running = True
+        self.wav_running = True
         self.start_btn.config(state=tk.DISABLED)
+        self.stop_wav_btn.config(state=tk.NORMAL)
 
         def wav_worker():
             try:
@@ -902,11 +908,110 @@ class TranscoderGUI:
                     f"WAV conversion error: {err}", "error"))
             finally:
                 self.running = False
+                self.wav_running = False
                 self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
+                self.root.after(0, lambda: self.stop_wav_btn.config(state=tk.DISABLED))
                 self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
                 self.notify_queue_finished()
 
         threading.Thread(target=wav_worker, daemon=True).start()
+
+    def stop_wav_conversion(self):
+        """Stop WAV→MP3 conversion immediately."""
+        self.running = False
+        self.wav_running = False
+
+        # Kill FFmpeg process if running
+        if self.current_process:
+            try:
+                self.current_process.terminate()
+                self.log("FFmpeg process terminated", "warning")
+            except:
+                pass
+
+        # Reset UI
+        self.start_btn.config(state=tk.NORMAL)
+        self.stop_wav_btn.config(state=tk.DISABLED)
+        self.current_file_label.config(text="Idle")
+        self.log("WAV conversion stopped", "warning")
+
+    def scan_audio_files(self):
+        """Scan 'Audio Source Files' folders and trigger Dropbox download for WAV files."""
+        threading.Thread(target=self._do_scan_audio, daemon=True).start()
+
+    def _do_scan_audio(self):
+        """Worker for scanning and triggering WAV downloads."""
+        folder = Path(self.watch_folder.get())
+
+        if not folder.exists():
+            self.root.after(0, lambda: self.log(f"Folder not found: {folder}", "error"))
+            return
+
+        self.root.after(0, lambda: self.log("Scanning Audio Source Files for WAVs..."))
+
+        # Check available disk space - reserve 10GB minimum
+        free_gb = self.get_free_disk_space(folder)
+        available_for_download = max(0, (free_gb - 10) * 1024**3)  # Convert to bytes, keep 10GB free
+
+        if free_gb < 15:
+            self.root.after(0, lambda g=free_gb: self.log(
+                f"Low disk space ({g:.1f} GB). Limiting downloads.", "warning"))
+
+        # Find WAV files only in "Audio Source Files" folders
+        wav_files = []
+        for audio_folder in folder.rglob('Audio Source Files'):
+            if audio_folder.is_dir():
+                # Skip wav backup folder
+                for ext in ['.wav', '.WAV']:
+                    for f in audio_folder.glob(f'*{ext}'):
+                        if not f.name.startswith('._') and f.parent.name != 'wav':
+                            wav_files.append(f)
+
+        self.root.after(0, lambda: self.log(f"Found {len(wav_files)} WAV files"))
+
+        triggered = 0
+        triggered_size = 0
+        already_local = 0
+        cloud_files = 0
+        skipped_space = 0
+
+        for wav_path in wav_files:
+            try:
+                size = wav_path.stat().st_size
+
+                # If file is very small, it's probably online-only
+                if size < 1000:
+                    cloud_files += 1
+                    continue
+
+                # Try to read 1 byte from the file
+                try:
+                    with open(wav_path, 'rb') as f:
+                        f.read(1)
+                    already_local += 1
+                except OSError as e:
+                    if e.errno == 22:  # Invalid argument - cloud file
+                        cloud_files += 1
+                        if triggered_size + size <= available_for_download:
+                            self._trigger_dropbox_download(wav_path)
+                            triggered += 1
+                            triggered_size += size
+                        else:
+                            skipped_space += 1
+                    else:
+                        raise
+
+            except PermissionError:
+                triggered += 1
+            except Exception:
+                cloud_files += 1
+
+        # Report results
+        triggered_gb = triggered_size / (1024**3)
+        msg = f"WAV Scan: {already_local} local, {triggered} downloading ({triggered_gb:.1f}GB)"
+        if skipped_space > 0:
+            msg += f", {skipped_space} skipped (no space)"
+        self.root.after(0, lambda m=msg: self.log(m, "success"))
 
     def toggle_processing(self):
         """Start processing."""
