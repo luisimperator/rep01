@@ -1512,17 +1512,22 @@ class TranscoderGUI:
 
                 # All checks passed - delete entire wav folder
                 if all_verified:
-                    shutil.rmtree(wav_folder)
-                    self.root.after(0, lambda p=wav_folder: self.log(
-                        f"WAV folder deleted (all verified): {p.name}", "success"))
+                    # Calculate stats before deleting
+                    num_files = len(wav_files)
+                    total_size = sum(f.stat().st_size for f in wav_files)
+                    total_gb = total_size / (1024**3)
 
-                    # Log deletion timestamp to mp3 feito.txt
+                    shutil.rmtree(wav_folder)
+                    self.root.after(0, lambda p=wav_folder, n=num_files, g=total_gb: self.log(
+                        f"WAV folder deleted: {n} files, {g:.2f}GB freed", "success"))
+
+                    # Log deletion to mp3 feito.txt
                     mp3_folder = parent_folder / 'mp3'
                     mp3_folder.mkdir(parents=True, exist_ok=True)
                     log_file = mp3_folder / "mp3 feito.txt"
                     try:
                         with open(log_file, 'a', encoding='utf-8') as f:
-                            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | WAV FOLDER DELETED\n")
+                            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | WAV FOLDER DELETED | {num_files} files | {total_gb:.2f}GB freed\n")
                     except:
                         pass
 
