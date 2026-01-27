@@ -1327,10 +1327,10 @@ class TranscoderGUI:
             wav_backup_path = wav_folder / wav_path.name
             shutil.move(str(wav_path), str(wav_backup_path))
             self.root.after(0, lambda: self.log(
-                "WAV moved to backup, will delete in 30s...", "info"))
+                "WAV moved to backup folder", "info"))
 
             # Schedule deletion in background (don't block processing)
-            self._schedule_wav_deletion(wav_backup_path)
+            self._schedule_wav_deletion(wav_backup_path, mp3_path)
 
             # Mark as processed
             self.mark_processed(wav_path, str(mp3_path), "done", input_size, output_size)
@@ -1345,21 +1345,81 @@ class TranscoderGUI:
                 f"Error converting {wav_path.name}: {err}", "error"))
             return False
 
-    def _schedule_wav_deletion(self, wav_path: Path):
-        """Schedule WAV file deletion after 30 seconds (in background thread)."""
-        def delete_after_delay():
+    def _schedule_wav_deletion(self, wav_path: Path, mp3_path: Path):
+        """
+        Schedule WAV FOLDER deletion after 30 seconds (in background thread).
+        Only deletes when ALL files in the folder have valid MP3 versions.
+        """
+        wav_folder = wav_path.parent
+
+        # Track folders already scheduled to avoid duplicates
+        if not hasattr(self, '_scheduled_wav_folders'):
+            self._scheduled_wav_folders = set()
+
+        # Skip if this folder is already scheduled
+        folder_key = str(wav_folder)
+        if folder_key in self._scheduled_wav_folders:
+            return
+
+        self._scheduled_wav_folders.add(folder_key)
+        parent_folder = wav_folder.parent  # Where MP3 files should be
+
+        def delete_folder_after_delay():
             time.sleep(30)  # Wait for Dropbox to sync
+
             try:
-                if wav_path.exists():
-                    wav_path.unlink()
-                    self.root.after(0, lambda p=wav_path.name: self.log(
-                        f"WAV deleted: {p}", "info"))
+                if not wav_folder.exists():
+                    self._scheduled_wav_folders.discard(folder_key)
+                    return
+
+                # Get all WAV files in wav folder
+                wav_files = list(wav_folder.glob('*.wav')) + list(wav_folder.glob('*.WAV'))
+
+                if not wav_files:
+                    self._scheduled_wav_folders.discard(folder_key)
+                    return
+
+                # Verify ALL WAV files have valid MP3 counterparts
+                all_verified = True
+                for wav_file in wav_files:
+                    mp3_file = parent_folder / wav_file.with_suffix('.mp3').name
+
+                    # Check MP3 exists
+                    if not mp3_file.exists():
+                        self.root.after(0, lambda f=wav_file.name: self.log(
+                            f"MP3 not found for {f}, keeping wav folder", "warning"))
+                        all_verified = False
+                        break
+
+                    # Verify MP3 is valid
+                    if not self._verify_mp3(mp3_file):
+                        self.root.after(0, lambda f=wav_file.name: self.log(
+                            f"MP3 verification failed for {f}, keeping wav folder", "warning"))
+                        all_verified = False
+                        break
+
+                    # Check file size is reasonable (MP3 should be at least 1KB)
+                    if mp3_file.stat().st_size < 1000:
+                        self.root.after(0, lambda f=wav_file.name: self.log(
+                            f"MP3 too small for {f}, keeping wav folder", "warning"))
+                        all_verified = False
+                        break
+
+                # All checks passed - delete entire wav folder
+                if all_verified:
+                    shutil.rmtree(wav_folder)
+                    self.root.after(0, lambda p=wav_folder: self.log(
+                        f"WAV folder deleted (all verified): {p.name}", "success"))
+
+                self._scheduled_wav_folders.discard(folder_key)
+
             except Exception as e:
                 self.root.after(0, lambda err=e: self.log(
-                    f"Could not delete WAV: {err}", "warning"))
+                    f"Could not delete WAV folder: {err}", "warning"))
+                self._scheduled_wav_folders.discard(folder_key)
 
         # Run in background thread
-        threading.Thread(target=delete_after_delay, daemon=True).start()
+        threading.Thread(target=delete_folder_after_delay, daemon=True).start()
 
     def _schedule_h264_deletion(self, h264_path: Path, h265_path: Path):
         """
