@@ -520,6 +520,28 @@ class DropboxClient:
         metadata = self.get_metadata(path)
         return metadata is not None
 
+    def read_text_file(self, path: str, encoding: str = 'utf-8') -> str | None:
+        """
+        Read text file content from Dropbox.
+
+        Args:
+            path: Dropbox path to text file.
+            encoding: Text encoding (default utf-8).
+
+        Returns:
+            File content as string, or None if file not found.
+        """
+        norm_path = self._normalize_path(path)
+
+        def operation() -> str:
+            _, response = self._dbx.files_download(norm_path)
+            return response.content.decode(encoding)
+
+        try:
+            return self._retry_operation(operation, f"read_text_file({path})")
+        except DropboxNotFoundError:
+            return None
+
     def delete_file(self, path: str) -> bool:
         """
         Delete file from Dropbox.

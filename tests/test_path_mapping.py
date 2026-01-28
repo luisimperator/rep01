@@ -3,6 +3,7 @@
 import pytest
 
 from transcoder.utils import (
+    get_h265_log_path,
     get_output_path,
     is_in_h265_folder,
     is_partial_file,
@@ -67,6 +68,23 @@ class TestGetOutputPath:
         """Handles special characters in filename."""
         result = get_output_path("/Videos/My Clip (2023) - Final.mp4")
         assert result == "/Videos/h265/My Clip (2023) - Final.mp4"
+
+
+class TestGetH265LogPath:
+    """Tests for h265 feito.txt log path calculation."""
+
+    def test_basic_path(self) -> None:
+        """Input: /A/B/clip001.MP4 -> Output: /A/B/h265/h265 feito.txt"""
+        assert get_h265_log_path("/A/B/clip001.MP4") == "/A/B/h265/h265 feito.txt"
+
+    def test_deep_path(self) -> None:
+        """Works with deeply nested paths."""
+        result = get_h265_log_path("/Project/Year/Month/Day/clip.mp4")
+        assert result == "/Project/Year/Month/Day/h265/h265 feito.txt"
+
+    def test_root_level_file(self) -> None:
+        """File at root level."""
+        assert get_h265_log_path("/clip.mp4") == "/h265/h265 feito.txt"
 
 
 class TestIsInH265Folder:

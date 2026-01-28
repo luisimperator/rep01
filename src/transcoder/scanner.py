@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING
 from .database import Database, JobState
 from .dropbox_client import DropboxClient, DropboxFileInfo
 from .utils import (
+    get_h265_log_path,
     get_output_path,
     is_in_h265_folder,
     is_partial_file,
@@ -60,6 +61,8 @@ class Scanner:
         self.config = config
         self.db = db
         self.dropbox = dropbox_client
+        # Cache for h265 feito.txt logs (cleared at start of each scan)
+        self._h265_log_cache: dict[str, set[str]] = {}
 
     def scan(self, dry_run: bool = False) -> dict[str, int]:
         """
@@ -78,10 +81,14 @@ class Scanner:
             'skipped_small': 0,
             'skipped_excluded': 0,
             'skipped_exists': 0,
+            'skipped_h265_log': 0,
             'waiting_stable': 0,
             'already_queued': 0,
             'errors': 0,
         }
+
+        # Clear h265 log cache at start of each scan
+        self._h265_log_cache.clear()
 
         logger.info(f"Starting scan of {self.config.dropbox_root}")
 
@@ -107,7 +114,8 @@ class Scanner:
         logger.info(
             f"Scan complete: {stats['scanned']} files scanned, "
             f"{stats['new']} new jobs, "
-            f"{stats['waiting_stable']} waiting for stability"
+            f"{stats['waiting_stable']} waiting for stability, "
+            f"{stats['skipped_h265_log']} already in h265 feito.txt"
         )
 
         return stats
@@ -155,6 +163,11 @@ class Scanner:
                 self._create_skipped_job(file_info, JobState.SKIPPED_TOO_SMALL)
             return 'skipped_small'
 
+        # Check if already in h265 feito.txt log (avoids unnecessary downloads)
+        if self._is_in_h265_feito_log(file_info):
+            logger.debug(f"Skipping (in h265 feito.txt): {path}")
+            return 'skipped_h265_log'
+
         # Check if output already exists
         output_path = get_output_path(path)
         if self.dropbox.file_exists(output_path):
@@ -186,6 +199,46 @@ class Scanner:
         else:
             logger.debug(f"Waiting for stability: {path}")
             return 'waiting_stable'
+
+    def _is_in_h265_feito_log(self, file_info: DropboxFileInfo) -> bool:
+        """
+        Check if file is already logged in h265 feito.txt.
+
+        Uses caching to avoid repeated Dropbox API calls for the same log file.
+
+        Args:
+            file_info: File metadata.
+
+        Returns:
+            True if file is in the log, False otherwise.
+        """
+        from pathlib import PurePosixPath
+
+        log_path = get_h265_log_path(file_info.path)
+        filename = PurePosixPath(file_info.path).name
+
+        # Check cache first
+        if log_path in self._h265_log_cache:
+            return filename in self._h265_log_cache[log_path]
+
+        # Read log file from Dropbox
+        log_content = self.dropbox.read_text_file(log_path)
+        if log_content is None:
+            # Log file doesn't exist, cache empty set
+            self._h265_log_cache[log_path] = set()
+            return False
+
+        # Parse log to extract filenames
+        # Format: "2024-01-27 15:30:45 | video001.mp4 | 8500.5MB -> 2100.3MB (75.3% menor)"
+        filenames = set()
+        for line in log_content.splitlines():
+            parts = line.split('|')
+            if len(parts) >= 2:
+                logged_filename = parts[1].strip()
+                filenames.add(logged_filename)
+
+        self._h265_log_cache[log_path] = filenames
+        return filename in filenames
 
     def _check_stability(self, file_info: DropboxFileInfo) -> str:
         """

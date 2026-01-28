@@ -56,6 +56,19 @@ def get_output_path(input_path: str) -> str:
     return str(output_path)
 
 
+def get_h265_log_path(input_path: str) -> str:
+    """
+    Get path to h265 feito.txt log file for a given input path.
+
+    Input: /A/B/clip001.MP4
+    Output: /A/B/h265/h265 feito.txt
+    """
+    input_path = normalize_dropbox_path(input_path)
+    p = PurePosixPath(input_path)
+    h265_dir = p.parent / "h265"
+    return str(h265_dir / "h265 feito.txt")
+
+
 def is_in_h265_folder(path: str) -> bool:
     """
     Check if path is inside an h265 output folder (R4).
