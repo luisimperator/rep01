@@ -109,6 +109,25 @@ def is_partial_file(path: str) -> bool:
     )
 
 
+def is_youtube_download(path: str) -> bool:
+    """
+    Check if file appears to be downloaded from YouTube.
+
+    YouTube downloads (e.g., from yt-dlp) already have good compression
+    and should not be transcoded again. Detects patterns like:
+    - (2160p_24fps_AV1-128kbit_AAC)
+    - (1080p_30fps_H264-128kbit_AAC)
+    - (720p_60fps_VP9-256kbit_OPUS)
+    """
+    name = Path(path).name
+    # Pattern: (RESp_FPSfps_CODEC-BITRATEkbit_AUDIO)
+    # Matches common YouTube download naming from yt-dlp and similar tools
+    youtube_pattern = re.compile(
+        r'\(\d+p_\d+fps_[A-Za-z0-9]+-\d+kbit_[A-Za-z0-9]+\)'
+    )
+    return bool(youtube_pattern.search(name))
+
+
 def format_bytes(size: int) -> str:
     """Format bytes to human readable string."""
     for unit in ['B', 'KB', 'MB', 'GB', 'TB']:

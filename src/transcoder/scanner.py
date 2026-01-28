@@ -18,6 +18,7 @@ from .utils import (
     is_in_h265_folder,
     is_partial_file,
     is_video_file,
+    is_youtube_download,
     matches_exclude_pattern,
 )
 
@@ -82,6 +83,7 @@ class Scanner:
             'skipped_excluded': 0,
             'skipped_exists': 0,
             'skipped_h265_log': 0,
+            'skipped_youtube': 0,
             'waiting_stable': 0,
             'already_queued': 0,
             'errors': 0,
@@ -115,7 +117,8 @@ class Scanner:
             f"Scan complete: {stats['scanned']} files scanned, "
             f"{stats['new']} new jobs, "
             f"{stats['waiting_stable']} waiting for stability, "
-            f"{stats['skipped_h265_log']} already in h265 feito.txt"
+            f"{stats['skipped_h265_log']} already in h265 feito.txt, "
+            f"{stats['skipped_youtube']} YouTube downloads skipped"
         )
 
         return stats
@@ -151,6 +154,11 @@ class Scanner:
         if matches_exclude_pattern(path, self.config.exclude_patterns):
             logger.debug(f"Skipping (excluded pattern): {path}")
             return 'skipped_excluded'
+
+        # Skip YouTube downloads (already well compressed)
+        if is_youtube_download(path):
+            logger.debug(f"Skipping (YouTube download): {path}")
+            return 'skipped_youtube'
 
         # R5: Minimum size filter
         min_bytes = self.config.min_size_bytes()
