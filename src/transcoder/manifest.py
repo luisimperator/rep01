@@ -1,136 +1,161 @@
 """
-Cloud Manifest - Persistent state storage in Dropbox.
+Global Cloud Manifest - Unified state storage in Dropbox.
 
-Saves processing state to Dropbox so it persists across:
-- SSD wipes ("Make online-only")
-- PC restarts
-- Multiple machines on the same Dropbox account
+Single manifest shared by all PCs on the same Dropbox account.
+Tracks:
+- All processed files (which PC processed each one)
+- Daily progress history
+- Overall statistics
 
-Each PC gets its own manifest folder based on hostname to avoid conflicts.
+Location: D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter\global_manifest.json
 """
 
 import json
 import socket
 import os
+import threading
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, date
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, List
 
 
 def get_pc_name() -> str:
     """Get unique identifier for this PC."""
-    # Try hostname first
     hostname = socket.gethostname()
-
-    # Clean up hostname (remove domain if present)
     if '.' in hostname:
         hostname = hostname.split('.')[0]
-
     return hostname
-
-
-def get_manifest_dir(base_dropbox_path: str = r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter") -> Path:
-    """
-    Get the manifest directory for this PC.
-
-    Returns path like: D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter\PC-GAMING\
-    """
-    pc_name = get_pc_name()
-    return Path(base_dropbox_path) / pc_name
 
 
 @dataclass
 class ProcessedFile:
     """Record of a processed file."""
-    original_path: str           # Original path before processing
-    output_path: str             # Path to h265 output
-    input_size_bytes: int        # Original file size
-    output_size_bytes: int       # Compressed file size
-    compression_ratio: float     # output/input ratio
-    processed_at: str            # ISO timestamp
-    encoder_used: str            # nvenc, qsv, cpu
-    cq_value: int                # Quality setting used
-    duration_seconds: float      # Video duration
-    transcode_seconds: float     # How long transcoding took
+    original_path: str
+    output_path: str
+    input_size_bytes: int
+    output_size_bytes: int
+    compression_ratio: float
+    processed_at: str
+    processed_by_pc: str  # Which PC processed this file
+    encoder_used: str
+    cq_value: int
+    duration_seconds: float = 0
+    transcode_seconds: float = 0
 
 
 @dataclass
-class ManifestStats:
-    """Aggregated statistics."""
+class DailyProgress:
+    """Progress for a single day."""
+    date: str  # YYYY-MM-DD
+    files_processed: int = 0
+    bytes_processed: int = 0
+    bytes_saved: int = 0
+    by_pc: Dict[str, int] = field(default_factory=dict)  # PC name -> files count
+
+
+@dataclass
+class GlobalStats:
+    """Aggregated statistics across all PCs."""
     total_files_processed: int = 0
     total_input_bytes: int = 0
     total_output_bytes: int = 0
     total_saved_bytes: int = 0
     total_transcode_seconds: float = 0
 
-    # Session stats (reset each run)
-    session_files: int = 0
-    session_input_bytes: int = 0
-    session_output_bytes: int = 0
-    session_start: str = ""
+    # Estimates (set by scanning)
+    total_files_to_process: int = 0
+    total_bytes_to_process: int = 0
 
     @property
     def total_saved_gb(self) -> float:
         return self.total_saved_bytes / (1024 ** 3)
 
     @property
+    def total_saved_tb(self) -> float:
+        return self.total_saved_bytes / (1024 ** 4)
+
+    @property
     def total_input_tb(self) -> float:
         return self.total_input_bytes / (1024 ** 4)
 
     @property
+    def total_to_process_tb(self) -> float:
+        return self.total_bytes_to_process / (1024 ** 4)
+
+    @property
+    def progress_percent(self) -> float:
+        total = self.total_input_bytes + self.total_bytes_to_process
+        if total == 0:
+            return 100.0
+        return (self.total_input_bytes / total) * 100
+
+    @property
     def avg_compression_ratio(self) -> float:
         if self.total_input_bytes == 0:
-            return 0
+            return 0.25  # Default estimate
         return self.total_output_bytes / self.total_input_bytes
 
     @property
-    def avg_transcode_speed_gbh(self) -> float:
+    def estimated_final_savings_tb(self) -> float:
+        """Estimate total savings when all files are processed."""
+        ratio = self.avg_compression_ratio if self.avg_compression_ratio > 0 else 0.25
+        future_savings = self.total_bytes_to_process * (1 - ratio)
+        return (self.total_saved_bytes + future_savings) / (1024 ** 4)
+
+    @property
+    def avg_speed_gbh(self) -> float:
         """Average processing speed in GB/hour."""
         if self.total_transcode_seconds == 0:
-            return 0
+            return 50.0  # Default estimate
         hours = self.total_transcode_seconds / 3600
         gb = self.total_input_bytes / (1024 ** 3)
-        return gb / hours
+        return gb / hours if hours > 0 else 50.0
+
+    @property
+    def estimated_days_remaining(self) -> float:
+        """Estimate days to complete remaining work."""
+        if self.avg_speed_gbh == 0:
+            return 0
+        remaining_gb = self.total_bytes_to_process / (1024 ** 3)
+        hours = remaining_gb / self.avg_speed_gbh
+        return hours / 24
 
 
 @dataclass
-class CloudManifest:
+class GlobalManifest:
     """
-    Persistent manifest stored in Dropbox.
-
-    Tracks all processed files so we don't re-process them
-    even after clearing local storage.
+    Global manifest shared by all PCs.
     """
-    pc_name: str
     created_at: str
     last_updated: str
-    stats: ManifestStats = field(default_factory=ManifestStats)
+    last_updated_by: str  # PC name that last updated
+    stats: GlobalStats = field(default_factory=GlobalStats)
 
-    # Map of original_path -> ProcessedFile
-    # Using dict for O(1) lookup
-    processed_files: dict[str, ProcessedFile] = field(default_factory=dict)
+    # All processed files (path -> ProcessedFile)
+    processed_files: Dict[str, ProcessedFile] = field(default_factory=dict)
 
-    # Files that failed processing (path -> error message)
-    failed_files: dict[str, str] = field(default_factory=dict)
+    # Failed files (path -> error message)
+    failed_files: Dict[str, str] = field(default_factory=dict)
 
-    # Files currently being processed (for crash recovery)
-    in_progress: list[str] = field(default_factory=list)
+    # Daily progress history (date -> DailyProgress)
+    daily_history: Dict[str, DailyProgress] = field(default_factory=dict)
+
+    # Active PCs (PC name -> last seen timestamp)
+    active_pcs: Dict[str, str] = field(default_factory=dict)
 
     def is_processed(self, file_path: str) -> bool:
-        """Check if a file has already been processed."""
-        # Normalize path for comparison
         normalized = self._normalize_path(file_path)
         return normalized in self.processed_files
 
     def is_failed(self, file_path: str) -> bool:
-        """Check if a file previously failed."""
         normalized = self._normalize_path(file_path)
         return normalized in self.failed_files
 
-    def add_processed(self, record: ProcessedFile) -> None:
+    def add_processed(self, record: ProcessedFile, pc_name: str) -> None:
         """Record a successfully processed file."""
         normalized = self._normalize_path(record.original_path)
+        record.processed_by_pc = pc_name
         self.processed_files[normalized] = record
 
         # Update stats
@@ -140,55 +165,33 @@ class CloudManifest:
         self.stats.total_saved_bytes += (record.input_size_bytes - record.output_size_bytes)
         self.stats.total_transcode_seconds += record.transcode_seconds
 
-        # Session stats
-        self.stats.session_files += 1
-        self.stats.session_input_bytes += record.input_size_bytes
-        self.stats.session_output_bytes += record.output_size_bytes
+        # Update daily progress
+        today = date.today().isoformat()
+        if today not in self.daily_history:
+            self.daily_history[today] = DailyProgress(date=today)
 
-        # Remove from failed if it was there
+        day = self.daily_history[today]
+        day.files_processed += 1
+        day.bytes_processed += record.input_size_bytes
+        day.bytes_saved += (record.input_size_bytes - record.output_size_bytes)
+        if pc_name not in day.by_pc:
+            day.by_pc[pc_name] = 0
+        day.by_pc[pc_name] += 1
+
+        # Remove from failed if present
         if normalized in self.failed_files:
             del self.failed_files[normalized]
 
-        # Remove from in_progress
-        if normalized in self.in_progress:
-            self.in_progress.remove(normalized)
-
         self.last_updated = datetime.now().isoformat()
+        self.last_updated_by = pc_name
 
-    def add_failed(self, file_path: str, error: str) -> None:
-        """Record a failed file."""
+    def add_failed(self, file_path: str, error: str, pc_name: str) -> None:
         normalized = self._normalize_path(file_path)
-        self.failed_files[normalized] = error
-
-        # Remove from in_progress
-        if normalized in self.in_progress:
-            self.in_progress.remove(normalized)
-
+        self.failed_files[normalized] = f"{error} (by {pc_name})"
         self.last_updated = datetime.now().isoformat()
-
-    def mark_in_progress(self, file_path: str) -> None:
-        """Mark a file as currently being processed."""
-        normalized = self._normalize_path(file_path)
-        if normalized not in self.in_progress:
-            self.in_progress.append(normalized)
-        self.last_updated = datetime.now().isoformat()
-
-    def clear_in_progress(self, file_path: str) -> None:
-        """Remove file from in-progress list."""
-        normalized = self._normalize_path(file_path)
-        if normalized in self.in_progress:
-            self.in_progress.remove(normalized)
+        self.last_updated_by = pc_name
 
     def reset_failed(self, file_path: Optional[str] = None) -> int:
-        """
-        Reset failed files to allow retry.
-
-        Args:
-            file_path: Specific file to reset, or None to reset all.
-
-        Returns:
-            Number of files reset.
-        """
         if file_path:
             normalized = self._normalize_path(file_path)
             if normalized in self.failed_files:
@@ -200,139 +203,144 @@ class CloudManifest:
             self.failed_files.clear()
             return count
 
-    def start_session(self) -> None:
-        """Start a new processing session."""
-        self.stats.session_files = 0
-        self.stats.session_input_bytes = 0
-        self.stats.session_output_bytes = 0
-        self.stats.session_start = datetime.now().isoformat()
+    def update_estimates(self, total_files: int, total_bytes: int) -> None:
+        """Update estimates from a scan."""
+        self.stats.total_files_to_process = total_files
+        self.stats.total_bytes_to_process = total_bytes
+
+    def register_pc(self, pc_name: str) -> None:
+        """Register this PC as active."""
+        self.active_pcs[pc_name] = datetime.now().isoformat()
+
+    def get_daily_progress(self, days: int = 7) -> List[DailyProgress]:
+        """Get progress for last N days."""
+        sorted_dates = sorted(self.daily_history.keys(), reverse=True)[:days]
+        return [self.daily_history[d] for d in sorted_dates]
 
     def _normalize_path(self, path: str) -> str:
-        """Normalize path for consistent comparison."""
-        # Convert to lowercase, use forward slashes
         return path.lower().replace('\\', '/')
 
     def to_dict(self) -> dict:
-        """Convert to dictionary for JSON serialization."""
         return {
-            'pc_name': self.pc_name,
             'created_at': self.created_at,
             'last_updated': self.last_updated,
+            'last_updated_by': self.last_updated_by,
             'stats': asdict(self.stats),
-            'processed_files': {
-                k: asdict(v) for k, v in self.processed_files.items()
-            },
+            'processed_files': {k: asdict(v) for k, v in self.processed_files.items()},
             'failed_files': self.failed_files,
-            'in_progress': self.in_progress,
+            'daily_history': {k: asdict(v) for k, v in self.daily_history.items()},
+            'active_pcs': self.active_pcs,
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> 'CloudManifest':
-        """Create from dictionary."""
-        stats = ManifestStats(**data.get('stats', {}))
+    def from_dict(cls, data: dict) -> 'GlobalManifest':
+        stats = GlobalStats(**data.get('stats', {}))
 
         processed_files = {}
         for k, v in data.get('processed_files', {}).items():
             processed_files[k] = ProcessedFile(**v)
 
+        daily_history = {}
+        for k, v in data.get('daily_history', {}).items():
+            daily_history[k] = DailyProgress(**v)
+
         return cls(
-            pc_name=data['pc_name'],
             created_at=data['created_at'],
             last_updated=data['last_updated'],
+            last_updated_by=data.get('last_updated_by', 'unknown'),
             stats=stats,
             processed_files=processed_files,
             failed_files=data.get('failed_files', {}),
-            in_progress=data.get('in_progress', []),
+            daily_history=daily_history,
+            active_pcs=data.get('active_pcs', {}),
         )
 
 
-class ManifestManager:
+class GlobalManifestManager:
     """
-    Manages the cloud manifest file.
-
-    Handles loading, saving, and auto-save functionality.
+    Manages the global manifest file with thread-safe operations.
     """
 
-    MANIFEST_FILENAME = "manifest.json"
+    MANIFEST_FILENAME = "global_manifest.json"
 
     def __init__(
         self,
         base_dropbox_path: str = r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter",
-        auto_save_interval: int = 5,  # Save every N processed files
+        auto_save_interval: int = 3,
     ):
         self.base_path = Path(base_dropbox_path)
+        self.manifest_path = self.base_path / self.MANIFEST_FILENAME
         self.pc_name = get_pc_name()
-        self.manifest_dir = self.base_path / self.pc_name
-        self.manifest_path = self.manifest_dir / self.MANIFEST_FILENAME
         self.auto_save_interval = auto_save_interval
         self._unsaved_changes = 0
+        self._lock = threading.Lock()
 
-        self.manifest: CloudManifest = self._load_or_create()
+        self.manifest: GlobalManifest = self._load_or_create()
+        self.manifest.register_pc(self.pc_name)
 
-    def _load_or_create(self) -> CloudManifest:
+    def _load_or_create(self) -> GlobalManifest:
         """Load existing manifest or create new one."""
         if self.manifest_path.exists():
             try:
                 with open(self.manifest_path, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                manifest = CloudManifest.from_dict(data)
-                print(f"[Manifest] Loaded: {len(manifest.processed_files)} processed files")
+                manifest = GlobalManifest.from_dict(data)
+                print(f"[Manifest] Loaded: {manifest.stats.total_files_processed} files processed")
                 return manifest
             except Exception as e:
                 print(f"[Manifest] Error loading, creating new: {e}")
 
-        # Create new manifest
         now = datetime.now().isoformat()
-        manifest = CloudManifest(
-            pc_name=self.pc_name,
+        manifest = GlobalManifest(
             created_at=now,
             last_updated=now,
+            last_updated_by=self.pc_name,
         )
 
-        # Ensure directory exists
-        self.manifest_dir.mkdir(parents=True, exist_ok=True)
-
-        print(f"[Manifest] Created new manifest for PC: {self.pc_name}")
+        self.base_path.mkdir(parents=True, exist_ok=True)
+        print(f"[Manifest] Created new global manifest")
         return manifest
 
+    def refresh(self) -> GlobalManifest:
+        """Reload manifest from disk (to get updates from other PCs)."""
+        with self._lock:
+            if self.manifest_path.exists():
+                try:
+                    with open(self.manifest_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    self.manifest = GlobalManifest.from_dict(data)
+                    self.manifest.register_pc(self.pc_name)
+                except Exception as e:
+                    print(f"[Manifest] Refresh error: {e}")
+        return self.manifest
+
     def save(self, force: bool = False) -> None:
-        """
-        Save manifest to disk.
+        """Save manifest to disk."""
+        with self._lock:
+            self._unsaved_changes += 1
 
-        Args:
-            force: If True, save immediately. Otherwise, use auto-save interval.
-        """
-        self._unsaved_changes += 1
+            if not force and self._unsaved_changes < self.auto_save_interval:
+                return
 
-        if not force and self._unsaved_changes < self.auto_save_interval:
-            return
+            try:
+                self.base_path.mkdir(parents=True, exist_ok=True)
 
-        try:
-            # Ensure directory exists
-            self.manifest_dir.mkdir(parents=True, exist_ok=True)
+                temp_path = self.manifest_path.with_suffix('.tmp')
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.manifest.to_dict(), f, indent=2, ensure_ascii=False)
 
-            # Write to temp file first, then rename (atomic on most systems)
-            temp_path = self.manifest_path.with_suffix('.tmp')
-            with open(temp_path, 'w', encoding='utf-8') as f:
-                json.dump(self.manifest.to_dict(), f, indent=2, ensure_ascii=False)
-
-            # Rename temp to final
-            temp_path.replace(self.manifest_path)
-
-            self._unsaved_changes = 0
-        except Exception as e:
-            print(f"[Manifest] Error saving: {e}")
+                temp_path.replace(self.manifest_path)
+                self._unsaved_changes = 0
+            except Exception as e:
+                print(f"[Manifest] Save error: {e}")
 
     def is_processed(self, file_path: str) -> bool:
-        """Check if file was already processed."""
         return self.manifest.is_processed(file_path)
 
     def is_failed(self, file_path: str) -> bool:
-        """Check if file previously failed."""
         return self.manifest.is_failed(file_path)
 
     def should_process(self, file_path: str) -> bool:
-        """Check if file should be processed (not done, not failed)."""
         return not self.is_processed(file_path) and not self.is_failed(file_path)
 
     def record_success(
@@ -343,10 +351,9 @@ class ManifestManager:
         output_size: int,
         encoder: str,
         cq_value: int,
-        duration: float,
-        transcode_time: float,
+        duration: float = 0,
+        transcode_time: float = 0,
     ) -> None:
-        """Record a successfully processed file."""
         record = ProcessedFile(
             original_path=original_path,
             output_path=output_path,
@@ -354,69 +361,76 @@ class ManifestManager:
             output_size_bytes=output_size,
             compression_ratio=output_size / input_size if input_size > 0 else 0,
             processed_at=datetime.now().isoformat(),
+            processed_by_pc=self.pc_name,
             encoder_used=encoder,
             cq_value=cq_value,
             duration_seconds=duration,
             transcode_seconds=transcode_time,
         )
-        self.manifest.add_processed(record)
+        self.manifest.add_processed(record, self.pc_name)
         self.save()
 
     def record_failure(self, file_path: str, error: str) -> None:
-        """Record a failed file."""
-        self.manifest.add_failed(file_path, error)
+        self.manifest.add_failed(file_path, error, self.pc_name)
         self.save(force=True)
 
-    def mark_in_progress(self, file_path: str) -> None:
-        """Mark file as being processed."""
-        self.manifest.mark_in_progress(file_path)
-        self.save()
-
     def reset_failed(self, file_path: Optional[str] = None) -> int:
-        """Reset failed files."""
         count = self.manifest.reset_failed(file_path)
         self.save(force=True)
         return count
 
-    def start_session(self) -> None:
-        """Start a new processing session."""
-        self.manifest.start_session()
+    def update_estimates(self, total_files: int, total_bytes: int) -> None:
+        """Update work estimates from a scan."""
+        self.manifest.update_estimates(total_files, total_bytes)
         self.save(force=True)
 
-    def get_stats_summary(self) -> str:
-        """Get human-readable stats summary."""
+    def get_dashboard_data(self) -> dict:
+        """Get data for dashboard display."""
         s = self.manifest.stats
-        lines = [
-            f"=== Manifest Stats ({self.pc_name}) ===",
-            f"Total processed: {s.total_files_processed:,} files",
-            f"Total input:     {s.total_input_tb:.2f} TB",
-            f"Total saved:     {s.total_saved_gb:,.1f} GB",
-            f"Avg compression: {s.avg_compression_ratio:.1%}",
-            f"Avg speed:       {s.avg_transcode_speed_gbh:.1f} GB/hour",
-            f"",
-            f"Session: {s.session_files} files ({s.session_input_bytes / (1024**3):.1f} GB)",
-            f"Failed:  {len(self.manifest.failed_files)} files",
-        ]
-        return "\n".join(lines)
+        return {
+            'pc_name': self.pc_name,
+            'last_updated': self.manifest.last_updated,
+            'last_updated_by': self.manifest.last_updated_by,
+            'active_pcs': list(self.manifest.active_pcs.keys()),
+
+            # Progress
+            'total_processed': s.total_files_processed,
+            'total_to_process': s.total_files_to_process,
+            'progress_percent': s.progress_percent,
+
+            # Sizes
+            'processed_tb': s.total_input_tb,
+            'to_process_tb': s.total_to_process_tb,
+            'saved_tb': s.total_saved_tb,
+            'estimated_total_savings_tb': s.estimated_final_savings_tb,
+
+            # Performance
+            'avg_compression': (1 - s.avg_compression_ratio) * 100,
+            'avg_speed_gbh': s.avg_speed_gbh,
+            'days_remaining': s.estimated_days_remaining,
+
+            # Daily history
+            'daily_progress': [
+                {
+                    'date': d.date,
+                    'files': d.files_processed,
+                    'gb_processed': d.bytes_processed / (1024**3),
+                    'gb_saved': d.bytes_saved / (1024**3),
+                    'by_pc': d.by_pc,
+                }
+                for d in self.manifest.get_daily_progress(14)
+            ],
+
+            # Failures
+            'failed_count': len(self.manifest.failed_files),
+        }
 
     def get_manifest_path(self) -> Path:
-        """Get path to manifest file."""
         return self.manifest_path
 
     def close(self) -> None:
-        """Save and close."""
         self.save(force=True)
 
 
-# Convenience function for quick checks
-def quick_is_processed(
-    file_path: str,
-    base_dropbox_path: str = r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter",
-) -> bool:
-    """
-    Quick check if a file was processed (loads manifest each time).
-
-    For batch operations, use ManifestManager instead.
-    """
-    manager = ManifestManager(base_dropbox_path)
-    return manager.is_processed(file_path)
+# Backward compatibility alias
+ManifestManager = GlobalManifestManager

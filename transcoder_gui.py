@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.2.7"
+VERSION = "1.2.8"
 
 import socket
 import subprocess
@@ -211,6 +211,77 @@ class TranscoderGUI:
 
         self.progress_label = ttk.Label(progress_frame, text="", font=("", 8))
         self.progress_label.pack(fill=tk.X, pady=(5, 0))
+
+        # === DASHBOARD FRAME ===
+        dashboard_frame = ttk.LabelFrame(main_frame, text="📊 Dashboard Global (todos os PCs)", padding="10")
+        dashboard_frame.pack(fill=tk.X, pady=(0, 10))
+
+        # Top row: Refresh button and last update info
+        dash_top = ttk.Frame(dashboard_frame)
+        dash_top.pack(fill=tk.X)
+
+        ttk.Button(dash_top, text="🔄 REFRESH", command=self.refresh_dashboard).pack(side=tk.LEFT)
+        self.dash_last_update = ttk.Label(dash_top, text="", font=("", 8))
+        self.dash_last_update.pack(side=tk.LEFT, padx=(10, 0))
+        self.dash_active_pcs = ttk.Label(dash_top, text="", font=("", 8))
+        self.dash_active_pcs.pack(side=tk.RIGHT)
+
+        # Main stats row
+        dash_stats = ttk.Frame(dashboard_frame)
+        dash_stats.pack(fill=tk.X, pady=(10, 5))
+
+        # Progress percentage
+        self.dash_progress_var = tk.DoubleVar(value=0)
+        ttk.Label(dash_stats, text="Progresso Total:", font=("", 9, "bold")).pack(side=tk.LEFT)
+        self.dash_progress_pct = ttk.Label(dash_stats, text="0%", font=("", 12, "bold"), foreground="blue")
+        self.dash_progress_pct.pack(side=tk.LEFT, padx=(5, 10))
+
+        self.dash_progress_bar = ttk.Progressbar(dash_stats, mode='determinate', variable=self.dash_progress_var, maximum=100, length=200)
+        self.dash_progress_bar.pack(side=tk.LEFT, padx=(0, 20))
+
+        # Files count
+        self.dash_files_label = ttk.Label(dash_stats, text="0 / 0 arquivos", font=("", 9))
+        self.dash_files_label.pack(side=tk.LEFT)
+
+        # Size stats row
+        dash_sizes = ttk.Frame(dashboard_frame)
+        dash_sizes.pack(fill=tk.X, pady=(5, 5))
+
+        self.dash_processed_label = ttk.Label(dash_sizes, text="Processado: 0 TB", font=("", 9))
+        self.dash_processed_label.pack(side=tk.LEFT, padx=(0, 20))
+
+        self.dash_remaining_label = ttk.Label(dash_sizes, text="Restante: 0 TB", font=("", 9))
+        self.dash_remaining_label.pack(side=tk.LEFT, padx=(0, 20))
+
+        self.dash_saved_label = ttk.Label(dash_sizes, text="Economizado: 0 TB", font=("", 9), foreground="green")
+        self.dash_saved_label.pack(side=tk.LEFT, padx=(0, 20))
+
+        self.dash_estimate_label = ttk.Label(dash_sizes, text="Economia estimada: 0 TB", font=("", 9))
+        self.dash_estimate_label.pack(side=tk.LEFT)
+
+        # Performance row
+        dash_perf = ttk.Frame(dashboard_frame)
+        dash_perf.pack(fill=tk.X, pady=(5, 5))
+
+        self.dash_speed_label = ttk.Label(dash_perf, text="Velocidade: 0 GB/h", font=("", 9))
+        self.dash_speed_label.pack(side=tk.LEFT, padx=(0, 20))
+
+        self.dash_compression_label = ttk.Label(dash_perf, text="Compressão: 0%", font=("", 9))
+        self.dash_compression_label.pack(side=tk.LEFT, padx=(0, 20))
+
+        self.dash_eta_label = ttk.Label(dash_perf, text="ETA: 0 dias", font=("", 9))
+        self.dash_eta_label.pack(side=tk.LEFT)
+
+        # Daily progress row
+        dash_daily = ttk.Frame(dashboard_frame)
+        dash_daily.pack(fill=tk.X, pady=(5, 0))
+
+        ttk.Label(dash_daily, text="Últimos dias:", font=("", 8)).pack(side=tk.LEFT)
+        self.dash_daily_label = ttk.Label(dash_daily, text="", font=("Consolas", 8))
+        self.dash_daily_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Initial dashboard load
+        self.root.after(1000, self.refresh_dashboard)
 
         # === LOG FRAME ===
         log_frame = ttk.LabelFrame(main_frame, text="Log", padding="5")
@@ -854,6 +925,57 @@ class TranscoderGUI:
         except Exception as e:
             self.log(f"Cloud manifest error: {e}", "warning")
             self.cloud_manifest = None
+
+    def refresh_dashboard(self):
+        """Refresh dashboard with latest manifest data."""
+        if not self.cloud_manifest:
+            self.dash_last_update.config(text="Manifest não disponível")
+            return
+
+        try:
+            # Reload from disk to get updates from other PCs
+            self.cloud_manifest.refresh()
+            data = self.cloud_manifest.get_dashboard_data()
+
+            # Update last update info
+            last_update = data['last_updated'][:19].replace('T', ' ') if data['last_updated'] else 'nunca'
+            self.dash_last_update.config(text=f"Atualizado: {last_update} por {data['last_updated_by']}")
+
+            # Active PCs
+            pcs = ', '.join(data['active_pcs'][:5])
+            if len(data['active_pcs']) > 5:
+                pcs += f" +{len(data['active_pcs'])-5}"
+            self.dash_active_pcs.config(text=f"PCs: {pcs}")
+
+            # Progress
+            pct = data['progress_percent']
+            self.dash_progress_var.set(pct)
+            self.dash_progress_pct.config(text=f"{pct:.1f}%")
+
+            total = data['total_processed'] + data['total_to_process']
+            self.dash_files_label.config(text=f"{data['total_processed']:,} / {total:,} arquivos")
+
+            # Sizes
+            self.dash_processed_label.config(text=f"Processado: {data['processed_tb']:.2f} TB")
+            self.dash_remaining_label.config(text=f"Restante: {data['to_process_tb']:.2f} TB")
+            self.dash_saved_label.config(text=f"Economizado: {data['saved_tb']:.2f} TB")
+            self.dash_estimate_label.config(text=f"Economia total estimada: {data['estimated_total_savings_tb']:.2f} TB")
+
+            # Performance
+            self.dash_speed_label.config(text=f"Velocidade: {data['avg_speed_gbh']:.1f} GB/h")
+            self.dash_compression_label.config(text=f"Compressão: {data['avg_compression']:.1f}%")
+            self.dash_eta_label.config(text=f"ETA: {data['days_remaining']:.0f} dias")
+
+            # Daily progress (last 7 days as text)
+            daily_text = ""
+            for day in data['daily_progress'][:7]:
+                date_short = day['date'][5:]  # MM-DD
+                daily_text += f"[{date_short}: {day['files']}arq {day['gb_saved']:.0f}GB] "
+            self.dash_daily_label.config(text=daily_text.strip())
+
+            self.log("Dashboard atualizado", "info")
+        except Exception as e:
+            self.log(f"Erro ao atualizar dashboard: {e}", "warning")
 
     def load_stats(self):
         """Load stats from database."""
