@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.2.8"
+VERSION = "1.2.9"
 
 import socket
 import subprocess
@@ -35,16 +35,46 @@ from tkinter import ttk, filedialog, messagebox, scrolledtext
 
 # Cloud manifest for persistent state in Dropbox
 try:
-    from src.transcoder.manifest import ManifestManager, get_pc_name
+    from src.transcoder.manifest import ManifestManager, get_pc_name, find_dropbox_path
     HAS_MANIFEST = True
 except ImportError:
     # Fallback if manifest module not available
     HAS_MANIFEST = False
+    import string as _string
+
+    def find_dropbox_path():
+        """Auto-detect HeavyDrops Dropbox path by searching available drives."""
+        import os
+        dropbox_folder = "HeavyDrops Dropbox"
+        app_subfolder = Path("HeavyDrops") / "App h265 Converter"
+
+        # Check common drives
+        drives_to_check = ['D', 'C', 'E', 'F', 'G', 'H']
+        if os.name == 'nt':
+            for letter in _string.ascii_uppercase:
+                if Path(f"{letter}:\\").exists() and letter not in drives_to_check:
+                    drives_to_check.append(letter)
+
+        for drive in drives_to_check:
+            dropbox_root = Path(f"{drive}:\\{dropbox_folder}")
+            if dropbox_root.exists():
+                return dropbox_root / app_subfolder
+        return None
+
     def get_pc_name():
         hostname = socket.gethostname()
         if '.' in hostname:
             hostname = hostname.split('.')[0]
         return hostname
+
+
+def get_dropbox_base_path() -> Path:
+    """Get the Dropbox base path, auto-detecting if possible."""
+    detected = find_dropbox_path()
+    if detected:
+        return detected
+    # Fallback to D: drive (most common)
+    return Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
 
 # Windows-specific for beep sound
 try:
@@ -58,15 +88,16 @@ class TranscoderGUI:
     # Settings file path
     SETTINGS_FILE = Path(r"C:\transcoder\settings.json")
 
-    # Base path for cloud manifest (in Dropbox)
-    CLOUD_MANIFEST_BASE = Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
-
     def __init__(self, root):
         self.root = root
         self.pc_name = get_pc_name()
         self.root.title(f"HeavyDrops Transcoder v{VERSION} - H.264 → H.265 [{self.pc_name}]")
         self.root.geometry("900x700")
         self.root.minsize(800, 600)
+
+        # Auto-detect Dropbox path (works for D:, C:, or any drive)
+        self.dropbox_base = get_dropbox_base_path()
+        print(f"[GUI] Dropbox path: {self.dropbox_base}")
 
         # State
         self.running = False
@@ -79,9 +110,11 @@ class TranscoderGUI:
         self.cloud_manifest = None  # Cloud manifest manager
         self.files_in_batch = 0  # Track files processed in current batch
 
-        # Default settings
-        self.watch_folder = tk.StringVar(value=r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
-        self.log_folder = tk.StringVar(value=r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter\logs")
+        # Default settings (using auto-detected path)
+        default_folder = str(self.dropbox_base)
+        default_logs = str(self.dropbox_base / "logs")
+        self.watch_folder = tk.StringVar(value=default_folder)
+        self.log_folder = tk.StringVar(value=default_logs)
         self.min_size_gb = tk.DoubleVar(value=0)
         self.encoder = tk.StringVar(value="nvenc")
         self.cq_value = tk.IntVar(value=24)
@@ -917,7 +950,7 @@ class TranscoderGUI:
 
         try:
             self.cloud_manifest = ManifestManager(
-                base_dropbox_path=str(self.CLOUD_MANIFEST_BASE)
+                base_dropbox_path=str(self.dropbox_base)
             )
             manifest_path = self.cloud_manifest.get_manifest_path()
             self.log(f"Cloud manifest: {manifest_path}", "info")

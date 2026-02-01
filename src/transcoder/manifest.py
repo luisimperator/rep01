@@ -7,17 +7,61 @@ Tracks:
 - Daily progress history
 - Overall statistics
 
-Location: D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter\global_manifest.json
+Location: {dropbox_drive}:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter\global_manifest.json
 """
 
 import json
 import socket
 import os
+import string
 import threading
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, date
 from pathlib import Path
 from typing import Optional, Dict, List
+
+
+def find_dropbox_path() -> Optional[Path]:
+    """
+    Auto-detect HeavyDrops Dropbox path by searching available drives.
+    Works for Heavy1-Heavy6 (D:) and Heavy7 (C:).
+    """
+    # The folder structure we're looking for
+    dropbox_folder = "HeavyDrops Dropbox"
+    app_subfolder = Path("HeavyDrops") / "App h265 Converter"
+
+    # Check common drives in order of preference
+    drives_to_check = ['D', 'C', 'E', 'F', 'G', 'H']
+
+    # Also check all available drive letters on Windows
+    if os.name == 'nt':
+        available_drives = []
+        for letter in string.ascii_uppercase:
+            drive_path = Path(f"{letter}:\\")
+            if drive_path.exists():
+                available_drives.append(letter)
+        # Prioritize D and C, then add others
+        drives_to_check = ['D', 'C'] + [d for d in available_drives if d not in ['D', 'C']]
+
+    for drive in drives_to_check:
+        dropbox_root = Path(f"{drive}:\\{dropbox_folder}")
+        if dropbox_root.exists():
+            full_path = dropbox_root / app_subfolder
+            print(f"[Manifest] Found Dropbox at: {full_path}")
+            return full_path
+
+    # Fallback: try common locations
+    fallback_paths = [
+        Path(os.path.expanduser("~")) / "Dropbox" / "HeavyDrops" / "App h265 Converter",
+        Path(os.path.expanduser("~")) / dropbox_folder / "HeavyDrops" / "App h265 Converter",
+    ]
+
+    for path in fallback_paths:
+        if path.parent.exists():  # Check if HeavyDrops folder exists
+            print(f"[Manifest] Found Dropbox at: {path}")
+            return path
+
+    return None
 
 
 def get_pc_name() -> str:
@@ -265,10 +309,21 @@ class GlobalManifestManager:
 
     def __init__(
         self,
-        base_dropbox_path: str = r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter",
+        base_dropbox_path: Optional[str] = None,
         auto_save_interval: int = 3,
     ):
-        self.base_path = Path(base_dropbox_path)
+        # Auto-detect Dropbox path if not provided
+        if base_dropbox_path:
+            self.base_path = Path(base_dropbox_path)
+        else:
+            detected = find_dropbox_path()
+            if detected:
+                self.base_path = detected
+            else:
+                # Last resort fallback
+                self.base_path = Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
+                print(f"[Manifest] WARNING: Could not detect Dropbox, using default: {self.base_path}")
+
         self.manifest_path = self.base_path / self.MANIFEST_FILENAME
         self.pc_name = get_pc_name()
         self.auto_save_interval = auto_save_interval
