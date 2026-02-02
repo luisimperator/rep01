@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 
 import socket
 import subprocess
@@ -1905,6 +1905,106 @@ class TranscoderGUI:
         self.root.after(0, lambda: self.pause_btn.config(state=tk.DISABLED, text="⏸ PAUSE"))
         self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
 
+    def _quick_check_file(self, file_path: Path):
+        """
+        Quick parallel check of a file to determine if it needs transcoding.
+        Returns: (file_path, status, reason, size) where status is 'transcode', 'skip', or 'cloud'
+        """
+        try:
+            # Check if file is local (not cloud-only)
+            try:
+                with open(file_path, 'rb') as f:
+                    f.read(1024)  # Read 1KB to check access
+            except OSError as e:
+                if e.errno == 22:  # Cloud-only file
+                    return (file_path, 'cloud', 'cloud-only', 0)
+                raise
+
+            file_size = file_path.stat().st_size
+
+            # Check if output already exists
+            output_path = file_path.parent / 'h265' / file_path.name
+            if output_path.exists():
+                return (file_path, 'skip', 'output_exists', file_size)
+
+            # Quick probe using FFprobe
+            probe_data = self.probe_video(file_path)
+            if not probe_data:
+                return (file_path, 'skip', 'probe_failed', file_size)
+
+            # Check if already HEVC
+            if self.is_hevc(probe_data):
+                # Save to manifest
+                if self.cloud_manifest:
+                    self.cloud_manifest.record_skipped(str(file_path), 'already_hevc', file_size)
+                return (file_path, 'skip', 'already_hevc', file_size)
+
+            # Check bitrate
+            bitrate = self.get_bitrate(probe_data, file_size)
+            if bitrate > 0 and bitrate < 8:  # Less than 8 Mbps
+                # Save to manifest
+                if self.cloud_manifest:
+                    self.cloud_manifest.record_skipped(str(file_path), f'low_bitrate_{bitrate:.1f}', file_size)
+                return (file_path, 'skip', f'low_bitrate_{bitrate:.1f}', file_size)
+
+            # File needs transcoding
+            return (file_path, 'transcode', 'needs_work', file_size)
+
+        except Exception as e:
+            return (file_path, 'skip', f'error: {e}', 0)
+
+    def _parallel_precheck(self, pending_files, max_workers=16):
+        """
+        Check multiple files in parallel to quickly filter out files that don't need transcoding.
+        Returns list of files that actually need transcoding.
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        files_to_transcode = []
+        skipped = {'hevc': 0, 'low_bitrate': 0, 'exists': 0, 'cloud': 0, 'error': 0}
+        total = len(pending_files)
+
+        self.root.after(0, lambda: self.log(f"Pre-checking {total} files with {max_workers} threads...", "info"))
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all files for checking
+            futures = {executor.submit(self._quick_check_file, f): f for f, _ in pending_files}
+
+            checked = 0
+            for future in as_completed(futures):
+                if not self.running:
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+
+                checked += 1
+                file_path, status, reason, size = future.result()
+
+                if status == 'transcode':
+                    files_to_transcode.append((file_path, size))
+                elif status == 'skip':
+                    if 'hevc' in reason:
+                        skipped['hevc'] += 1
+                    elif 'bitrate' in reason:
+                        skipped['low_bitrate'] += 1
+                    elif 'exists' in reason:
+                        skipped['exists'] += 1
+                    else:
+                        skipped['error'] += 1
+                elif status == 'cloud':
+                    skipped['cloud'] += 1
+
+                # Progress update every 100 files
+                if checked % 100 == 0 or checked == total:
+                    self.root.after(0, lambda c=checked, t=total, n=len(files_to_transcode):
+                        self.log(f"Pre-check: {c}/{t} ({n} need transcoding)", "info"))
+
+        # Summary
+        self.root.after(0, lambda s=skipped: self.log(
+            f"Pre-check complete: {s['hevc']} HEVC, {s['low_bitrate']} low-bitrate, "
+            f"{s['exists']} exist, {s['cloud']} cloud, {s['error']} errors", "success"))
+
+        return files_to_transcode
+
     def scan_and_process(self):
         """Scan folder and process files."""
         folder = Path(self.watch_folder.get())
@@ -1930,6 +2030,9 @@ class TranscoderGUI:
                 if 'h265' not in str(f).lower() and 'h264' not in str(f).lower() and not f.name.startswith('._'):
                     video_files.append(f)
 
+        # Remove duplicates (same file appearing multiple times)
+        video_files = list(set(video_files))
+
         # Filter to only unprocessed files and sort by size (smaller first)
         pending_files = []
         for f in video_files:
@@ -1941,18 +2044,29 @@ class TranscoderGUI:
                 except:
                     pass
 
-        # Smart sorting: prioritize folders closer to completion
-        # This helps free up space faster (h264 folders are deleted when complete)
-        pending_files = self._sort_by_folder_completion(pending_files)
-
         total_pending = len(pending_files)
         self.root.after(0, lambda t=total_pending, a=len(video_files): self.log(
             f"Found {a} videos, {t} pending"))
 
+        # PARALLEL PRE-CHECK: quickly filter files that don't need transcoding
+        if total_pending > 10:
+            # Use parallel checking for large queues
+            files_to_transcode = self._parallel_precheck(pending_files, max_workers=16)
+        else:
+            # For small queues, use direct processing
+            files_to_transcode = pending_files
+
+        # Smart sorting: prioritize folders closer to completion
+        files_to_transcode = self._sort_by_folder_completion(files_to_transcode)
+
+        total_to_transcode = len(files_to_transcode)
+        self.root.after(0, lambda t=total_to_transcode: self.log(
+            f"Transcode queue: {t} files", "info"))
+
         # Track files processed in this scan
         files_processed_this_scan = 0
 
-        for idx, (video_path, file_size) in enumerate(pending_files):
+        for idx, (video_path, file_size) in enumerate(files_to_transcode):
             if not self.running:
                 break
 
@@ -2451,8 +2565,8 @@ class TranscoderGUI:
                     return False  # Skip for now, will retry next scan
                 raise
 
-            # Check if size is stable (file finished downloading)
-            time.sleep(2)
+            # Quick stability check (reduced from 2s since precheck already validated)
+            time.sleep(0.3)
             new_size = file_path.stat().st_size
 
             if current_size == new_size and current_size > 10000:
