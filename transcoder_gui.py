@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.3.4"
+VERSION = "1.3.5"
 
 import socket
 import subprocess
@@ -2418,9 +2418,13 @@ class TranscoderGUI:
                 # All checks passed - delete entire h264 folder
                 if all_verified:
                     import shutil
+                    # Calculate folder size before deletion
+                    folder_size = sum(f.stat().st_size for f in h264_folder.rglob('*') if f.is_file())
+                    folder_size_gb = folder_size / (1024**3)
+                    file_count = len(h264_files)
                     shutil.rmtree(h264_folder)
-                    self.root.after(0, lambda p=h264_folder: self.log(
-                        f"H264 folder deleted (all verified): {p.name}", "success"))
+                    self.root.after(0, lambda p=h264_folder, n=file_count, s=folder_size_gb: self.log(
+                        f"H264 folder deleted: {n} files, {s:.2f} GB freed - {p.name}", "success"))
 
                     # Log deletion timestamp to h265 feito.txt
                     h265_folder = parent_folder / 'h265'
