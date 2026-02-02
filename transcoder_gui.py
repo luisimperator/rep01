@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.3.3"
+VERSION = "1.3.4"
 
 import socket
 import subprocess
@@ -2048,25 +2048,13 @@ class TranscoderGUI:
         self.root.after(0, lambda t=total_pending, a=len(video_files): self.log(
             f"Found {a} videos, {t} pending"))
 
-        # PARALLEL PRE-CHECK: quickly filter files that don't need transcoding
-        if total_pending > 10:
-            # Use parallel checking for large queues
-            files_to_transcode = self._parallel_precheck(pending_files, max_workers=16)
-        else:
-            # For small queues, use direct processing
-            files_to_transcode = pending_files
-
         # Smart sorting: prioritize folders closer to completion
-        files_to_transcode = self._sort_by_folder_completion(files_to_transcode)
-
-        total_to_transcode = len(files_to_transcode)
-        self.root.after(0, lambda t=total_to_transcode: self.log(
-            f"Transcode queue: {t} files", "info"))
+        pending_files = self._sort_by_folder_completion(pending_files)
 
         # Track files processed in this scan
         files_processed_this_scan = 0
 
-        for idx, (video_path, file_size) in enumerate(files_to_transcode):
+        for idx, (video_path, file_size) in enumerate(pending_files):
             if not self.running:
                 break
 

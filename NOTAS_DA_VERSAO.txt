@@ -2,11 +2,25 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
-Versão: 1.3.3
+Versão: 1.3.4
 Data: 02/02/2026
 --------------------------------------------------------------------------------
 
 NOVIDADES DESTA VERSÃO:
+
+  [REVERT] Volta ao processamento sequencial com feedback imediato
+  ----------------------------------------------------------------
+  Removido o pre-check paralelo que demorava muito sem dar feedback.
+  Agora você vê cada arquivo sendo processado em tempo real novamente.
+
+  Mantidas as otimizações:
+  - Arquivos duplicados removidos automaticamente
+  - Wait reduzido de 2s para 0.3s
+  - Skipped files salvos no manifest
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.3 (02/02/2026):
 
   [DOC] Documentação incluída no pacote
   -------------------------------------
@@ -18,13 +32,9 @@ NOVIDADES DESTA VERSÃO:
 
 VERSÃO 1.3.2 (02/02/2026):
 
-  [PERFORMANCE] Verificação paralela com 16 threads
-  ------------------------------------------------
-  Antes: verificar 158.000 arquivos levava ~88 horas (2 seg/arquivo)
-  Agora: mesma quantidade em ~50 minutos (16 arquivos simultâneos)
-
-  Seu i9-14900K finalmente vai trabalhar! CPU sobe para 30-50% durante
-  a fase de pré-verificação.
+  [PERFORMANCE] Verificação paralela com 16 threads (REMOVIDO na 1.3.4)
+  ---------------------------------------------------------------------
+  Feature removida por demorar muito sem feedback visual.
 
   [FIX] Arquivos duplicados na fila
   ---------------------------------
