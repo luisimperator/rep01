@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.2.9"
+VERSION = "1.3.0"
 
 import socket
 import subprocess
@@ -254,8 +254,11 @@ class TranscoderGUI:
         dash_top.pack(fill=tk.X)
 
         ttk.Button(dash_top, text="🔄 REFRESH", command=self.refresh_dashboard).pack(side=tk.LEFT)
+        ttk.Button(dash_top, text="📋 SCAN", command=self.run_inventory_scan).pack(side=tk.LEFT, padx=(5, 0))
         self.dash_last_update = ttk.Label(dash_top, text="", font=("", 8))
         self.dash_last_update.pack(side=tk.LEFT, padx=(10, 0))
+        self.dash_skipped_label = ttk.Label(dash_top, text="", font=("", 8), foreground="gray")
+        self.dash_skipped_label.pack(side=tk.RIGHT, padx=(10, 0))
         self.dash_active_pcs = ttk.Label(dash_top, text="", font=("", 8))
         self.dash_active_pcs.pack(side=tk.RIGHT)
 
@@ -949,14 +952,25 @@ class TranscoderGUI:
             return
 
         try:
+            self.log(f"Dropbox base detectado: {self.dropbox_base}", "info")
+
+            # Check if path exists
+            if not self.dropbox_base.exists():
+                self.log(f"Criando pasta: {self.dropbox_base}", "info")
+                self.dropbox_base.mkdir(parents=True, exist_ok=True)
+
             self.cloud_manifest = ManifestManager(
                 base_dropbox_path=str(self.dropbox_base)
             )
             manifest_path = self.cloud_manifest.get_manifest_path()
-            self.log(f"Cloud manifest: {manifest_path}", "info")
-            self.log(f"PC: {self.pc_name} | Processed: {self.cloud_manifest.manifest.stats.total_files_processed}", "info")
+            self.log(f"Cloud manifest: {manifest_path}", "success")
+
+            stats = self.cloud_manifest.get_stats_summary()
+            self.log(f"PC: {self.pc_name} | Processados: {stats['processed']} | Skipados: {stats['skipped']} | Salvos: {stats['saved_tb']:.2f} TB", "info")
         except Exception as e:
+            import traceback
             self.log(f"Cloud manifest error: {e}", "warning")
+            self.log(f"Traceback: {traceback.format_exc()}", "warning")
             self.cloud_manifest = None
 
     def refresh_dashboard(self):
@@ -979,6 +993,10 @@ class TranscoderGUI:
             if len(data['active_pcs']) > 5:
                 pcs += f" +{len(data['active_pcs'])-5}"
             self.dash_active_pcs.config(text=f"PCs: {pcs}")
+
+            # Skipped count
+            skipped = data.get('skipped_count', 0)
+            self.dash_skipped_label.config(text=f"Skipados: {skipped:,}" if skipped > 0 else "")
 
             # Progress
             pct = data['progress_percent']
@@ -1010,6 +1028,157 @@ class TranscoderGUI:
         except Exception as e:
             self.log(f"Erro ao atualizar dashboard: {e}", "warning")
 
+    def run_inventory_scan(self):
+        """Run inventory scan via Dropbox API (no downloads)."""
+        if self.running:
+            messagebox.showwarning("Scan", "Pare o transcoder antes de rodar o scan!")
+            return
+
+        watch_folder = self.watch_folder.get()
+        if not watch_folder:
+            messagebox.showwarning("Scan", "Configure a pasta do Dropbox primeiro!")
+            return
+
+        self.log("=" * 60, "info")
+        self.log("INICIANDO SCAN DO INVENTÁRIO (sem downloads)", "info")
+        self.log(f"Pasta: {watch_folder}", "info")
+        self.log("=" * 60, "info")
+
+        # Run scan in thread to not block UI
+        def scan_thread():
+            try:
+                self._do_inventory_scan(watch_folder)
+            except Exception as e:
+                self.root.after(0, lambda: self.log(f"Erro no scan: {e}", "error"))
+
+        threading.Thread(target=scan_thread, daemon=True).start()
+
+    def _do_inventory_scan(self, watch_folder: str):
+        """Perform the inventory scan."""
+        import os
+        from pathlib import Path
+
+        watch_path = Path(watch_folder)
+        if not watch_path.exists():
+            self.root.after(0, lambda: self.log(f"Pasta não existe: {watch_folder}", "error"))
+            return
+
+        # Stats
+        total_files = 0
+        total_size = 0
+        needs_transcoding = 0
+        needs_transcoding_size = 0
+        already_done = 0
+        already_h265 = 0
+        skipped_small = 0
+        h265_logs_found = 0
+
+        min_size_bytes = int(self.min_size_gb.get() * 1024 * 1024 * 1024)
+        video_extensions = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.m4v', '.webm'}
+
+        self.root.after(0, lambda: self.log("Escaneando arquivos locais...", "info"))
+
+        # First, import all h265 feitos.txt files we find
+        if self.cloud_manifest:
+            for root, dirs, files in os.walk(watch_path):
+                for f in files:
+                    if f == "h265 feitos.txt":
+                        log_path = os.path.join(root, f)
+                        try:
+                            with open(log_path, 'r', encoding='utf-8', errors='ignore') as fp:
+                                content = fp.read()
+                            imported = self.cloud_manifest.import_h265_feitos_txt(log_path, content)
+                            if imported > 0:
+                                h265_logs_found += 1
+                                msg = f"Importado {imported} entradas de {log_path}"
+                                self.root.after(0, lambda m=msg: self.log(m, "success"))
+                        except Exception as e:
+                            pass
+
+        # Now scan all video files
+        for root, dirs, files in os.walk(watch_path):
+            # Skip h264 and h265 backup folders
+            dirs[:] = [d for d in dirs if d.lower() not in ('h264', 'h265')]
+
+            for f in files:
+                ext = os.path.splitext(f)[1].lower()
+                if ext not in video_extensions:
+                    continue
+
+                file_path = os.path.join(root, f)
+                try:
+                    size = os.path.getsize(file_path)
+                except:
+                    continue
+
+                total_files += 1
+                total_size += size
+
+                # Update progress every 100 files
+                if total_files % 100 == 0:
+                    msg = f"Escaneando... {total_files} arquivos ({total_size / (1024**4):.2f} TB)"
+                    self.root.after(0, lambda m=msg: self.log(m, "info"))
+
+                # Check if already processed
+                if self.cloud_manifest and self.cloud_manifest.is_processed(file_path):
+                    already_done += 1
+                    continue
+
+                # Check if already skipped
+                if self.cloud_manifest and self.cloud_manifest.is_skipped(file_path):
+                    continue
+
+                # Check if too small
+                if size < min_size_bytes:
+                    skipped_small += 1
+                    if self.cloud_manifest:
+                        self.cloud_manifest.record_skipped(file_path, "too_small", size)
+                    continue
+
+                # Check if already H.265 (quick check by extension and name)
+                if '_h265' in f.lower() or '.hevc' in f.lower():
+                    already_h265 += 1
+                    if self.cloud_manifest:
+                        self.cloud_manifest.record_skipped(file_path, "already_h265", size)
+                    continue
+
+                # Check if in h265 feito log (already checked during is_processed via manifest)
+                if self._is_in_h265_feito_log(Path(file_path)):
+                    already_done += 1
+                    continue
+
+                # File needs transcoding
+                needs_transcoding += 1
+                needs_transcoding_size += size
+
+        # Update manifest with estimates
+        if self.cloud_manifest:
+            self.cloud_manifest.update_estimates(needs_transcoding, needs_transcoding_size)
+            self.cloud_manifest.save(force=True)
+
+        # Show results
+        def show_results():
+            self.log("=" * 60, "success")
+            self.log("SCAN COMPLETO", "success")
+            self.log("=" * 60, "success")
+            self.log(f"Total de arquivos de vídeo: {total_files:,}", "info")
+            self.log(f"Tamanho total: {total_size / (1024**4):.2f} TB", "info")
+            self.log(f"", "info")
+            self.log(f"Já processados: {already_done:,}", "success")
+            self.log(f"Já são H.265: {already_h265:,}", "info")
+            self.log(f"Muito pequenos: {skipped_small:,}", "info")
+            self.log(f"", "info")
+            self.log(f"PRECISAM TRANSCODAR: {needs_transcoding:,} ({needs_transcoding_size / (1024**4):.2f} TB)", "warning")
+            self.log(f"", "info")
+            if h265_logs_found > 0:
+                self.log(f"Importados {h265_logs_found} arquivos h265 feitos.txt", "success")
+            self.log("=" * 60, "success")
+
+            # Refresh dashboard to show new data
+            self.refresh_dashboard()
+
+        self.root.after(0, show_results)
+
     def load_stats(self):
         """Load stats from database."""
         cursor = self.db_conn.execute(
@@ -1021,7 +1190,7 @@ class TranscoderGUI:
         self.total_saved_gb.set(round(saved, 2))
 
     def is_processed(self, path: Path) -> bool:
-        """Check if file was already processed."""
+        """Check if file was already processed or should be skipped."""
         # First check local database
         cursor = self.db_conn.execute(
             "SELECT status FROM processed WHERE input_path = ?", (str(path),)
@@ -1030,8 +1199,12 @@ class TranscoderGUI:
         if row is not None and row[0] in ('done', 'skipped_hevc', 'skipped_exists'):
             return True
 
-        # Check cloud manifest (survives SSD wipes)
+        # Check cloud manifest - processed files
         if self.cloud_manifest and self.cloud_manifest.is_processed(str(path)):
+            return True
+
+        # Check cloud manifest - skipped files (already H.265, too small, etc.)
+        if self.cloud_manifest and self.cloud_manifest.is_skipped(str(path)):
             return True
 
         # Also check h265 feito.txt and h264 folder (for files processed on other machines)

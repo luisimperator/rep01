@@ -167,6 +167,16 @@ class GlobalStats:
 
 
 @dataclass
+class SkippedFile:
+    """Record of a file that doesn't need transcoding."""
+    path: str
+    reason: str  # already_h265, too_small, youtube, excluded, in_h265_folder
+    size_bytes: int
+    checked_at: str
+    checked_by_pc: str
+
+
+@dataclass
 class GlobalManifest:
     """
     Global manifest shared by all PCs.
@@ -179,6 +189,9 @@ class GlobalManifest:
     # All processed files (path -> ProcessedFile)
     processed_files: Dict[str, ProcessedFile] = field(default_factory=dict)
 
+    # Skipped files that don't need transcoding (path -> SkippedFile)
+    skipped_files: Dict[str, SkippedFile] = field(default_factory=dict)
+
     # Failed files (path -> error message)
     failed_files: Dict[str, str] = field(default_factory=dict)
 
@@ -188,13 +201,39 @@ class GlobalManifest:
     # Active PCs (PC name -> last seen timestamp)
     active_pcs: Dict[str, str] = field(default_factory=dict)
 
+    # Imported h265 feitos.txt files (path -> list of filenames)
+    imported_h265_logs: Dict[str, str] = field(default_factory=dict)  # log_path -> last_import_time
+
     def is_processed(self, file_path: str) -> bool:
         normalized = self._normalize_path(file_path)
         return normalized in self.processed_files
 
+    def is_skipped(self, file_path: str) -> bool:
+        normalized = self._normalize_path(file_path)
+        return normalized in self.skipped_files
+
     def is_failed(self, file_path: str) -> bool:
         normalized = self._normalize_path(file_path)
         return normalized in self.failed_files
+
+    def get_skip_reason(self, file_path: str) -> Optional[str]:
+        normalized = self._normalize_path(file_path)
+        if normalized in self.skipped_files:
+            return self.skipped_files[normalized].reason
+        return None
+
+    def add_skipped(self, file_path: str, reason: str, size_bytes: int, pc_name: str) -> None:
+        """Record a file that doesn't need transcoding."""
+        normalized = self._normalize_path(file_path)
+        self.skipped_files[normalized] = SkippedFile(
+            path=file_path,
+            reason=reason,
+            size_bytes=size_bytes,
+            checked_at=datetime.now().isoformat(),
+            checked_by_pc=pc_name,
+        )
+        self.last_updated = datetime.now().isoformat()
+        self.last_updated_by = pc_name
 
     def add_processed(self, record: ProcessedFile, pc_name: str) -> None:
         """Record a successfully processed file."""
@@ -271,9 +310,11 @@ class GlobalManifest:
             'last_updated_by': self.last_updated_by,
             'stats': asdict(self.stats),
             'processed_files': {k: asdict(v) for k, v in self.processed_files.items()},
+            'skipped_files': {k: asdict(v) for k, v in self.skipped_files.items()},
             'failed_files': self.failed_files,
             'daily_history': {k: asdict(v) for k, v in self.daily_history.items()},
             'active_pcs': self.active_pcs,
+            'imported_h265_logs': self.imported_h265_logs,
         }
 
     @classmethod
@@ -283,6 +324,10 @@ class GlobalManifest:
         processed_files = {}
         for k, v in data.get('processed_files', {}).items():
             processed_files[k] = ProcessedFile(**v)
+
+        skipped_files = {}
+        for k, v in data.get('skipped_files', {}).items():
+            skipped_files[k] = SkippedFile(**v)
 
         daily_history = {}
         for k, v in data.get('daily_history', {}).items():
@@ -294,9 +339,11 @@ class GlobalManifest:
             last_updated_by=data.get('last_updated_by', 'unknown'),
             stats=stats,
             processed_files=processed_files,
+            skipped_files=skipped_files,
             failed_files=data.get('failed_files', {}),
             daily_history=daily_history,
             active_pcs=data.get('active_pcs', {}),
+            imported_h265_logs=data.get('imported_h265_logs', {}),
         )
 
 
@@ -392,11 +439,25 @@ class GlobalManifestManager:
     def is_processed(self, file_path: str) -> bool:
         return self.manifest.is_processed(file_path)
 
+    def is_skipped(self, file_path: str) -> bool:
+        return self.manifest.is_skipped(file_path)
+
     def is_failed(self, file_path: str) -> bool:
         return self.manifest.is_failed(file_path)
 
     def should_process(self, file_path: str) -> bool:
-        return not self.is_processed(file_path) and not self.is_failed(file_path)
+        """Check if file needs processing (not processed, not skipped, not failed)."""
+        return (not self.is_processed(file_path) and
+                not self.is_skipped(file_path) and
+                not self.is_failed(file_path))
+
+    def get_skip_reason(self, file_path: str) -> Optional[str]:
+        return self.manifest.get_skip_reason(file_path)
+
+    def record_skipped(self, file_path: str, reason: str, size_bytes: int = 0) -> None:
+        """Record a file that doesn't need transcoding."""
+        self.manifest.add_skipped(file_path, reason, size_bytes, self.pc_name)
+        self.save()
 
     def record_success(
         self,
@@ -476,8 +537,80 @@ class GlobalManifestManager:
                 for d in self.manifest.get_daily_progress(14)
             ],
 
-            # Failures
+            # Failures and skipped
             'failed_count': len(self.manifest.failed_files),
+            'skipped_count': len(self.manifest.skipped_files),
+        }
+
+    def import_h265_feitos_txt(self, log_path: str, content: str) -> int:
+        """
+        Import entries from h265 feitos.txt into manifest as processed files.
+
+        Args:
+            log_path: Path to the h265 feitos.txt file
+            content: Content of the file
+
+        Returns:
+            Number of entries imported
+        """
+        if log_path in self.manifest.imported_h265_logs:
+            # Already imported this file
+            return 0
+
+        imported = 0
+        for line in content.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+
+            # Format: date|filename|input_size|output_size|ratio
+            parts = line.split('|')
+            if len(parts) >= 4:
+                try:
+                    filename = parts[1].strip()
+                    input_size = int(parts[2].strip()) if parts[2].strip().isdigit() else 0
+                    output_size = int(parts[3].strip()) if parts[3].strip().isdigit() else 0
+
+                    # Create a processed file record
+                    record = ProcessedFile(
+                        original_path=filename,  # Just filename, full path unknown
+                        output_path="",
+                        input_size_bytes=input_size,
+                        output_size_bytes=output_size,
+                        compression_ratio=output_size / input_size if input_size > 0 else 0.25,
+                        processed_at=parts[0].strip() if parts[0] else datetime.now().isoformat(),
+                        processed_by_pc="imported",
+                        encoder_used="unknown",
+                        cq_value=0,
+                    )
+
+                    # Use filename as key (normalized)
+                    normalized = filename.lower()
+                    if normalized not in self.manifest.processed_files:
+                        self.manifest.processed_files[normalized] = record
+                        self.manifest.stats.total_files_processed += 1
+                        self.manifest.stats.total_input_bytes += input_size
+                        self.manifest.stats.total_output_bytes += output_size
+                        self.manifest.stats.total_saved_bytes += (input_size - output_size)
+                        imported += 1
+                except (ValueError, IndexError):
+                    continue
+
+        # Mark as imported
+        self.manifest.imported_h265_logs[log_path] = datetime.now().isoformat()
+        self.save(force=True)
+
+        print(f"[Manifest] Imported {imported} entries from {log_path}")
+        return imported
+
+    def get_stats_summary(self) -> dict:
+        """Get a quick summary of manifest stats."""
+        return {
+            'processed': len(self.manifest.processed_files),
+            'skipped': len(self.manifest.skipped_files),
+            'failed': len(self.manifest.failed_files),
+            'total_tb': self.manifest.stats.total_input_tb,
+            'saved_tb': self.manifest.stats.total_saved_tb,
         }
 
     def get_manifest_path(self) -> Path:
