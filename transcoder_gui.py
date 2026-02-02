@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 
 import socket
 import subprocess
@@ -38,8 +38,8 @@ try:
     from src.transcoder.manifest import ManifestManager, get_pc_name, find_dropbox_path
     HAS_MANIFEST = True
 except ImportError:
-    # Fallback if manifest module not available
-    HAS_MANIFEST = False
+    # Embedded manifest implementation for standalone use
+    HAS_MANIFEST = True  # We have our own implementation
     import string as _string
 
     def find_dropbox_path():
@@ -66,6 +66,292 @@ except ImportError:
         if '.' in hostname:
             hostname = hostname.split('.')[0]
         return hostname
+
+    # Embedded ManifestManager class
+    class ManifestManager:
+        """Embedded manifest manager for standalone GUI use."""
+
+        MANIFEST_FILENAME = "global_manifest.json"
+
+        def __init__(self, base_dropbox_path=None):
+            if base_dropbox_path:
+                self.base_path = Path(base_dropbox_path)
+            else:
+                detected = find_dropbox_path()
+                self.base_path = detected if detected else Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
+
+            self.manifest_path = self.base_path / self.MANIFEST_FILENAME
+            self.pc_name = get_pc_name()
+            self._lock = threading.Lock()
+            self._unsaved_changes = 0
+
+            # Initialize manifest structure
+            self.manifest = self._load_or_create()
+            self._register_pc()
+
+        def _load_or_create(self):
+            """Load existing manifest or create new one."""
+            if self.manifest_path.exists():
+                try:
+                    with open(self.manifest_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    print(f"[Manifest] Loaded: {data.get('stats', {}).get('total_files_processed', 0)} files")
+                    return self._dict_to_manifest(data)
+                except Exception as e:
+                    print(f"[Manifest] Error loading: {e}")
+
+            # Create new manifest
+            self.base_path.mkdir(parents=True, exist_ok=True)
+            now = datetime.now().isoformat()
+            return {
+                'created_at': now,
+                'last_updated': now,
+                'last_updated_by': self.pc_name,
+                'stats': {
+                    'total_files_processed': 0,
+                    'total_input_bytes': 0,
+                    'total_output_bytes': 0,
+                    'total_saved_bytes': 0,
+                    'total_transcode_seconds': 0,
+                    'total_files_to_process': 0,
+                    'total_bytes_to_process': 0,
+                },
+                'processed_files': {},
+                'skipped_files': {},
+                'failed_files': {},
+                'daily_history': {},
+                'active_pcs': {},
+                'imported_h265_logs': {},
+            }
+
+        def _dict_to_manifest(self, data):
+            """Convert loaded dict to manifest format."""
+            # Ensure all required fields exist
+            data.setdefault('stats', {})
+            data['stats'].setdefault('total_files_processed', 0)
+            data['stats'].setdefault('total_input_bytes', 0)
+            data['stats'].setdefault('total_output_bytes', 0)
+            data['stats'].setdefault('total_saved_bytes', 0)
+            data['stats'].setdefault('total_transcode_seconds', 0)
+            data['stats'].setdefault('total_files_to_process', 0)
+            data['stats'].setdefault('total_bytes_to_process', 0)
+            data.setdefault('processed_files', {})
+            data.setdefault('skipped_files', {})
+            data.setdefault('failed_files', {})
+            data.setdefault('daily_history', {})
+            data.setdefault('active_pcs', {})
+            data.setdefault('imported_h265_logs', {})
+            return data
+
+        def _register_pc(self):
+            self.manifest['active_pcs'][self.pc_name] = datetime.now().isoformat()
+
+        def _normalize_path(self, path):
+            return str(path).lower().replace('\\', '/')
+
+        def refresh(self):
+            """Reload manifest from disk."""
+            with self._lock:
+                if self.manifest_path.exists():
+                    try:
+                        with open(self.manifest_path, 'r', encoding='utf-8') as f:
+                            data = json.load(f)
+                        self.manifest = self._dict_to_manifest(data)
+                        self._register_pc()
+                    except Exception as e:
+                        print(f"[Manifest] Refresh error: {e}")
+            return self.manifest
+
+        def save(self, force=False):
+            """Save manifest to disk."""
+            with self._lock:
+                self._unsaved_changes += 1
+                if not force and self._unsaved_changes < 3:
+                    return
+                try:
+                    self.base_path.mkdir(parents=True, exist_ok=True)
+                    temp_path = self.manifest_path.with_suffix('.tmp')
+                    with open(temp_path, 'w', encoding='utf-8') as f:
+                        json.dump(self.manifest, f, indent=2, ensure_ascii=False)
+                    temp_path.replace(self.manifest_path)
+                    self._unsaved_changes = 0
+                except Exception as e:
+                    print(f"[Manifest] Save error: {e}")
+
+        def is_processed(self, file_path):
+            normalized = self._normalize_path(file_path)
+            return normalized in self.manifest['processed_files']
+
+        def is_skipped(self, file_path):
+            normalized = self._normalize_path(file_path)
+            return normalized in self.manifest['skipped_files']
+
+        def is_failed(self, file_path):
+            normalized = self._normalize_path(file_path)
+            return normalized in self.manifest['failed_files']
+
+        def record_success(self, original_path, output_path, input_size, output_size, encoder, cq_value, duration=0, transcode_time=0):
+            normalized = self._normalize_path(original_path)
+            self.manifest['processed_files'][normalized] = {
+                'original_path': original_path,
+                'output_path': output_path,
+                'input_size_bytes': input_size,
+                'output_size_bytes': output_size,
+                'compression_ratio': output_size / input_size if input_size > 0 else 0,
+                'processed_at': datetime.now().isoformat(),
+                'processed_by_pc': self.pc_name,
+                'encoder_used': encoder,
+                'cq_value': cq_value,
+            }
+            # Update stats
+            self.manifest['stats']['total_files_processed'] += 1
+            self.manifest['stats']['total_input_bytes'] += input_size
+            self.manifest['stats']['total_output_bytes'] += output_size
+            self.manifest['stats']['total_saved_bytes'] += (input_size - output_size)
+            self.manifest['stats']['total_transcode_seconds'] += transcode_time
+            self.manifest['last_updated'] = datetime.now().isoformat()
+            self.manifest['last_updated_by'] = self.pc_name
+
+            # Update daily
+            today = datetime.now().strftime('%Y-%m-%d')
+            if today not in self.manifest['daily_history']:
+                self.manifest['daily_history'][today] = {'date': today, 'files_processed': 0, 'bytes_processed': 0, 'bytes_saved': 0, 'by_pc': {}}
+            self.manifest['daily_history'][today]['files_processed'] += 1
+            self.manifest['daily_history'][today]['bytes_processed'] += input_size
+            self.manifest['daily_history'][today]['bytes_saved'] += (input_size - output_size)
+            self.manifest['daily_history'][today]['by_pc'][self.pc_name] = self.manifest['daily_history'][today]['by_pc'].get(self.pc_name, 0) + 1
+            self.save()
+
+        def record_failure(self, file_path, error):
+            normalized = self._normalize_path(file_path)
+            self.manifest['failed_files'][normalized] = f"{error} (by {self.pc_name})"
+            self.save(force=True)
+
+        def record_skipped(self, file_path, reason, size_bytes=0):
+            normalized = self._normalize_path(file_path)
+            self.manifest['skipped_files'][normalized] = {
+                'path': file_path,
+                'reason': reason,
+                'size_bytes': size_bytes,
+                'checked_at': datetime.now().isoformat(),
+                'checked_by_pc': self.pc_name,
+            }
+            self.save()
+
+        def reset_failed(self, file_path=None):
+            if file_path:
+                normalized = self._normalize_path(file_path)
+                if normalized in self.manifest['failed_files']:
+                    del self.manifest['failed_files'][normalized]
+                    self.save(force=True)
+                    return 1
+                return 0
+            count = len(self.manifest['failed_files'])
+            self.manifest['failed_files'].clear()
+            self.save(force=True)
+            return count
+
+        def update_estimates(self, total_files, total_bytes):
+            self.manifest['stats']['total_files_to_process'] = total_files
+            self.manifest['stats']['total_bytes_to_process'] = total_bytes
+            self.save(force=True)
+
+        def import_h265_feitos_txt(self, log_path, content):
+            if log_path in self.manifest['imported_h265_logs']:
+                return 0
+            imported = 0
+            for line in content.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                parts = line.split('|')
+                if len(parts) >= 4:
+                    try:
+                        filename = parts[1].strip()
+                        input_size = int(parts[2].strip()) if parts[2].strip().isdigit() else 0
+                        output_size = int(parts[3].strip()) if parts[3].strip().isdigit() else 0
+                        normalized = filename.lower()
+                        if normalized not in self.manifest['processed_files']:
+                            self.manifest['processed_files'][normalized] = {
+                                'original_path': filename,
+                                'output_path': '',
+                                'input_size_bytes': input_size,
+                                'output_size_bytes': output_size,
+                                'compression_ratio': output_size / input_size if input_size > 0 else 0.25,
+                                'processed_at': parts[0].strip() if parts[0] else datetime.now().isoformat(),
+                                'processed_by_pc': 'imported',
+                                'encoder_used': 'unknown',
+                                'cq_value': 0,
+                            }
+                            self.manifest['stats']['total_files_processed'] += 1
+                            self.manifest['stats']['total_input_bytes'] += input_size
+                            self.manifest['stats']['total_output_bytes'] += output_size
+                            self.manifest['stats']['total_saved_bytes'] += (input_size - output_size)
+                            imported += 1
+                    except:
+                        continue
+            self.manifest['imported_h265_logs'][log_path] = datetime.now().isoformat()
+            self.save(force=True)
+            print(f"[Manifest] Imported {imported} entries from {log_path}")
+            return imported
+
+        def get_stats_summary(self):
+            return {
+                'processed': len(self.manifest['processed_files']),
+                'skipped': len(self.manifest['skipped_files']),
+                'failed': len(self.manifest['failed_files']),
+                'total_tb': self.manifest['stats']['total_input_bytes'] / (1024**4),
+                'saved_tb': self.manifest['stats']['total_saved_bytes'] / (1024**4),
+            }
+
+        def get_dashboard_data(self):
+            s = self.manifest['stats']
+            total_input = s['total_input_bytes']
+            total_to_proc = s['total_bytes_to_process']
+            total = total_input + total_to_proc
+            progress = (total_input / total * 100) if total > 0 else 0
+            avg_ratio = s['total_output_bytes'] / total_input if total_input > 0 else 0.25
+            trans_sec = s['total_transcode_seconds']
+            speed = (total_input / (1024**3)) / (trans_sec / 3600) if trans_sec > 0 else 50
+            remaining_gb = total_to_proc / (1024**3)
+            days = (remaining_gb / speed / 24) if speed > 0 else 0
+
+            daily = []
+            for date_key in sorted(self.manifest['daily_history'].keys(), reverse=True)[:14]:
+                d = self.manifest['daily_history'][date_key]
+                daily.append({
+                    'date': d['date'],
+                    'files': d['files_processed'],
+                    'gb_processed': d['bytes_processed'] / (1024**3),
+                    'gb_saved': d['bytes_saved'] / (1024**3),
+                    'by_pc': d.get('by_pc', {}),
+                })
+
+            return {
+                'pc_name': self.pc_name,
+                'last_updated': self.manifest['last_updated'],
+                'last_updated_by': self.manifest['last_updated_by'],
+                'active_pcs': list(self.manifest['active_pcs'].keys()),
+                'total_processed': s['total_files_processed'],
+                'total_to_process': s['total_files_to_process'],
+                'progress_percent': progress,
+                'processed_tb': total_input / (1024**4),
+                'to_process_tb': total_to_proc / (1024**4),
+                'saved_tb': s['total_saved_bytes'] / (1024**4),
+                'estimated_total_savings_tb': (s['total_saved_bytes'] + total_to_proc * (1 - avg_ratio)) / (1024**4),
+                'avg_compression': (1 - avg_ratio) * 100,
+                'avg_speed_gbh': speed,
+                'days_remaining': days,
+                'daily_progress': daily,
+                'failed_count': len(self.manifest['failed_files']),
+                'skipped_count': len(self.manifest['skipped_files']),
+            }
+
+        def get_manifest_path(self):
+            return self.manifest_path
+
+        def close(self):
+            self.save(force=True)
 
 
 def get_dropbox_base_path() -> Path:
@@ -921,8 +1207,10 @@ class TranscoderGUI:
             self.log(f"Report saved to: {file_path}", "success")
 
     def log(self, message, tag="info"):
-        """Add message to log."""
-        timestamp = datetime.now().strftime("%H:%M:%S")
+        """Add message to log (Brasilia Time UTC-3)."""
+        from datetime import timezone, timedelta
+        brt = timezone(timedelta(hours=-3))
+        timestamp = datetime.now(brt).strftime("%H:%M:%S")
         self.log_text.insert(tk.END, f"[{timestamp}] {message}\n", tag)
         self.log_text.see(tk.END)
 
