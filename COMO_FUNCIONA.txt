@@ -1,0 +1,225 @@
+================================================================================
+            HEAVYDROPS TRANSCODER - GUIA PARA FILMMAKERS
+================================================================================
+
+                    "Seu arquivo ficou menor e ninguém percebeu."
+
+================================================================================
+
+O QUE É ISSO?
+-------------
+Um software que converte seus vídeos de H.264 para H.265 (HEVC), reduzindo
+o tamanho em até 75% SEM PERDER QUALIDADE VISÍVEL.
+
+Perfeito para quem tem:
+  - Terabytes de footage ocupando espaço
+  - Múltiplos HDs/SSDs cheios de projetos antigos
+  - Conta do Dropbox no limite
+  - Vontade de organizar o arquivo morto
+
+================================================================================
+
+COMO FUNCIONA NA PRÁTICA
+------------------------
+
+1. VOCÊ APONTA A PASTA
+   Seleciona a pasta do Dropbox (ou qualquer pasta com vídeos MP4)
+
+2. O SOFTWARE ESCANEIA
+   Clica em SCAN e ele mapeia TUDO:
+   - Quantos arquivos você tem
+   - Quantos TB no total
+   - Quantos já são H.265 (não precisa converter)
+   - Quantos têm bitrate baixo (não vale a pena converter)
+   - Quantos REALMENTE precisam ser convertidos
+
+3. VOCÊ CLICA START
+   E vai dormir. Ou trabalhar. Ou viver sua vida.
+
+4. ELE FAZ O RESTO
+   - Converte arquivo por arquivo
+   - Usa sua placa de vídeo (NVIDIA) ou processador
+   - Cria pasta h265/ com o arquivo novo
+   - Move o original para h264/ (backup)
+   - Marca como "online-only" no Dropbox (libera espaço)
+
+================================================================================
+
+POR QUE H.265?
+--------------
+
+H.264 (o formato comum):
+  - 1 hora de 4K = ~50 GB
+  - Compatível com tudo
+
+H.265/HEVC (o formato novo):
+  - 1 hora de 4K = ~15-20 GB
+  - Mesma qualidade visual
+  - Compatível com editores modernos (Premiere, Resolve, Final Cut)
+
+ECONOMIA REAL:
+  100 TB de footage H.264 → ~30 TB em H.265
+  Você economiza 70 TB de espaço!
+
+================================================================================
+
+RECURSOS DO SOFTWARE
+--------------------
+
+DASHBOARD GLOBAL
+  Mostra o progresso de TODOS os seus computadores:
+  - Heavy1, Heavy2... Heavy7 - todos sincronizados
+  - Veja quanto já foi processado
+  - Quanto falta
+  - Quantos TB você já economizou
+  - Estimativa de quando vai terminar
+
+BOTÃO SCAN
+  Antes de começar, mapeia tudo:
+  - Sem baixar arquivos do Dropbox
+  - Mostra estatísticas detalhadas
+  - Você sabe exatamente o tamanho do trabalho
+
+BOTÃO REFRESH
+  Atualiza o dashboard com dados de outros PCs.
+  Útil quando você tem vários computadores trabalhando.
+
+START / PAUSE / STOP
+  - START: começa a processar
+  - PAUSE: pausa sem perder progresso
+  - STOP: para completamente
+
+DETECÇÃO AUTOMÁTICA DE ENCODER
+  O software detecta automaticamente:
+  - NVIDIA NVENC (mais rápido, usa a placa de vídeo)
+  - Intel QuickSync (usa o processador Intel)
+  - CPU (mais lento, mas sempre funciona)
+
+SMART SKIP
+  Pula arquivos que não precisam converter:
+  - Já são H.265? Pula.
+  - Bitrate menor que 8 Mbps? Pula (já está bem comprimido).
+  - Saída já existe? Pula.
+
+AUTO-DELETE (opcional)
+  Quando ativado:
+  - Verifica se o arquivo H.265 está OK
+  - Deleta o backup H.264 automaticamente
+  - Libera espaço sem você fazer nada
+
+INTEGRAÇÃO COM DROPBOX
+  - Detecta arquivos "online-only" (só na nuvem)
+  - Baixa automaticamente quando precisa
+  - Marca backups como "online-only" após processar
+  - Funciona com Smart Sync
+
+================================================================================
+
+FLUXO RECOMENDADO
+-----------------
+
+PRIMEIRA VEZ:
+  1. Abre o software
+  2. Seleciona a pasta do Dropbox
+  3. Clica SCAN → vê as estatísticas
+  4. Clica START
+  5. Deixa rodando 24/7
+
+DEPOIS:
+  1. Abre o software
+  2. Clica REFRESH no dashboard
+  3. Vê o progresso de todos os PCs
+  4. Se precisar, clica START para continuar
+
+COM MÚLTIPLOS PCS:
+  - Todos os PCs compartilham o mesmo manifest
+  - Nenhum arquivo é processado duas vezes
+  - O dashboard mostra o progresso combinado
+  - Você pode ter 7 PCs trabalhando em paralelo
+
+================================================================================
+
+ESTRUTURA DE PASTAS
+-------------------
+
+ANTES:
+  📁 Projeto Cliente X/
+     📄 video_001.mp4  (H.264, 50 GB)
+     📄 video_002.mp4  (H.264, 45 GB)
+
+DEPOIS:
+  📁 Projeto Cliente X/
+     📁 h265/
+        📄 video_001.mp4  (H.265, 15 GB) ← arquivo principal
+        📄 video_002.mp4  (H.265, 12 GB)
+     📁 h264/
+        📄 video_001.mp4  (backup, online-only)
+        📄 video_002.mp4  (backup, online-only)
+
+O arquivo H.265 na pasta h265/ é seu novo arquivo principal.
+O backup H.264 fica "online-only" no Dropbox (não ocupa espaço local).
+
+================================================================================
+
+DICAS PARA FILMMAKERS
+---------------------
+
+1. COMECE PELOS PROJETOS ANTIGOS
+   Aqueles projetos de 2019 que você nunca mais vai abrir?
+   Perfeitos para converter primeiro.
+
+2. NÃO CONVERTA PROJETOS ATIVOS
+   Se você ainda está editando, espere terminar.
+   O Premiere/Resolve pode estranhar se o arquivo mudar.
+
+3. DEIXE RODANDO À NOITE
+   O software é feito para rodar 24/7.
+   Coloca pra rodar antes de dormir.
+
+4. USE A GPU
+   NVENC (NVIDIA) é muito mais rápido que CPU.
+   Uma RTX 3080 processa ~50 GB/hora.
+
+5. MANTENHA O BACKUP
+   Não ative auto-delete até ter certeza que tudo está OK.
+   Confira alguns arquivos convertidos antes.
+
+================================================================================
+
+PERGUNTAS FREQUENTES
+--------------------
+
+P: Perde qualidade?
+R: Não. Usamos CQ 24 que é visualmente idêntico ao original.
+
+P: Funciona com 4K? 8K?
+R: Sim. Qualquer resolução.
+
+P: E se der erro no meio?
+R: O software marca o arquivo como "failed" e continua.
+   Você pode resetar os failed e tentar de novo.
+
+P: Posso editar o H.265 no Premiere?
+R: Sim. Premiere CC 2019+ suporta H.265 nativamente.
+
+P: E o áudio?
+R: O áudio é copiado sem alteração (codec original mantido).
+
+P: Quanto tempo demora?
+R: Depende do hardware. Com NVENC: ~50 GB/hora.
+   100 TB = ~83 dias com 1 PC, ~12 dias com 7 PCs.
+
+================================================================================
+
+SUPORTE
+-------
+
+GitHub: https://github.com/luisimperator/rep01
+Issues: https://github.com/luisimperator/rep01/issues
+
+================================================================================
+
+                         Feito com carinho para filmmakers
+                         que têm mais footage do que espaço.
+
+================================================================================

@@ -1,0 +1,131 @@
+================================================================================
+                    HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
+================================================================================
+
+Versão: 1.3.3
+Data: 02/02/2026
+--------------------------------------------------------------------------------
+
+NOVIDADES DESTA VERSÃO:
+
+  [DOC] Documentação incluída no pacote
+  -------------------------------------
+  Agora cada versão inclui:
+  - NOTAS_DA_VERSAO.txt: changelog e novidades
+  - COMO_FUNCIONA.txt: guia completo para filmmakers
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.2 (02/02/2026):
+
+  [PERFORMANCE] Verificação paralela com 16 threads
+  ------------------------------------------------
+  Antes: verificar 158.000 arquivos levava ~88 horas (2 seg/arquivo)
+  Agora: mesma quantidade em ~50 minutos (16 arquivos simultâneos)
+
+  Seu i9-14900K finalmente vai trabalhar! CPU sobe para 30-50% durante
+  a fase de pré-verificação.
+
+  [FIX] Arquivos duplicados na fila
+  ---------------------------------
+  Corrigido bug onde o mesmo arquivo aparecia múltiplas vezes na fila
+  de processamento. Agora usa deduplicação automática.
+
+  [FIX] Tempo de espera reduzido
+  ------------------------------
+  Reduzido de 2 segundos para 0.3 segundos por arquivo na verificação
+  de estabilidade (já verificado na fase paralela).
+
+  [FEATURE] Arquivos skipados salvos no manifest
+  ----------------------------------------------
+  Arquivos que não precisam transcodar (já HEVC, baixo bitrate, etc.)
+  são salvos no manifest. Próximos scans ignoram esses arquivos.
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.1 (01/02/2026):
+
+  [FIX] Manifest embutido na GUI
+  ------------------------------
+  O manifest agora funciona standalone - não precisa mais da pasta src/
+  Acabou o erro "module not found".
+
+  [FEATURE] Horário de Brasília
+  -----------------------------
+  Logs agora mostram horário BRT (UTC-3) em vez de UTC.
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.0 (01/02/2026):
+
+  [FEATURE] Botão SCAN para inventário
+  ------------------------------------
+  Novo botão SCAN que mapeia todos os arquivos ANTES de começar.
+  Mostra exatamente quantos arquivos precisam transcodar.
+
+  [FEATURE] Importação automática de h265 feitos.txt
+  --------------------------------------------------
+  O sistema importa automaticamente os logs existentes de arquivos
+  já processados para evitar retrabalho.
+
+  [FEATURE] Status de arquivos skipados
+  -------------------------------------
+  Arquivos que não precisam transcodar são marcados com motivo:
+  - already_hevc: já é H.265
+  - low_bitrate: bitrate menor que 8 Mbps
+  - too_small: arquivo muito pequeno
+  - output_exists: saída já existe
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.2.9 (01/02/2026):
+
+  [FEATURE] Auto-detecção do Dropbox
+  ----------------------------------
+  O software agora detecta automaticamente onde está a pasta do Dropbox.
+  Funciona em qualquer drive (C:, D:, E:, etc.)
+
+  Heavy1-Heavy6 usam D:\HeavyDrops Dropbox\...
+  Heavy7 usa C:\HeavyDrops Dropbox\...
+  Ambos funcionam automaticamente!
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.2.8 (31/01/2026):
+
+  [FEATURE] Dashboard Global
+  --------------------------
+  Novo painel mostrando progresso de TODOS os 7 PCs:
+  - Progresso total em %
+  - TB processados / restantes
+  - TB economizados
+  - Velocidade média (GB/h)
+  - Taxa de compressão
+  - ETA em dias
+  - Histórico dos últimos 14 dias
+
+  [FEATURE] Botão REFRESH
+  -----------------------
+  Atualiza o dashboard com dados mais recentes de todos os PCs.
+
+  [FEATURE] Manifest Global
+  -------------------------
+  Um único arquivo JSON compartilhado por todos os PCs no Dropbox.
+  Localização: {Dropbox}/HeavyDrops/App h265 Converter/global_manifest.json
+
+================================================================================
+                              HISTÓRICO COMPLETO
+================================================================================
+
+1.2.7 - Cloud manifest inicial
+1.2.6 - Verificação de arquivos bem comprimidos (< 8 Mbps)
+1.2.5 - Suporte a WAV -> MP3 em "Audio Source Files"
+1.2.4 - Auto-delete de pastas h264 após verificação
+1.2.3 - Smart sorting por pasta (prioriza pastas quase completas)
+1.2.2 - Detecção automática de encoder (NVENC/QSV/CPU)
+1.2.1 - Fallback automático para CPU se GPU falhar
+1.2.0 - Suporte a múltiplos encoders
+1.1.0 - Integração com Dropbox Smart Sync
+1.0.0 - Versão inicial
+
+================================================================================
