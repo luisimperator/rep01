@@ -113,6 +113,12 @@ INTEGRAÇÃO COM DROPBOX
   - Marca backups como "online-only" após processar
   - Funciona com Smart Sync
 
+CONTROLE DE DOWNLOADS (novo!)
+  - Máximo de 50 arquivos baixando por vez
+  - Reserva 20 GB livres para downloads pendentes
+  - Evita encher o SSD com muitos downloads simultâneos
+  - Mostra status: "8 pending, 45.2 GB"
+
 ================================================================================
 
 FLUXO RECOMENDADO

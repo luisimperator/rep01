@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.3.5"
+VERSION = "1.3.6"
 
 import socket
 import subprocess
@@ -395,6 +395,12 @@ class TranscoderGUI:
         self.db_conn = None
         self.cloud_manifest = None  # Cloud manifest manager
         self.files_in_batch = 0  # Track files processed in current batch
+
+        # Download queue management - balance downloads with SSD space
+        self.pending_downloads = {}  # {path_str: estimated_size_bytes}
+        self.pending_downloads_lock = threading.Lock()
+        self.max_pending_downloads = 50  # Max files downloading at once
+        self.min_free_space_gb = 20  # Keep at least 20GB free for pending downloads
 
         # Default settings (using auto-detected path)
         default_folder = str(self.dropbox_base)
@@ -2020,6 +2026,9 @@ class TranscoderGUI:
                 f"Low disk space ({g:.1f} GB free). Waiting...", "warning"))
             return
 
+        # Clean up stale pending downloads and check which have completed
+        self._cleanup_pending_downloads()
+
         self.root.after(0, lambda: self.log(f"Scanning {folder}..."))
 
         # Find video files (only .mp4, skip ._ metadata files from macOS/ATEM)
@@ -2069,7 +2078,7 @@ class TranscoderGUI:
             self.root.after(0, lambda i=idx+1, t=total_pending:
                 self.current_file_label.config(text=f"Queue: {i}/{t}"))
 
-            self.process_file(video_path, queue_pos=idx+1, queue_total=total_pending)
+            self.process_file(video_path, queue_pos=idx+1, queue_total=total_pending, file_size=file_size)
             files_processed_this_scan += 1
 
         # Process WAV files in "Audio Source Files" folders
@@ -2138,7 +2147,7 @@ class TranscoderGUI:
                 break
 
             # Wait for file to be ready (downloaded from Dropbox)
-            if not self.wait_for_file_ready(wav_path):
+            if not self.wait_for_file_ready(wav_path, estimated_size=size):
                 continue
 
             self.root.after(0, lambda p=wav_path.name: self.log(
@@ -2521,18 +2530,26 @@ class TranscoderGUI:
 
         return sorted_files
 
-    def wait_for_file_ready(self, file_path: Path, timeout_minutes: int = 60) -> bool:
+    def wait_for_file_ready(self, file_path: Path, timeout_minutes: int = 60, estimated_size: int = 0) -> bool:
         """
         Check if a file is ready (fully downloaded from Dropbox).
         If file is online-only, triggers download and returns False immediately
         so the program can continue with other files.
         Returns True if file is ready, False if not ready yet.
+
+        Download queue management:
+        - Tracks pending downloads to avoid triggering too many at once
+        - Checks available disk space vs pending download sizes
+        - Limits max concurrent pending downloads
         """
+        path_str = str(file_path)
+
         try:
             # First check if file exists
             if not file_path.exists():
                 self.root.after(0, lambda: self.log(
                     f"File not found, skipping", "warning"))
+                self._remove_from_pending_downloads(path_str)
                 return False
 
             # Get file size - this works even for online-only files
@@ -2540,10 +2557,22 @@ class TranscoderGUI:
 
             # If file is very small, it's probably a placeholder (online-only)
             if current_size < 10000:  # Less than 10KB
-                self.root.after(0, lambda: self.log(
-                    f"Online-only file, triggering download and moving to next...", "info"))
+                # Check if we can trigger another download (space + count limits)
+                if not self._can_trigger_download(estimated_size):
+                    pending_count, pending_gb = self._get_pending_download_stats()
+                    self.root.after(0, lambda c=pending_count, g=pending_gb: self.log(
+                        f"Download queue full ({c} files, {g:.1f} GB pending), skipping...", "info"))
+                    return False
+
+                self._add_to_pending_downloads(path_str, estimated_size)
+                pending_count, pending_gb = self._get_pending_download_stats()
+                self.root.after(0, lambda c=pending_count, g=pending_gb: self.log(
+                    f"Online-only file, queued for download ({c} pending, {g:.1f} GB)", "info"))
                 self._trigger_dropbox_download(file_path)
                 return False  # Skip for now, will retry next scan
+
+            # File has real content - remove from pending if it was there
+            self._remove_from_pending_downloads(path_str)
 
             # Try to read some bytes to verify file is accessible
             try:
@@ -2551,8 +2580,17 @@ class TranscoderGUI:
                     f.read(1024)  # Read 1KB
             except OSError as e:
                 if e.errno == 22:  # Invalid argument - online-only file
-                    self.root.after(0, lambda: self.log(
-                        f"Cloud file detected, triggering download and moving to next...", "info"))
+                    # Check if we can trigger another download
+                    if not self._can_trigger_download(estimated_size):
+                        pending_count, pending_gb = self._get_pending_download_stats()
+                        self.root.after(0, lambda c=pending_count, g=pending_gb: self.log(
+                            f"Download queue full ({c} files, {g:.1f} GB pending), skipping...", "info"))
+                        return False
+
+                    self._add_to_pending_downloads(path_str, estimated_size)
+                    pending_count, pending_gb = self._get_pending_download_stats()
+                    self.root.after(0, lambda c=pending_count, g=pending_gb: self.log(
+                        f"Cloud file detected, queued for download ({c} pending, {g:.1f} GB)", "info"))
                     self._trigger_dropbox_download(file_path)
                     return False  # Skip for now, will retry next scan
                 raise
@@ -2565,7 +2603,7 @@ class TranscoderGUI:
                 # File is stable and ready
                 return True
             else:
-                # Still downloading - skip and come back later
+                # Still downloading - keep in pending list
                 progress_mb = new_size / (1024**2)
                 self.root.after(0, lambda p=progress_mb: self.log(
                     f"File still downloading ({p:.1f} MB), moving to next...", "info"))
@@ -2579,9 +2617,94 @@ class TranscoderGUI:
 
         except Exception as e:
             # For other errors, skip this file for now
+            self._remove_from_pending_downloads(path_str)
             self.root.after(0, lambda err=e: self.log(
                 f"Cannot access file: {err} - skipping", "warning"))
             return False
+
+    def _can_trigger_download(self, new_file_size: int) -> bool:
+        """
+        Check if we can trigger another download based on:
+        1. Number of pending downloads (max 10)
+        2. Available disk space vs pending + new download sizes
+        """
+        with self.pending_downloads_lock:
+            # Check count limit
+            if len(self.pending_downloads) >= self.max_pending_downloads:
+                return False
+
+            # Check space limit
+            pending_bytes = sum(self.pending_downloads.values())
+            total_needed = pending_bytes + new_file_size
+            total_needed_gb = total_needed / (1024**3)
+
+            folder = Path(self.watch_folder.get())
+            free_gb = self.get_free_disk_space(folder)
+
+            # Need at least min_free_space_gb after pending downloads complete
+            if free_gb - total_needed_gb < self.min_free_space_gb:
+                return False
+
+            return True
+
+    def _add_to_pending_downloads(self, path_str: str, size_bytes: int) -> None:
+        """Add a file to pending downloads tracking."""
+        with self.pending_downloads_lock:
+            self.pending_downloads[path_str] = size_bytes
+
+    def _remove_from_pending_downloads(self, path_str: str) -> None:
+        """Remove a file from pending downloads tracking."""
+        with self.pending_downloads_lock:
+            self.pending_downloads.pop(path_str, None)
+
+    def _get_pending_download_stats(self) -> tuple:
+        """Get (count, total_gb) of pending downloads."""
+        with self.pending_downloads_lock:
+            count = len(self.pending_downloads)
+            total_bytes = sum(self.pending_downloads.values())
+            return count, total_bytes / (1024**3)
+
+    def _cleanup_pending_downloads(self) -> None:
+        """
+        Clean up pending downloads list:
+        - Remove files that have been fully downloaded (size > 10KB and readable)
+        - Remove files that no longer exist
+        """
+        with self.pending_downloads_lock:
+            if not self.pending_downloads:
+                return
+
+            completed = []
+            removed = []
+
+            for path_str, expected_size in list(self.pending_downloads.items()):
+                try:
+                    file_path = Path(path_str)
+                    if not file_path.exists():
+                        removed.append(path_str)
+                        continue
+
+                    # Check if file has real content (not placeholder)
+                    current_size = file_path.stat().st_size
+                    if current_size > 10000:  # More than 10KB
+                        # Try to read to confirm it's accessible
+                        try:
+                            with open(file_path, 'rb') as f:
+                                f.read(1024)
+                            completed.append(path_str)
+                        except OSError:
+                            pass  # Still downloading or cloud-only
+                except Exception:
+                    removed.append(path_str)
+
+            # Remove completed and missing files from pending list
+            for path_str in completed + removed:
+                self.pending_downloads.pop(path_str, None)
+
+            if completed or removed:
+                remaining = len(self.pending_downloads)
+                self.root.after(0, lambda c=len(completed), r=len(removed), rem=remaining:
+                    self.log(f"Download queue: {c} completed, {r} removed, {rem} pending", "info"))
 
     def _trigger_dropbox_download(self, file_path: Path):
         """
@@ -2606,15 +2729,15 @@ class TranscoderGUI:
         except:
             pass
 
-    def process_file(self, input_path: Path, queue_pos: int = 0, queue_total: int = 0):
+    def process_file(self, input_path: Path, queue_pos: int = 0, queue_total: int = 0, file_size: int = 0):
         """Process a single file."""
         queue_str = f"[{queue_pos}/{queue_total}] " if queue_pos else ""
         self.root.after(0, lambda q=queue_str: self.current_file_label.config(
             text=f"{q}Processing: {input_path.name}"))
         self.root.after(0, lambda q=queue_str: self.log(f"{q}Processing: {input_path.name}"))
 
-        # Wait for file to be fully downloaded from Dropbox
-        if not self.wait_for_file_ready(input_path):
+        # Wait for file to be fully downloaded from Dropbox (with download queue balancing)
+        if not self.wait_for_file_ready(input_path, estimated_size=file_size):
             return
 
         size_gb = input_path.stat().st_size / (1024**3)
