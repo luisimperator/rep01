@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.3.9"
+VERSION = "1.3.10"
 
 import socket
 import subprocess
@@ -419,6 +419,9 @@ class TranscoderGUI:
         self.pending_downloads_lock = threading.Lock()
         self.max_pending_downloads = 50  # Max files downloading at once
         self.min_free_space_gb = 20  # Keep at least 20GB free for pending downloads
+
+        # Idle state tracking - avoid spamming "nothing to do" logs
+        self._last_scan_had_work = True  # Assume work initially so first idle is logged
 
         # Default settings (using auto-detected path)
         default_folder = str(self.dropbox_base)
@@ -2054,8 +2057,6 @@ class TranscoderGUI:
         # Clean up stale pending downloads and check which have completed
         self._cleanup_pending_downloads()
 
-        self.root.after(0, lambda: self.log(f"Scanning {folder}..."))
-
         # Find video files (only .mp4, skip ._ metadata files from macOS/ATEM)
         video_files = []
         for ext in ['.mp4', '.MP4']:
@@ -2079,8 +2080,21 @@ class TranscoderGUI:
                     pass
 
         total_pending = len(pending_files)
-        self.root.after(0, lambda t=total_pending, a=len(video_files): self.log(
-            f"Found {a} videos, {t} pending"))
+        total_videos = len(video_files)
+        already_done = total_videos - total_pending
+
+        if total_pending == 0:
+            # Only log if we just became idle (avoid spamming same message)
+            if self._last_scan_had_work:
+                self.root.after(0, lambda t=total_videos, f=str(folder): self.log(
+                    f"Idle: all {t} videos in {f} already processed", "success"))
+                self._last_scan_had_work = False
+            # Update status bar even when not logging
+            self.root.after(0, lambda: self.current_file_label.config(text="Idle - all files processed"))
+        else:
+            self._last_scan_had_work = True
+            self.root.after(0, lambda t=total_videos, d=already_done, p=total_pending, f=str(folder): self.log(
+                f"Scanning {f}: {t} videos found, {d} done, {p} need processing"))
 
         # Smart sorting: prioritize folders closer to completion
         pending_files = self._sort_by_folder_completion(pending_files)

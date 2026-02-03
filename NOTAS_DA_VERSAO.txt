@@ -2,11 +2,37 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
-Versão: 1.3.9
+Versão: 1.3.10
 Data: 02/02/2026
 --------------------------------------------------------------------------------
 
 NOVIDADES DESTA VERSÃO:
+
+  [UX] Logs mais claros e menos spam
+  ----------------------------------
+  ANTES (confuso e repetitivo):
+    [18:17:51] Scanning C:\Users\HEAVY7\HeavyDrops Dropbox\HeavyDrops\Adec...
+    [18:17:51] Found 120 videos, 0 pending
+    [18:18:21] Scanning C:\Users\HEAVY7\HeavyDrops Dropbox\HeavyDrops\Adec...
+    [18:18:21] Found 120 videos, 0 pending
+    (repete infinitamente...)
+
+  AGORA (claro e sem spam):
+    [18:17:51] Idle: all 120 videos in C:\Users\...\Adec already processed
+    (só mostra uma vez quando não há trabalho)
+
+  QUANDO TEM TRABALHO:
+    [18:17:51] Scanning C:\...\Pasta: 150 videos found, 120 done, 30 need processing
+
+  Melhorias:
+  - Mostra caminho completo (não trunca mais)
+  - Explica claramente: X encontrados, Y já feitos, Z precisam processar
+  - Não repete log quando idle (mostra só uma vez)
+  - Status bar mostra "Idle - all files processed"
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.9 (02/02/2026):
 
   [FEATURE] Botão CLEANUP H264 - limpa backups órfãos
   ---------------------------------------------------
