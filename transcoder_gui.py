@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.3.10"
+VERSION = "1.4.0"
 
 import socket
 import subprocess
@@ -420,6 +420,10 @@ class TranscoderGUI:
         self.max_pending_downloads = 50  # Max files downloading at once
         self.min_free_space_gb = 20  # Keep at least 20GB free for pending downloads
 
+        # Download progress tracking for ETA estimation
+        self._download_progress = {}  # {path_str: {'started': time, 'last_size': bytes, 'speed': bytes/sec}}
+        self._download_speed_samples = []  # Rolling average of download speeds
+
         # Idle state tracking - avoid spamming "nothing to do" logs
         self._last_scan_had_work = True  # Assume work initially so first idle is logged
 
@@ -445,6 +449,9 @@ class TranscoderGUI:
         self.setup_cloud_manifest()
         self.load_stats()
         self.check_ffmpeg()
+
+        # Start download status UI updater (every 2 seconds)
+        self._update_download_status_ui()
 
         # Save settings when window closes
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -547,8 +554,23 @@ class TranscoderGUI:
         progress_frame = ttk.LabelFrame(main_frame, text="Current Progress", padding="10")
         progress_frame.pack(fill=tk.X, pady=(0, 10))
 
-        self.current_file_label = ttk.Label(progress_frame, text="Idle", font=("", 9))
-        self.current_file_label.pack(fill=tk.X)
+        # Local folder status
+        local_status_frame = ttk.Frame(progress_frame)
+        local_status_frame.pack(fill=tk.X)
+        ttk.Label(local_status_frame, text="Local:", font=("", 8, "bold")).pack(side=tk.LEFT)
+        self.current_file_label = ttk.Label(local_status_frame, text="Idle", font=("", 9))
+        self.current_file_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Download queue status (new)
+        download_status_frame = ttk.Frame(progress_frame)
+        download_status_frame.pack(fill=tk.X, pady=(3, 0))
+        ttk.Label(download_status_frame, text="Downloads:", font=("", 8, "bold")).pack(side=tk.LEFT)
+        self.download_queue_label = ttk.Label(download_status_frame, text="No pending downloads", font=("", 9), foreground="gray")
+        self.download_queue_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Files in download queue (shows actual filenames)
+        self.download_files_label = ttk.Label(progress_frame, text="", font=("", 8), foreground="gray", wraplength=800, justify=tk.LEFT)
+        self.download_files_label.pack(fill=tk.X, pady=(2, 0))
 
         # Progress bar with percentage
         self.progress_var = tk.DoubleVar(value=0)
@@ -629,6 +651,16 @@ class TranscoderGUI:
         ttk.Label(dash_daily, text="Últimos dias:", font=("", 8)).pack(side=tk.LEFT)
         self.dash_daily_label = ttk.Label(dash_daily, text="", font=("Consolas", 8))
         self.dash_daily_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Global pending info row (clarifies global vs local)
+        dash_pending = ttk.Frame(dashboard_frame)
+        dash_pending.pack(fill=tk.X, pady=(5, 0))
+        self.dash_global_pending_label = ttk.Label(
+            dash_pending,
+            text="💡 Dados do último SCAN. Clique SCAN para atualizar o inventário global.",
+            font=("", 8), foreground="gray"
+        )
+        self.dash_global_pending_label.pack(side=tk.LEFT)
 
         # Initial dashboard load
         self.root.after(1000, self.refresh_dashboard)
@@ -2800,6 +2832,76 @@ class TranscoderGUI:
             count = len(self.pending_downloads)
             total_bytes = sum(self.pending_downloads.values())
             return count, total_bytes / (1024**3)
+
+    def _update_download_status_ui(self):
+        """Update the download status display in the UI. Runs every 2 seconds."""
+        try:
+            with self.pending_downloads_lock:
+                count = len(self.pending_downloads)
+                total_bytes = sum(self.pending_downloads.values())
+                total_gb = total_bytes / (1024**3)
+
+                if count == 0:
+                    self.download_queue_label.config(
+                        text="No pending downloads",
+                        foreground="gray"
+                    )
+                    self.download_files_label.config(text="")
+                else:
+                    # Calculate download progress and estimate ETA
+                    downloaded_bytes = 0
+                    downloading_files = []
+
+                    for path_str, expected_size in self.pending_downloads.items():
+                        try:
+                            file_path = Path(path_str)
+                            if file_path.exists():
+                                current_size = file_path.stat().st_size
+                                if current_size > 10000:  # File is downloading
+                                    downloaded_bytes += current_size
+                                    pct = (current_size / expected_size * 100) if expected_size > 0 else 0
+                                    downloading_files.append(f"{file_path.name} ({pct:.0f}%)")
+                                else:
+                                    downloading_files.append(f"{file_path.name} (waiting)")
+                            else:
+                                downloading_files.append(f"{Path(path_str).name} (queued)")
+                        except:
+                            downloading_files.append(f"{Path(path_str).name} (queued)")
+
+                    # Calculate ETA based on average Dropbox speed (~5-20 MB/s typical)
+                    remaining_bytes = total_bytes - downloaded_bytes
+                    remaining_gb = remaining_bytes / (1024**3)
+
+                    # Estimate: assume 10 MB/s average download speed
+                    avg_speed_mbps = 10
+                    eta_seconds = remaining_bytes / (avg_speed_mbps * 1024 * 1024)
+                    eta_str = ""
+                    if eta_seconds > 3600:
+                        eta_str = f"~{eta_seconds/3600:.1f}h"
+                    elif eta_seconds > 60:
+                        eta_str = f"~{eta_seconds/60:.0f}min"
+                    else:
+                        eta_str = f"~{eta_seconds:.0f}s"
+
+                    self.download_queue_label.config(
+                        text=f"⬇️ {count} files downloading ({total_gb:.2f} GB) - ETA: {eta_str}",
+                        foreground="blue"
+                    )
+
+                    # Show up to 5 filenames
+                    if downloading_files:
+                        display_files = downloading_files[:5]
+                        if len(downloading_files) > 5:
+                            display_files.append(f"... and {len(downloading_files) - 5} more")
+                        self.download_files_label.config(text="  " + ", ".join(display_files))
+                    else:
+                        self.download_files_label.config(text="")
+
+        except Exception as e:
+            pass  # Don't crash if UI update fails
+
+        # Schedule next update in 2 seconds
+        self.root.after(2000, self._update_download_status_ui)
 
     def _cleanup_pending_downloads(self) -> None:
         """

@@ -2,29 +2,45 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
-Versão: 1.3.10
-Data: 02/02/2026
+Versão: 1.4.0
+Data: 03/02/2026
 --------------------------------------------------------------------------------
 
 NOVIDADES DESTA VERSÃO:
 
+  [FEATURE] Visibilidade total dos downloads do Dropbox
+  -----------------------------------------------------
+  Agora você vê exatamente o que está acontecendo com os downloads:
+
+  NOVA SEÇÃO "Downloads" na UI:
+  +----------------------------------------------------------+
+  | Local: Idle - all files processed                        |
+  | Downloads: ⬇️ 5 files downloading (12.34 GB) - ETA: ~8min |
+  |   video1.mp4 (45%), video2.mp4 (23%), video3.mp4 (waiting)|
+  +----------------------------------------------------------+
+
+  O QUE MOSTRA:
+  - Quantos arquivos estão baixando
+  - Quanto em GB está na fila
+  - Estimativa de tempo (ETA)
+  - Nomes dos arquivos e progresso de cada um
+  - Atualiza a cada 2 segundos
+
+  [UX] Separação clara: Local vs Global
+  -------------------------------------
+  - "Local:" mostra status da pasta atual (Watch Folder)
+  - "Dashboard Global" mostra stats de TODOS os PCs (do último SCAN)
+  - Nota explicativa: "Dados do último SCAN. Clique SCAN para atualizar."
+
+  Isso resolve a confusão de "por que diz idle se tem arquivos pendentes?"
+  (resposta: os pendentes estão em outras pastas, não na Watch Folder atual)
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.10 (02/02/2026):
+
   [UX] Logs mais claros e menos spam
   ----------------------------------
-  ANTES (confuso e repetitivo):
-    [18:17:51] Scanning C:\Users\HEAVY7\HeavyDrops Dropbox\HeavyDrops\Adec...
-    [18:17:51] Found 120 videos, 0 pending
-    [18:18:21] Scanning C:\Users\HEAVY7\HeavyDrops Dropbox\HeavyDrops\Adec...
-    [18:18:21] Found 120 videos, 0 pending
-    (repete infinitamente...)
-
-  AGORA (claro e sem spam):
-    [18:17:51] Idle: all 120 videos in C:\Users\...\Adec already processed
-    (só mostra uma vez quando não há trabalho)
-
-  QUANDO TEM TRABALHO:
-    [18:17:51] Scanning C:\...\Pasta: 150 videos found, 120 done, 30 need processing
-
-  Melhorias:
   - Mostra caminho completo (não trunca mais)
   - Explica claramente: X encontrados, Y já feitos, Z precisam processar
   - Não repete log quando idle (mostra só uma vez)
