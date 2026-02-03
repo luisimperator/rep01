@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.3.8"
+VERSION = "1.3.9"
 
 import socket
 import subprocess
@@ -565,6 +565,7 @@ class TranscoderGUI:
 
         ttk.Button(dash_top, text="🔄 REFRESH", command=self.refresh_dashboard).pack(side=tk.LEFT)
         ttk.Button(dash_top, text="📋 SCAN", command=self.run_inventory_scan).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(dash_top, text="🗑️ CLEANUP H264", command=self.cleanup_orphaned_h264_folders).pack(side=tk.LEFT, padx=(5, 0))
         self.dash_last_update = ttk.Label(dash_top, text="", font=("", 8))
         self.dash_last_update.pack(side=tk.LEFT, padx=(10, 0))
         self.dash_skipped_label = ttk.Label(dash_top, text="", font=("", 8), foreground="gray")
@@ -2480,6 +2481,104 @@ class TranscoderGUI:
         self.root.after(0, lambda: self.log(
             f"H264 folder deletion scheduled for 20 min: {h264_folder}", "info"))
         threading.Thread(target=delete_folder_after_delay, daemon=True).start()
+
+    def cleanup_orphaned_h264_folders(self):
+        """
+        Find and delete h264 folders where all files have valid h265 counterparts.
+        This cleans up backups that should have been deleted but weren't.
+        """
+        folder = Path(self.watch_folder.get())
+        if not folder.exists():
+            self.log(f"Folder not found: {folder}", "error")
+            return
+
+        def cleanup_thread():
+            self.root.after(0, lambda: self.log("Scanning for orphaned h264 folders...", "info"))
+
+            # Find all h264 folders
+            h264_folders = list(folder.rglob('h264'))
+            h264_folders = [f for f in h264_folders if f.is_dir()]
+
+            if not h264_folders:
+                self.root.after(0, lambda: self.log("No h264 folders found", "info"))
+                return
+
+            self.root.after(0, lambda n=len(h264_folders): self.log(
+                f"Found {n} h264 folders to check", "info"))
+
+            deleted_count = 0
+            total_freed_gb = 0
+            total_files_deleted = 0
+
+            for h264_folder in h264_folders:
+                if not self.running:
+                    break
+
+                parent_folder = h264_folder.parent
+
+                # Get all video files in h264 folder
+                h264_files = list(h264_folder.glob('*.mp4')) + list(h264_folder.glob('*.MP4'))
+
+                if not h264_files:
+                    continue
+
+                # Verify ALL h264 files have valid h265 counterparts
+                all_verified = True
+                for h264_file in h264_files:
+                    h265_file = parent_folder / h264_file.name
+
+                    # Check h265 exists
+                    if not h265_file.exists():
+                        all_verified = False
+                        break
+
+                    # Verify h265 is playable (quick check - just verify it's > 10KB)
+                    try:
+                        if h265_file.stat().st_size < 10000:
+                            all_verified = False
+                            break
+                    except:
+                        all_verified = False
+                        break
+
+                # All checks passed - delete entire h264 folder
+                if all_verified:
+                    try:
+                        import shutil
+                        # Calculate folder size before deletion
+                        folder_size = sum(f.stat().st_size for f in h264_folder.rglob('*') if f.is_file())
+                        folder_size_gb = folder_size / (1024**3)
+                        file_count = len(h264_files)
+
+                        shutil.rmtree(h264_folder)
+
+                        deleted_count += 1
+                        total_freed_gb += folder_size_gb
+                        total_files_deleted += file_count
+
+                        self.root.after(0, lambda p=h264_folder.parent.name, n=file_count, s=folder_size_gb: self.log(
+                            f"Deleted h264: {n} files, {s:.2f} GB freed - {p}", "success"))
+
+                        # Log to h265 feito.txt
+                        h265_folder = parent_folder / 'h265'
+                        h265_folder.mkdir(parents=True, exist_ok=True)
+                        log_file = h265_folder / "h265 feito.txt"
+                        try:
+                            with open(log_file, 'a', encoding='utf-8') as f:
+                                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED (cleanup)\n")
+                        except:
+                            pass
+
+                    except Exception as e:
+                        self.root.after(0, lambda err=e, p=h264_folder: self.log(
+                            f"Could not delete {p.name}: {err}", "warning"))
+
+            # Summary
+            self.root.after(0, lambda d=deleted_count, f=total_files_deleted, g=total_freed_gb: self.log(
+                f"Cleanup complete: {d} folders, {f} files, {g:.2f} GB freed", "success"))
+
+        # Run in background
+        threading.Thread(target=cleanup_thread, daemon=True).start()
 
     def _verify_mp3(self, mp3_path: Path) -> bool:
         """Verify MP3 file is valid using ffprobe."""

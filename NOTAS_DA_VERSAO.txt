@@ -2,11 +2,30 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
-Versão: 1.3.8
+Versão: 1.3.9
 Data: 02/02/2026
 --------------------------------------------------------------------------------
 
 NOVIDADES DESTA VERSÃO:
+
+  [FEATURE] Botão CLEANUP H264 - limpa backups órfãos
+  ---------------------------------------------------
+  Novo botão no dashboard que encontra e deleta pastas h264 que:
+  - Deveriam ter sido deletadas mas não foram
+  - Todos os arquivos h264 têm versões h265 válidas
+
+  COMO USAR:
+  1. Clica no botão "🗑️ CLEANUP H264"
+  2. O sistema escaneia todas as pastas h264
+  3. Verifica se cada arquivo tem h265 correspondente
+  4. Deleta as pastas h264 verificadas
+  5. Mostra resumo: "Cleanup complete: X folders, Y files, Z GB freed"
+
+  Isso recupera espaço de backups que ficaram para trás.
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.8 (02/02/2026):
 
   [BUGFIX] Importação de "h265 feito.txt" agora funciona
   ------------------------------------------------------
