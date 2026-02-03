@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.3.7"
+VERSION = "1.3.8"
 
 import socket
 import subprocess
@@ -257,28 +257,46 @@ except ImportError:
             self.save(force=True)
 
         def import_h265_feitos_txt(self, log_path, content):
+            """
+            Import entries from h265 feito.txt log files.
+            Format: "2024-01-01 12:00:00 | filename.mp4 | 100.0MB -> 50.0MB (50.0% menor)"
+            """
             if log_path in self.manifest['imported_h265_logs']:
                 return 0
             imported = 0
             for line in content.splitlines():
                 line = line.strip()
-                if not line:
+                if not line or 'H264 FOLDER DELETED' in line:
                     continue
                 parts = line.split('|')
-                if len(parts) >= 4:
+                if len(parts) >= 3:
                     try:
+                        timestamp = parts[0].strip()
                         filename = parts[1].strip()
-                        input_size = int(parts[2].strip()) if parts[2].strip().isdigit() else 0
-                        output_size = int(parts[3].strip()) if parts[3].strip().isdigit() else 0
-                        normalized = filename.lower()
+                        size_part = parts[2].strip() if len(parts) > 2 else ""
+
+                        # Parse size format: "100.0MB -> 50.0MB (50.0% menor)"
+                        input_size = 0
+                        output_size = 0
+                        if '->' in size_part:
+                            size_match = re.match(r'([\d.]+)MB\s*->\s*([\d.]+)MB', size_part)
+                            if size_match:
+                                input_size = int(float(size_match.group(1)) * 1024 * 1024)
+                                output_size = int(float(size_match.group(2)) * 1024 * 1024)
+
+                        # Use full path from log_path directory + filename for normalization
+                        log_dir = str(Path(log_path).parent.parent)  # Go up from h265/ folder
+                        full_path = f"{log_dir}/{filename}"
+                        normalized = self._normalize_path(full_path)
+
                         if normalized not in self.manifest['processed_files']:
                             self.manifest['processed_files'][normalized] = {
-                                'original_path': filename,
+                                'original_path': full_path,
                                 'output_path': '',
                                 'input_size_bytes': input_size,
                                 'output_size_bytes': output_size,
                                 'compression_ratio': output_size / input_size if input_size > 0 else 0.25,
-                                'processed_at': parts[0].strip() if parts[0] else datetime.now().isoformat(),
+                                'processed_at': timestamp if timestamp else datetime.now().isoformat(),
                                 'processed_by_pc': 'imported',
                                 'encoder_used': 'unknown',
                                 'cq_value': 0,
@@ -1376,7 +1394,7 @@ class TranscoderGUI:
         if self.cloud_manifest:
             for root, dirs, files in os.walk(watch_path):
                 for f in files:
-                    if f == "h265 feitos.txt":
+                    if f == "h265 feito.txt":
                         log_path = os.path.join(root, f)
                         try:
                             with open(log_path, 'r', encoding='utf-8', errors='ignore') as fp:

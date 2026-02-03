@@ -2,11 +2,29 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
-Versão: 1.3.7
+Versão: 1.3.8
 Data: 02/02/2026
 --------------------------------------------------------------------------------
 
 NOVIDADES DESTA VERSÃO:
+
+  [BUGFIX] Importação de "h265 feito.txt" agora funciona
+  ------------------------------------------------------
+  PROBLEMA: O import dos arquivos h265 feito.txt não estava funcionando.
+
+  CAUSA: Dois bugs encontrados:
+  1. Código procurava "h265 feitos.txt" (com s) mas o arquivo é "h265 feito.txt"
+  2. Parser esperava 4 colunas com bytes, mas o formato real é:
+     "2024-01-01 12:00:00 | arquivo.mp4 | 100.0MB -> 50.0MB (50% menor)"
+
+  SOLUÇÃO:
+  - Corrigido o nome do arquivo para "h265 feito.txt"
+  - Parser atualizado para o formato real com regex
+  - Agora importa corretamente os arquivos processados anteriormente
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.7 (02/02/2026):
 
   [BUGFIX] Arquivos low-bitrate agora são lembrados corretamente
   --------------------------------------------------------------
