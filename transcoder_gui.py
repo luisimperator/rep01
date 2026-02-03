@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.3.6"
+VERSION = "1.3.7"
 
 import socket
 import subprocess
@@ -1490,8 +1490,11 @@ class TranscoderGUI:
             "SELECT status FROM processed WHERE input_path = ?", (str(path),)
         )
         row = cursor.fetchone()
-        if row is not None and row[0] in ('done', 'skipped_hevc', 'skipped_exists'):
-            return True
+        if row is not None:
+            status = row[0]
+            # Accept any 'done' or 'skipped_*' status (hevc, lowbitrate, exists, etc.)
+            if status == 'done' or status.startswith('skipped'):
+                return True
 
         # Check cloud manifest - processed files
         if self.cloud_manifest and self.cloud_manifest.is_processed(str(path)):
@@ -1564,6 +1567,9 @@ class TranscoderGUI:
                     )
                 elif status == 'error':
                     self.cloud_manifest.record_failure(str(input_path), "Encoding failed")
+                elif status.startswith('skipped'):
+                    # Save skipped files too (hevc, lowbitrate, exists, etc.)
+                    self.cloud_manifest.record_skipped(str(input_path), status, input_size)
             except Exception as e:
                 self.log(f"Cloud manifest save error: {e}", "warning")
 

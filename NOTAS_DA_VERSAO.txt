@@ -2,11 +2,29 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
-Versão: 1.3.6
+Versão: 1.3.7
 Data: 02/02/2026
 --------------------------------------------------------------------------------
 
 NOVIDADES DESTA VERSÃO:
+
+  [BUGFIX] Arquivos low-bitrate agora são lembrados corretamente
+  --------------------------------------------------------------
+  PROBLEMA: Arquivos já verificados como "well-compressed" eram baixados
+  novamente do Dropbox em cada scan, desperdiçando banda e tempo.
+
+  CAUSA: Dois bugs encontrados:
+  1. O status "skipped_lowbitrate" não estava na lista de status reconhecidos
+  2. Arquivos skipped não eram salvos no manifest da nuvem (só local DB)
+
+  SOLUÇÃO:
+  - Agora reconhece qualquer status começando com "skipped" (hevc, lowbitrate, etc.)
+  - Arquivos skipped são salvos no cloud manifest (sobrevive wipe do SSD)
+  - Nunca mais baixa arquivo que já foi verificado como low-bitrate
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.6 (02/02/2026):
 
   [FEATURE] Controle inteligente de downloads do Dropbox
   ------------------------------------------------------
