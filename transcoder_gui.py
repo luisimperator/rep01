@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.6.2"
+VERSION = "1.6.3"
 
 import socket
 import subprocess
@@ -639,6 +639,7 @@ class TranscoderGUI:
         ttk.Button(dash_top, text="🔄 REFRESH", command=self.refresh_dashboard).pack(side=tk.LEFT)
         ttk.Button(dash_top, text="📋 SCAN", command=self.run_inventory_scan).pack(side=tk.LEFT, padx=(5, 0))
         ttk.Button(dash_top, text="🗑️ CLEANUP", command=self.run_all_cleanups).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(dash_top, text="📂 QUEUE", command=self.show_ready_queue).pack(side=tk.LEFT, padx=(5, 0))
         self.dash_last_update = ttk.Label(dash_top, text="", font=("", 8))
         self.dash_last_update.pack(side=tk.LEFT, padx=(10, 0))
         self.dash_skipped_label = ttk.Label(dash_top, text="", font=("", 8), foreground="gray")
@@ -1444,6 +1445,63 @@ class TranscoderGUI:
             self.log("Dashboard atualizado", "info")
         except Exception as e:
             self.log(f"Erro ao atualizar dashboard: {e}", "warning")
+
+    def show_ready_queue(self):
+        """Show popup with list of files in the ready queue."""
+        # Get queue contents (without removing items)
+        queue_items = []
+        temp_items = []
+
+        # Empty queue into temp list
+        while not self.ready_queue.empty():
+            try:
+                item = self.ready_queue.get_nowait()
+                temp_items.append(item)
+            except:
+                break
+
+        # Put items back and build display list
+        for item in temp_items:
+            self.ready_queue.put(item)
+            path, size = item
+            size_gb = size / (1024**3)
+            queue_items.append(f"{path.name}  ({size_gb:.2f} GB)\n   {path.parent}")
+
+        # Create popup window
+        popup = tk.Toplevel(self.root)
+        popup.title(f"Ready Queue - {len(queue_items)} files")
+        popup.geometry("700x500")
+        popup.transient(self.root)
+
+        # Header
+        header = ttk.Frame(popup, padding="10")
+        header.pack(fill=tk.X)
+        ttk.Label(header, text=f"Files ready to transcode: {len(queue_items)}", font=("", 11, "bold")).pack(side=tk.LEFT)
+
+        total_size = sum(item[1] for item in temp_items) / (1024**3)
+        ttk.Label(header, text=f"Total: {total_size:.2f} GB", font=("", 10)).pack(side=tk.RIGHT)
+
+        # List
+        list_frame = ttk.Frame(popup, padding="10")
+        list_frame.pack(fill=tk.BOTH, expand=True)
+
+        text_widget = tk.Text(list_frame, wrap=tk.WORD, font=("Consolas", 9))
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        text_widget.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        if queue_items:
+            for i, item in enumerate(queue_items, 1):
+                text_widget.insert(tk.END, f"{i}. {item}\n\n")
+        else:
+            text_widget.insert(tk.END, "Queue is empty.\n\nThe ready queue worker adds files here when they are:\n• Downloaded (not cloud-only)\n• Not already HEVC\n• Not low bitrate (<8 Mbps)\n• Not already processed")
+
+        text_widget.config(state=tk.DISABLED)
+
+        # Close button
+        ttk.Button(popup, text="Close", command=popup.destroy).pack(pady=10)
 
     def run_inventory_scan(self):
         """Run inventory scan via Dropbox API (no downloads)."""
