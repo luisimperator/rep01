@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 
 import socket
 import subprocess
@@ -252,8 +252,16 @@ except ImportError:
             return count
 
         def update_estimates(self, total_files, total_bytes):
-            self.manifest['stats']['total_files_to_process'] = total_files
-            self.manifest['stats']['total_bytes_to_process'] = total_bytes
+            # Only UPDATE if new values are higher (totals should never decrease)
+            # This prevents local scans from overwriting global totals with partial data
+            current_files = self.manifest['stats'].get('total_files_to_process', 0)
+            current_bytes = self.manifest['stats'].get('total_bytes_to_process', 0)
+
+            if total_files > current_files:
+                self.manifest['stats']['total_files_to_process'] = total_files
+            if total_bytes > current_bytes:
+                self.manifest['stats']['total_bytes_to_process'] = total_bytes
+
             self.save(force=True)
 
         def import_h265_feitos_txt(self, log_path, content):
@@ -324,10 +332,18 @@ except ImportError:
 
         def get_dashboard_data(self):
             s = self.manifest['stats']
+            # Use ACTUAL counts from manifest dictionaries (more accurate than stats)
+            actual_processed = len(self.manifest['processed_files'])
+            actual_skipped = len(self.manifest['skipped_files'])
+
             total_input = s['total_input_bytes']
             total_to_proc = s['total_bytes_to_process']
             total = total_input + total_to_proc
-            progress = (total_input / total * 100) if total > 0 else 0
+
+            # Calculate progress based on actual file counts
+            total_files = actual_processed + s.get('total_files_to_process', 0)
+            progress = (actual_processed / total_files * 100) if total_files > 0 else 0
+
             avg_ratio = s['total_output_bytes'] / total_input if total_input > 0 else 0.25
             trans_sec = s['total_transcode_seconds']
             speed = (total_input / (1024**3)) / (trans_sec / 3600) if trans_sec > 0 else 50
@@ -350,8 +366,8 @@ except ImportError:
                 'last_updated': self.manifest['last_updated'],
                 'last_updated_by': self.manifest['last_updated_by'],
                 'active_pcs': list(self.manifest['active_pcs'].keys()),
-                'total_processed': s['total_files_processed'],
-                'total_to_process': s['total_files_to_process'],
+                'total_processed': actual_processed,  # Use actual count from dict
+                'total_to_process': s.get('total_files_to_process', 0),
                 'progress_percent': progress,
                 'processed_tb': total_input / (1024**4),
                 'to_process_tb': total_to_proc / (1024**4),
@@ -1480,6 +1496,12 @@ class TranscoderGUI:
                 if self.cloud_manifest and self.cloud_manifest.is_skipped(file_path):
                     continue
 
+                # Skip DJI drone files (user wants originals preserved)
+                if f.upper().startswith('DJI_'):
+                    if self.cloud_manifest:
+                        self.cloud_manifest.record_skipped(file_path, "drone_dji", size)
+                    continue
+
                 # Check if too small
                 if size < min_size_bytes:
                     skipped_small += 1
@@ -1928,12 +1950,13 @@ class TranscoderGUI:
             self.root.after(0, lambda g=free_gb: self.log(
                 f"Low disk space ({g:.1f} GB). Limiting downloads.", "warning"))
 
-        # Find video files (only .mp4, skip ._ metadata files from macOS/ATEM)
+        # Find video files (only .mp4, skip ._ metadata files from macOS/ATEM and DJI drone files)
         video_files = []
         for ext in ['.mp4', '.MP4']:
             for f in folder.rglob(f'*{ext}'):
-                # Skip h265/h264 folders, and macOS/ATEM metadata files starting with ._
-                if 'h265' not in str(f).lower() and 'h264' not in str(f).lower() and not f.name.startswith('._'):
+                # Skip h265/h264 folders, macOS/ATEM metadata files, and DJI drone files
+                if ('h265' not in str(f).lower() and 'h264' not in str(f).lower()
+                    and not f.name.startswith('._') and not f.name.upper().startswith('DJI_')):
                     video_files.append(f)
 
         self.root.after(0, lambda: self.log(f"Found {len(video_files)} video files"))
@@ -2132,12 +2155,13 @@ class TranscoderGUI:
         # Clean up stale pending downloads and check which have completed
         self._cleanup_pending_downloads()
 
-        # Find video files (only .mp4, skip ._ metadata files from macOS/ATEM)
+        # Find video files (only .mp4, skip ._ metadata files from macOS/ATEM and DJI drone files)
         video_files = []
         for ext in ['.mp4', '.MP4']:
             for f in folder.rglob(f'*{ext}'):
-                # Skip h265/h264 folders, and macOS/ATEM metadata files starting with ._
-                if 'h265' not in str(f).lower() and 'h264' not in str(f).lower() and not f.name.startswith('._'):
+                # Skip h265/h264 folders, macOS/ATEM metadata files, and DJI drone files
+                if ('h265' not in str(f).lower() and 'h264' not in str(f).lower()
+                    and not f.name.startswith('._') and not f.name.upper().startswith('DJI_')):
                     video_files.append(f)
 
         # Remove duplicates (same file appearing multiple times)
@@ -2187,6 +2211,35 @@ class TranscoderGUI:
                 self.root.after(0, lambda g=free_gb: self.log(
                     f"Low disk space ({g:.1f} GB). Pausing...", "warning"))
                 break
+
+            # FAST CLOUD CHECK: Skip cloud files quickly without full process_file overhead
+            try:
+                if file_size < 10000:  # Tiny placeholder = cloud file
+                    self._add_to_pending_downloads(str(video_path), file_size)
+                    self._trigger_dropbox_download(video_path)
+                    continue  # Skip to next file
+                with open(video_path, 'rb') as f:
+                    f.read(1)  # Try to read 1 byte
+            except OSError as e:
+                if e.errno == 22:  # Invalid argument = cloud file
+                    self._add_to_pending_downloads(str(video_path), file_size)
+                    self._trigger_dropbox_download(video_path)
+                    continue  # Skip to next file immediately
+                # Other errors: proceed with normal processing
+
+            # LOOKAHEAD PREFETCH: Trigger downloads for next 10 files while processing current
+            # This ensures files are downloading in parallel with transcoding
+            lookahead_count = 0
+            for lookahead_idx in range(idx + 1, min(idx + 11, len(pending_files))):
+                next_path, next_size = pending_files[lookahead_idx]
+                path_str = str(next_path)
+                # Only trigger if not already in pending downloads
+                with self.pending_downloads_lock:
+                    if path_str not in self.pending_downloads:
+                        if self._can_trigger_download(next_size):
+                            self._add_to_pending_downloads(path_str, next_size)
+                            self._trigger_dropbox_download(next_path)
+                            lookahead_count += 1
 
             # Update queue counter
             self.root.after(0, lambda i=idx+1, t=total_pending:
