@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.6.4"
+VERSION = "1.6.5"
 
 import socket
 import subprocess
@@ -1557,7 +1557,8 @@ class TranscoderGUI:
 
         self.root.after(0, lambda: self.log("Escaneando arquivos locais...", "info"))
 
-        # First, import all h265 feitos.txt files we find
+        # First, import all h265 feitos.txt files we find (batch - no individual logging)
+        total_h265_entries_imported = 0
         if self.cloud_manifest:
             for root, dirs, files in os.walk(watch_path):
                 for f in files:
@@ -1569,10 +1570,13 @@ class TranscoderGUI:
                             imported = self.cloud_manifest.import_h265_feitos_txt(log_path, content)
                             if imported > 0:
                                 h265_logs_found += 1
-                                msg = f"Importado {imported} entradas de {log_path}"
-                                self.root.after(0, lambda m=msg: self.log(m, "success"))
+                                total_h265_entries_imported += imported
                         except Exception as e:
                             pass
+            # Log summary only once at the end
+            if h265_logs_found > 0:
+                self.root.after(0, lambda n=h265_logs_found, e=total_h265_entries_imported:
+                    self.log(f"Importado {e} entradas de {n} arquivos 'h265 feito.txt'", "success"))
 
         # Now scan all video files
         for root, dirs, files in os.walk(watch_path):

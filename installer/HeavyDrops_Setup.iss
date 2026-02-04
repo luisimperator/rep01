@@ -2,7 +2,7 @@
 ; Creates a professional Windows installer with wizard interface
 
 #define MyAppName "HeavyDrops Transcoder"
-#define MyAppVersion "1.6.4"
+#define MyAppVersion "1.6.5"
 #define MyAppPublisher "HeavyDrops"
 #define MyAppURL "https://github.com/luisimperator/rep01"
 #define MyAppExeName "HeavyDrops_Transcoder.exe"
