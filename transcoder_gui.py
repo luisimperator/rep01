@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.4.5"
+VERSION = "1.4.6"
 
 import socket
 import subprocess
@@ -3115,22 +3115,13 @@ class TranscoderGUI:
     def _trigger_dropbox_download(self, file_path: Path):
         """
         Try to trigger Dropbox to download a cloud-only file.
-        Uses multiple methods since different Dropbox versions behave differently.
+        Uses attrib to set file as pinned (always available).
         """
         try:
-            # Method 1: Use attrib to remove Unpinned attribute (request download)
-            subprocess.run(
+            # Use attrib to pin file (request download) - fast, no PowerShell
+            subprocess.Popen(
                 ['attrib', '-U', '+P', str(file_path)],
-                capture_output=True, timeout=10
-            )
-        except:
-            pass
-
-        try:
-            # Method 2: Use PowerShell to access the file (triggers download)
-            subprocess.run(
-                ['powershell', '-Command', f'Get-Content -Path "{file_path}" -TotalCount 1 -ErrorAction SilentlyContinue'],
-                capture_output=True, timeout=30
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
         except:
             pass
