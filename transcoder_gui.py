@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.4.6"
+VERSION = "1.5.0"
 
 import socket
 import subprocess
@@ -439,6 +439,15 @@ class TranscoderGUI:
         # Download progress tracking for ETA estimation
         self._download_progress = {}  # {path_str: {'started': time, 'last_size': bytes, 'speed': bytes/sec}}
         self._download_speed_samples = []  # Rolling average of download speeds
+
+        # READY QUEUE: Files confirmed downloaded and ready to transcode
+        # This decouples downloading from transcoding - no more waiting!
+        import queue
+        self.ready_queue = queue.Queue()  # Queue of (path, size) tuples
+        self.ready_queue_worker_running = False
+        self.ready_queue_worker_thread = None
+        self.files_being_checked = set()  # Files currently being checked for readiness
+        self.files_being_checked_lock = threading.Lock()
 
         # Idle state tracking - avoid spamming "nothing to do" logs
         self._last_scan_had_work = True  # Assume work initially so first idle is logged
@@ -1864,9 +1873,16 @@ class TranscoderGUI:
             self.pause_btn.config(state=tk.NORMAL, text="⏸ PAUSE")
             self.stop_btn.config(state=tk.NORMAL)
             self.progress_var.set(0)
+
+            # Start the ready queue worker (populates queue with ready files)
+            self.ready_queue_worker_running = True
+            self.ready_queue_worker_thread = threading.Thread(target=self.ready_queue_worker, daemon=True)
+            self.ready_queue_worker_thread.start()
+
+            # Start the main processing loop
             self.worker_thread = threading.Thread(target=self.process_loop, daemon=True)
             self.worker_thread.start()
-            self.log("Started monitoring", "success")
+            self.log("Started monitoring (ready queue enabled)", "success")
 
     def toggle_pause(self):
         """Pause or resume encoding."""
@@ -1887,6 +1903,14 @@ class TranscoderGUI:
         """Stop all encoding immediately."""
         self.running = False
         self.paused = False
+        self.ready_queue_worker_running = False  # Stop the ready queue worker
+
+        # Clear the ready queue
+        while not self.ready_queue.empty():
+            try:
+                self.ready_queue.get_nowait()
+            except:
+                break
 
         # Kill FFmpeg process if running
         if self.current_process:
@@ -2009,6 +2033,101 @@ class TranscoderGUI:
         if skipped_space > 0:
             msg += f", {skipped_space} skipped (no space)"
         self.root.after(0, lambda m=msg: self.log(m, "success"))
+
+    def ready_queue_worker(self):
+        """
+        Background worker that keeps the ready_queue populated with files ready to transcode.
+        This runs continuously while processing, checking files and moving ready ones to queue.
+        """
+        folder = Path(self.watch_folder.get())
+
+        while self.ready_queue_worker_running and self.running:
+            try:
+                # Find video files
+                video_files = []
+                for ext in ['.mp4', '.MP4']:
+                    for f in folder.rglob(f'*{ext}'):
+                        if ('h265' not in str(f).lower() and 'h264' not in str(f).lower()
+                            and not f.name.startswith('._') and not f.name.upper().startswith('DJI_')):
+                            video_files.append(f)
+
+                # Check each file
+                files_checked = 0
+                files_queued = 0
+                downloads_triggered = 0
+
+                for video_path in video_files:
+                    if not self.running or not self.ready_queue_worker_running:
+                        break
+
+                    path_str = str(video_path)
+
+                    # Skip if already processed
+                    if self.is_processed(video_path):
+                        continue
+
+                    # Skip if already in ready queue or being checked
+                    with self.files_being_checked_lock:
+                        if path_str in self.files_being_checked:
+                            continue
+                        self.files_being_checked.add(path_str)
+
+                    try:
+                        # Check file size
+                        try:
+                            size = video_path.stat().st_size
+                        except:
+                            continue
+
+                        # Skip too small
+                        if size / (1024**3) < self.min_size_gb.get():
+                            continue
+
+                        # Check if file is ready (local, not cloud)
+                        is_ready = False
+                        try:
+                            if size > 10000:  # Not a placeholder
+                                with open(video_path, 'rb') as f:
+                                    f.read(1024)  # Try to read
+                                is_ready = True
+                        except OSError as e:
+                            if e.errno == 22:  # Cloud file
+                                # Trigger download
+                                if downloads_triggered < 10:  # Limit triggers per cycle
+                                    self._trigger_dropbox_download(video_path)
+                                    downloads_triggered += 1
+                            is_ready = False
+
+                        if is_ready:
+                            # Add to ready queue
+                            self.ready_queue.put((video_path, size))
+                            files_queued += 1
+
+                        files_checked += 1
+
+                    finally:
+                        with self.files_being_checked_lock:
+                            self.files_being_checked.discard(path_str)
+
+                    # Don't hog CPU
+                    if files_checked % 50 == 0:
+                        time.sleep(0.1)
+
+                # Log status periodically
+                if files_queued > 0:
+                    self.root.after(0, lambda q=files_queued, d=downloads_triggered:
+                        self.log(f"Ready queue: +{q} files ready, {d} downloads triggered", "info"))
+
+                # Wait before next scan (shorter if queue is empty)
+                wait_time = 2 if self.ready_queue.qsize() < 3 else 10
+                for _ in range(wait_time * 2):
+                    if not self.running or not self.ready_queue_worker_running:
+                        break
+                    time.sleep(0.5)
+
+            except Exception as e:
+                self.root.after(0, lambda err=e: self.log(f"Ready queue worker error: {err}", "warning"))
+                time.sleep(5)
 
     def process_loop(self):
         """Main processing loop."""
@@ -2138,7 +2257,7 @@ class TranscoderGUI:
         return files_to_transcode
 
     def scan_and_process(self):
-        """Scan folder and process files."""
+        """Process files from the ready queue. No scanning - ready_queue_worker handles that."""
         folder = Path(self.watch_folder.get())
 
         if not folder.exists():
@@ -2152,85 +2271,50 @@ class TranscoderGUI:
                 f"Low disk space ({g:.1f} GB free). Waiting...", "warning"))
             return
 
-        # Clean up stale pending downloads and check which have completed
+        # Clean up stale pending downloads
         self._cleanup_pending_downloads()
-
-        # Find video files (only .mp4, skip ._ metadata files from macOS/ATEM and DJI drone files)
-        video_files = []
-        for ext in ['.mp4', '.MP4']:
-            for f in folder.rglob(f'*{ext}'):
-                # Skip h265/h264 folders, macOS/ATEM metadata files, and DJI drone files
-                if ('h265' not in str(f).lower() and 'h264' not in str(f).lower()
-                    and not f.name.startswith('._') and not f.name.upper().startswith('DJI_')):
-                    video_files.append(f)
-
-        # Remove duplicates (same file appearing multiple times)
-        video_files = list(set(video_files))
-
-        # Filter to only unprocessed files and sort by size (smaller first)
-        pending_files = []
-        for f in video_files:
-            if not self.is_processed(f):
-                try:
-                    size = f.stat().st_size
-                    if size / (1024**3) >= self.min_size_gb.get():
-                        pending_files.append((f, size))
-                except:
-                    pass
-
-        total_pending = len(pending_files)
-        total_videos = len(video_files)
-        already_done = total_videos - total_pending
-
-        if total_pending == 0:
-            # Only log if we just became idle (avoid spamming same message)
-            if self._last_scan_had_work:
-                self.root.after(0, lambda t=total_videos, f=str(folder): self.log(
-                    f"Idle: all {t} videos in {f} already processed", "success"))
-                self._last_scan_had_work = False
-            # Update status bar even when not logging
-            self.root.after(0, lambda: self.current_file_label.config(text="Idle - all files processed"))
-        else:
-            self._last_scan_had_work = True
-            self.root.after(0, lambda t=total_videos, d=already_done, p=total_pending, f=str(folder): self.log(
-                f"Scanning {f}: {t} videos found, {d} done, {p} need processing"))
-
-        # Smart sorting: prioritize folders closer to completion
-        pending_files = self._sort_by_folder_completion(pending_files)
 
         # Track files processed in this scan
         files_processed_this_scan = 0
+        queue_size = self.ready_queue.qsize()
 
-        # LOOKAHEAD PREFETCH: Trigger downloads for first 10 pending files in background
-        # This ensures files are downloading while we process
-        def prefetch_files():
-            for i, (path, size) in enumerate(pending_files[:10]):
-                path_str = str(path)
-                with self.pending_downloads_lock:
-                    if path_str not in self.pending_downloads:
-                        if self._can_trigger_download(size):
-                            self._add_to_pending_downloads(path_str, size)
-                            self._trigger_dropbox_download(path)
+        if queue_size == 0:
+            # Only log if we just became idle
+            if self._last_scan_had_work:
+                self.root.after(0, lambda: self.log(
+                    "Ready queue empty - waiting for downloads...", "info"))
+                self._last_scan_had_work = False
+            self.root.after(0, lambda: self.current_file_label.config(text="Waiting for ready files..."))
+            return
 
-        prefetch_thread = threading.Thread(target=prefetch_files, daemon=True)
-        prefetch_thread.start()
+        self._last_scan_had_work = True
+        self.root.after(0, lambda q=queue_size: self.log(f"Ready queue: {q} files ready to process"))
 
-        for idx, (video_path, file_size) in enumerate(pending_files):
-            if not self.running:
-                break
-
-            # Check disk space before each file
+        # Process files from ready queue (already verified as downloaded!)
+        idx = 0
+        while not self.ready_queue.empty() and self.running:
+            # Check disk space
             free_gb = self.get_free_disk_space(folder)
             if free_gb < 5:
                 self.root.after(0, lambda g=free_gb: self.log(
                     f"Low disk space ({g:.1f} GB). Pausing...", "warning"))
                 break
 
-            # Update queue counter
-            self.root.after(0, lambda i=idx+1, t=total_pending:
-                self.current_file_label.config(text=f"Queue: {i}/{t}"))
+            try:
+                video_path, file_size = self.ready_queue.get_nowait()
+            except:
+                break
 
-            self.process_file(video_path, queue_pos=idx+1, queue_total=total_pending, file_size=file_size)
+            # Double-check file is still valid
+            if not video_path.exists() or self.is_processed(video_path):
+                continue
+
+            idx += 1
+            # Update queue counter
+            self.root.after(0, lambda i=idx, q=self.ready_queue.qsize():
+                self.current_file_label.config(text=f"Processing {i} (queue: {q})"))
+
+            self.process_file(video_path, queue_pos=idx, queue_total=queue_size, file_size=file_size)
             files_processed_this_scan += 1
 
         # Process WAV files in "Audio Source Files" folders
