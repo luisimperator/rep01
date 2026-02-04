@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 
 import socket
 import subprocess
@@ -1421,6 +1421,10 @@ class TranscoderGUI:
         skipped_small = 0
         h265_logs_found = 0
 
+        # Track WHERE pending files are (folder -> count)
+        pending_by_folder = {}
+        pending_files_list = []  # List of (path, size) for download triggering
+
         min_size_bytes = int(self.min_size_gb.get() * 1024 * 1024 * 1024)
         video_extensions = {'.mp4', '.mkv', '.avi', '.mov', '.wmv', '.m4v', '.webm'}
 
@@ -1499,10 +1503,31 @@ class TranscoderGUI:
                 needs_transcoding += 1
                 needs_transcoding_size += size
 
+                # Track which folder this file is in
+                folder_name = os.path.basename(root)
+                pending_by_folder[folder_name] = pending_by_folder.get(folder_name, 0) + 1
+
+                # Add to pending files list (for download triggering)
+                pending_files_list.append((file_path, size))
+
         # Update manifest with estimates
         if self.cloud_manifest:
             self.cloud_manifest.update_estimates(needs_transcoding, needs_transcoding_size)
             self.cloud_manifest.save(force=True)
+
+        # Proactively trigger downloads for first 50 pending files
+        if pending_files_list:
+            # Sort by size (smaller first) for faster progress
+            pending_files_list.sort(key=lambda x: x[1])
+            files_to_trigger = pending_files_list[:50]
+
+            self.root.after(0, lambda n=len(files_to_trigger): self.log(
+                f"Triggering downloads for {n} files...", "info"))
+
+            for file_path, size in files_to_trigger:
+                if len(self.pending_downloads) < self.max_pending_downloads:
+                    self._add_to_pending_downloads(file_path, size)
+                    self._trigger_dropbox_download(Path(file_path))
 
         # Show results
         def show_results():
@@ -1517,9 +1542,27 @@ class TranscoderGUI:
             self.log(f"Muito pequenos: {skipped_small:,}", "info")
             self.log(f"", "info")
             self.log(f"PRECISAM TRANSCODAR: {needs_transcoding:,} ({needs_transcoding_size / (1024**4):.2f} TB)", "warning")
+
+            # Show WHERE the pending files are (top 10 folders)
+            if pending_by_folder:
+                self.log(f"", "info")
+                self.log(f"ONDE ESTÃO OS ARQUIVOS PENDENTES:", "warning")
+                top_folders = sorted(pending_by_folder.items(), key=lambda x: -x[1])[:10]
+                for folder, count in top_folders:
+                    self.log(f"  📁 {folder}: {count} arquivo(s)", "info")
+                if len(pending_by_folder) > 10:
+                    others = sum(c for f, c in list(pending_by_folder.items())[10:])
+                    self.log(f"  ... e mais {len(pending_by_folder) - 10} pastas ({others} arquivos)", "info")
+
             self.log(f"", "info")
             if h265_logs_found > 0:
                 self.log(f"Importados {h265_logs_found} arquivos h265 feitos.txt", "success")
+
+            # Show download trigger info
+            triggered = min(len(pending_files_list), 50)
+            if triggered > 0:
+                self.log(f"Downloads iniciados: {triggered} arquivos (primeiros da fila)", "success")
+
             self.log("=" * 60, "success")
 
             # Refresh dashboard to show new data
@@ -3030,6 +3073,8 @@ class TranscoderGUI:
             encoders_to_try.append('cpu')  # Add CPU as fallback
 
         encoding_success = False
+        transcode_start_time = time.time()  # Track transcode time for speed calculation
+
         for try_encoder in encoders_to_try:
             if not self.running:
                 break
@@ -3072,9 +3117,10 @@ class TranscoderGUI:
             input_size = input_path.stat().st_size
             output_size = output_path.stat().st_size
             reduction = (1 - output_size/input_size) * 100
+            transcode_time = time.time() - transcode_start_time  # Calculate actual transcode time
 
-            self.root.after(0, lambda r=reduction: self.log(
-                f"Done! {r:.1f}% smaller", "success"))
+            self.root.after(0, lambda r=reduction, t=transcode_time: self.log(
+                f"Done! {r:.1f}% smaller in {t:.0f}s", "success"))
 
             # Reorganize files:
             # 1. Move original H.264 to h264/ folder
@@ -3100,7 +3146,8 @@ class TranscoderGUI:
                     f"Moved H.265 to original location", "info"))
 
                 # Update output_path for logging
-                self.mark_processed(h264_backup_path, str(final_path), "done", input_size, output_size)
+                self.mark_processed(h264_backup_path, str(final_path), "done", input_size, output_size,
+                                   duration=duration, transcode_time=transcode_time)
                 self.write_success_log(h264_backup_path, final_path, input_size, output_size)
                 self.write_h265_done_log(output_folder, input_path.name, input_size, output_size)
 
@@ -3112,7 +3159,8 @@ class TranscoderGUI:
                 self.root.after(0, lambda e=move_err: self.log(
                     f"File reorganization failed: {e}", "error"))
                 # Still mark as done since encoding succeeded
-                self.mark_processed(input_path, str(output_path), "done", input_size, output_size)
+                self.mark_processed(input_path, str(output_path), "done", input_size, output_size,
+                                   duration=duration, transcode_time=transcode_time)
                 self.write_success_log(input_path, output_path, input_size, output_size)
         else:
             self.root.after(0, lambda: self.log("All encoders failed!", "error"))

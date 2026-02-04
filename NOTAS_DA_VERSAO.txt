@@ -2,11 +2,49 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
-Versão: 1.4.0
-Data: 03/02/2026
+Versão: 1.4.1
+Data: 04/02/2026
 --------------------------------------------------------------------------------
 
 NOVIDADES DESTA VERSÃO:
+
+  [FEATURE] SCAN mostra ONDE estão os arquivos pendentes
+  ------------------------------------------------------
+  Agora o SCAN mostra exatamente em quais pastas estão os arquivos pendentes:
+
+    ONDE ESTÃO OS ARQUIVOS PENDENTES:
+      📁 Projeto_ABC: 45 arquivo(s)
+      📁 Comercial_XYZ: 23 arquivo(s)
+      📁 Evento_2024: 12 arquivo(s)
+      ... e mais 5 pastas (8 arquivos)
+
+  Isso responde: "por que diz 70 pendentes mas minha pasta está completa?"
+  (porque os 70 estão em OUTRAS pastas!)
+
+  [FEATURE] Download automático dos próximos 50 arquivos
+  ------------------------------------------------------
+  Ao clicar SCAN, o sistema automaticamente:
+  - Identifica os 50 menores arquivos pendentes
+  - Dispara o download deles no Dropbox
+  - Mostra: "Downloads iniciados: 50 arquivos (primeiros da fila)"
+
+  [BUGFIX] Velocidade GB/h agora calculada corretamente
+  -----------------------------------------------------
+  ANTES: Sempre mostrava "50.0 GB/h" (valor fixo padrão)
+  AGORA: Calcula baseado no tempo REAL de transcodificação
+
+  O log agora mostra: "Done! 65.2% smaller in 342s"
+  Isso alimenta a estatística de velocidade no dashboard.
+
+  [INFO] Sobre uso de CPU vs GPU
+  ------------------------------
+  Se você usa Intel QSV, é NORMAL ver CPU baixo (10-16%) e GPU alto (70-80%).
+  O QSV usa o chip de vídeo integrado da Intel, não a CPU.
+  Isso é EFICIENTE - significa que a GPU está fazendo o trabalho pesado!
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.4.0 (03/02/2026):
 
   [FEATURE] Visibilidade total dos downloads do Dropbox
   -----------------------------------------------------
