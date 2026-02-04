@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 
 import socket
 import subprocess
@@ -2847,25 +2847,20 @@ class TranscoderGUI:
                 if not h264_files:
                     continue
 
-                # Check for "h264 ok for deletion.txt" marker (from offline mode)
-                marker_file = h264_folder / "h264 ok for deletion.txt"
-                has_marker = marker_file.exists()
-
-                # If no marker, check 60-day rule
-                if not has_marker:
-                    import time
-                    now = time.time()
-                    has_young_files = False
-                    for h264_file in h264_files:
-                        try:
-                            file_age_days = (now - h264_file.stat().st_ctime) / (24 * 60 * 60)
-                            if file_age_days < 60:
-                                has_young_files = True
-                                break
-                        except:
-                            pass
-                    if has_young_files:
-                        continue  # Don't delete folders with files < 60 days old (unless marked)
+                # Skip folders with files younger than 60 days (always enforced)
+                import time
+                now = time.time()
+                has_young_files = False
+                for h264_file in h264_files:
+                    try:
+                        file_age_days = (now - h264_file.stat().st_ctime) / (24 * 60 * 60)
+                        if file_age_days < 60:
+                            has_young_files = True
+                            break
+                    except:
+                        pass
+                if has_young_files:
+                    continue  # Don't delete folders with files < 60 days old
 
                 # Verify ALL h264 files have valid h265 counterparts
                 all_verified = True
