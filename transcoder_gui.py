@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.4.4"
+VERSION = "1.4.5"
 
 import socket
 import subprocess
@@ -606,7 +606,7 @@ class TranscoderGUI:
 
         ttk.Button(dash_top, text="🔄 REFRESH", command=self.refresh_dashboard).pack(side=tk.LEFT)
         ttk.Button(dash_top, text="📋 SCAN", command=self.run_inventory_scan).pack(side=tk.LEFT, padx=(5, 0))
-        ttk.Button(dash_top, text="🗑️ CLEANUP H264", command=self.cleanup_orphaned_h264_folders).pack(side=tk.LEFT, padx=(5, 0))
+        ttk.Button(dash_top, text="🗑️ CLEANUP", command=self.run_all_cleanups).pack(side=tk.LEFT, padx=(5, 0))
         self.dash_last_update = ttk.Label(dash_top, text="", font=("", 8))
         self.dash_last_update.pack(side=tk.LEFT, padx=(10, 0))
         self.dash_skipped_label = ttk.Label(dash_top, text="", font=("", 8), foreground="gray")
@@ -2609,6 +2609,12 @@ class TranscoderGUI:
             f"H264 folder deletion scheduled for 20 min: {h264_folder}", "info"))
         threading.Thread(target=delete_folder_after_delay, daemon=True).start()
 
+    def run_all_cleanups(self):
+        """Run all cleanup operations: h264 folders and old proxy folders."""
+        self.cleanup_orphaned_h264_folders()
+        # Small delay then run proxy cleanup
+        self.root.after(2000, self.cleanup_old_proxy_folders)
+
     def cleanup_orphaned_h264_folders(self):
         """
         Find and delete h264 folders where all files have valid h265 counterparts.
@@ -2703,6 +2709,86 @@ class TranscoderGUI:
             # Summary
             self.root.after(0, lambda d=deleted_count, f=total_files_deleted, g=total_freed_gb: self.log(
                 f"Cleanup complete: {d} folders, {f} files, {g:.2f} GB freed", "success"))
+
+        # Run in background
+        threading.Thread(target=cleanup_thread, daemon=True).start()
+
+    def cleanup_old_proxy_folders(self):
+        """
+        Find and delete Proxies folders that are older than 60 days
+        and contain .mov files with _Proxy in the name.
+        """
+        folder = Path(self.watch_folder.get())
+        if not folder.exists():
+            self.log(f"Folder not found: {folder}", "error")
+            return
+
+        def cleanup_thread():
+            import time
+            self.root.after(0, lambda: self.log("Scanning for old Proxy folders...", "info"))
+
+            # Find all Proxies folders
+            proxy_folders = list(folder.rglob('Proxies'))
+            proxy_folders = [f for f in proxy_folders if f.is_dir()]
+
+            if not proxy_folders:
+                self.root.after(0, lambda: self.log("No Proxy folders found", "info"))
+                return
+
+            self.root.after(0, lambda n=len(proxy_folders): self.log(
+                f"Found {n} Proxy folders to check", "info"))
+
+            deleted_count = 0
+            total_freed_gb = 0
+            total_files_deleted = 0
+            now = time.time()
+            sixty_days_seconds = 60 * 24 * 60 * 60  # 60 days in seconds
+
+            for proxy_folder in proxy_folders:
+                if not self.running:
+                    break
+
+                try:
+                    # Check folder age (creation time)
+                    folder_ctime = proxy_folder.stat().st_ctime
+                    age_days = (now - folder_ctime) / (24 * 60 * 60)
+
+                    if age_days < 60:
+                        continue  # Skip folders less than 60 days old
+
+                    # Check if folder contains _Proxy .mov files
+                    proxy_files = [f for f in proxy_folder.glob('*.mov') if '_Proxy' in f.name]
+                    proxy_files += [f for f in proxy_folder.glob('*.MOV') if '_Proxy' in f.name]
+
+                    if not proxy_files:
+                        continue  # No proxy files found
+
+                    # Calculate folder size
+                    folder_size = sum(f.stat().st_size for f in proxy_folder.rglob('*') if f.is_file())
+                    folder_size_gb = folder_size / (1024**3)
+                    file_count = len(list(proxy_folder.rglob('*')))
+
+                    # Delete the folder
+                    import shutil
+                    shutil.rmtree(proxy_folder)
+
+                    deleted_count += 1
+                    total_freed_gb += folder_size_gb
+                    total_files_deleted += file_count
+
+                    self.root.after(0, lambda p=proxy_folder.parent.name, n=file_count, s=folder_size_gb, d=int(age_days): self.log(
+                        f"Deleted Proxies ({d} days old): {n} files, {s:.2f} GB freed - {p}", "success"))
+
+                except Exception as e:
+                    self.root.after(0, lambda err=e, p=proxy_folder: self.log(
+                        f"Could not delete {p}: {err}", "warning"))
+
+            # Summary
+            if deleted_count > 0:
+                self.root.after(0, lambda d=deleted_count, f=total_files_deleted, g=total_freed_gb: self.log(
+                    f"Proxy cleanup complete: {d} folders, {f} files, {g:.2f} GB freed", "success"))
+            else:
+                self.root.after(0, lambda: self.log("No old Proxy folders to delete (all < 60 days)", "info"))
 
         # Run in background
         threading.Thread(target=cleanup_thread, daemon=True).start()
