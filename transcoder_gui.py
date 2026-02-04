@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.4.3"
+VERSION = "1.4.4"
 
 import socket
 import subprocess
@@ -2201,6 +2201,20 @@ class TranscoderGUI:
         # Track files processed in this scan
         files_processed_this_scan = 0
 
+        # LOOKAHEAD PREFETCH: Trigger downloads for first 10 pending files in background
+        # This ensures files are downloading while we process
+        def prefetch_files():
+            for i, (path, size) in enumerate(pending_files[:10]):
+                path_str = str(path)
+                with self.pending_downloads_lock:
+                    if path_str not in self.pending_downloads:
+                        if self._can_trigger_download(size):
+                            self._add_to_pending_downloads(path_str, size)
+                            self._trigger_dropbox_download(path)
+
+        prefetch_thread = threading.Thread(target=prefetch_files, daemon=True)
+        prefetch_thread.start()
+
         for idx, (video_path, file_size) in enumerate(pending_files):
             if not self.running:
                 break
@@ -2211,35 +2225,6 @@ class TranscoderGUI:
                 self.root.after(0, lambda g=free_gb: self.log(
                     f"Low disk space ({g:.1f} GB). Pausing...", "warning"))
                 break
-
-            # FAST CLOUD CHECK: Skip cloud files quickly without full process_file overhead
-            try:
-                if file_size < 10000:  # Tiny placeholder = cloud file
-                    self._add_to_pending_downloads(str(video_path), file_size)
-                    self._trigger_dropbox_download(video_path)
-                    continue  # Skip to next file
-                with open(video_path, 'rb') as f:
-                    f.read(1)  # Try to read 1 byte
-            except OSError as e:
-                if e.errno == 22:  # Invalid argument = cloud file
-                    self._add_to_pending_downloads(str(video_path), file_size)
-                    self._trigger_dropbox_download(video_path)
-                    continue  # Skip to next file immediately
-                # Other errors: proceed with normal processing
-
-            # LOOKAHEAD PREFETCH: Trigger downloads for next 10 files while processing current
-            # This ensures files are downloading in parallel with transcoding
-            lookahead_count = 0
-            for lookahead_idx in range(idx + 1, min(idx + 11, len(pending_files))):
-                next_path, next_size = pending_files[lookahead_idx]
-                path_str = str(next_path)
-                # Only trigger if not already in pending downloads
-                with self.pending_downloads_lock:
-                    if path_str not in self.pending_downloads:
-                        if self._can_trigger_download(next_size):
-                            self._add_to_pending_downloads(path_str, next_size)
-                            self._trigger_dropbox_download(next_path)
-                            lookahead_count += 1
 
             # Update queue counter
             self.root.after(0, lambda i=idx+1, t=total_pending:
