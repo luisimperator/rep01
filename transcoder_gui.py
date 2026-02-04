@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.5.1"
+VERSION = "1.6.0"
 
 import socket
 import subprocess
@@ -461,6 +461,10 @@ class TranscoderGUI:
         self.encoder = tk.StringVar(value="nvenc")
         self.cq_value = tk.IntVar(value=24)
         self.auto_delete_h264 = tk.BooleanVar(value=False)  # Delete h264 backups after verification
+        self.offline_mode = tk.BooleanVar(value=False)  # Don't trigger downloads, only process local files
+
+        # Hourly speed tracking - list of (timestamp, bytes, seconds) for last hour
+        self._hourly_transcode_records = []
 
         # Stats
         self.files_processed = tk.IntVar(value=0)
@@ -481,6 +485,18 @@ class TranscoderGUI:
         # Save settings when window closes
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    def get_watch_folders(self) -> list:
+        """Get list of watch folders (supports semicolon-separated paths)."""
+        raw = self.watch_folder.get()
+        folders = []
+        for part in raw.split(';'):
+            part = part.strip()
+            if part:
+                p = Path(part)
+                if p.exists():
+                    folders.append(p)
+        return folders if folders else [Path(raw)]  # Fallback to original if no valid paths
+
     def setup_ui(self):
         """Create the UI."""
         # Main container
@@ -491,8 +507,8 @@ class TranscoderGUI:
         settings_frame = ttk.LabelFrame(main_frame, text="Settings", padding="10")
         settings_frame.pack(fill=tk.X, pady=(0, 10))
 
-        # Watch folder
-        ttk.Label(settings_frame, text="Watch Folder:").grid(row=0, column=0, sticky=tk.W, pady=5)
+        # Watch folder (multiple folders separated by semicolon)
+        ttk.Label(settings_frame, text="Watch Folder(s):").grid(row=0, column=0, sticky=tk.W, pady=5)
         folder_frame = ttk.Frame(settings_frame)
         folder_frame.grid(row=0, column=1, sticky=tk.EW, pady=5)
         ttk.Entry(folder_frame, textvariable=self.watch_folder, width=60).pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -540,6 +556,13 @@ class TranscoderGUI:
         )
         self.delete_h264_checkbox.pack(side=tk.LEFT)
         ttk.Label(options_frame, text="⚠️ Irreversível!", foreground="red", font=("", 8)).pack(side=tk.LEFT, padx=(10, 0))
+
+        # Offline mode checkbox (same row)
+        ttk.Checkbutton(
+            options_frame,
+            text="Offline Mode (no downloads)",
+            variable=self.offline_mode
+        ).pack(side=tk.LEFT, padx=(30, 0))
 
         settings_frame.columnconfigure(1, weight=1)
 
@@ -1385,8 +1408,11 @@ class TranscoderGUI:
             self.dash_saved_label.config(text=f"Economizado: {data['saved_tb']:.2f} TB")
             self.dash_estimate_label.config(text=f"Economia total estimada: {data['estimated_total_savings_tb']:.2f} TB")
 
-            # Performance
-            self.dash_speed_label.config(text=f"Velocidade: {data['avg_speed_gbh']:.1f} GB/h")
+            # Performance - use hourly speed if available, otherwise historical
+            hourly_speed = self.get_hourly_speed_gbh()
+            speed_display = hourly_speed if hourly_speed > 0 else data['avg_speed_gbh']
+            speed_label = f"Velocidade: {speed_display:.1f} GB/h" + (" (última hora)" if hourly_speed > 0 else " (histórico)")
+            self.dash_speed_label.config(text=speed_label)
             self.dash_compression_label.config(text=f"Compressão: {data['avg_compression']:.1f}%")
             self.dash_eta_label.config(text=f"ETA: {data['days_remaining']:.0f} dias")
 
@@ -2037,23 +2063,29 @@ class TranscoderGUI:
     def ready_queue_worker(self):
         """
         Background worker that keeps the ready_queue populated with files ready to transcode.
-        This runs continuously while processing, checking files and moving ready ones to queue.
+        Files are FULLY validated before being added: downloaded, not HEVC, not low-bitrate.
         """
-        folder = Path(self.watch_folder.get())
+        last_log_time = 0
+        total_queued_since_log = 0
+        total_skipped_since_log = 0
+        total_downloads_since_log = 0
 
         while self.ready_queue_worker_running and self.running:
             try:
-                # Find video files
-                video_files = []
-                for ext in ['.mp4', '.MP4']:
-                    for f in folder.rglob(f'*{ext}'):
-                        if ('h265' not in str(f).lower() and 'h264' not in str(f).lower()
-                            and not f.name.startswith('._') and not f.name.upper().startswith('DJI_')):
-                            video_files.append(f)
+                # Skip download triggering in offline mode
+                offline_mode = self.offline_mode.get()
 
-                # Check each file
-                files_checked = 0
+                # Find video files from ALL watch folders
+                video_files = []
+                for folder in self.get_watch_folders():
+                    for ext in ['.mp4', '.MP4']:
+                        for f in folder.rglob(f'*{ext}'):
+                            if ('h265' not in str(f).lower() and 'h264' not in str(f).lower()
+                                and not f.name.startswith('._') and not f.name.upper().startswith('DJI_')):
+                                video_files.append(f)
+
                 files_queued = 0
+                files_skipped = 0
                 downloads_triggered = 0
 
                 for video_path in video_files:
@@ -2083,43 +2115,79 @@ class TranscoderGUI:
                         if size / (1024**3) < self.min_size_gb.get():
                             continue
 
-                        # Check if file is ready (local, not cloud)
-                        is_ready = False
+                        # Check if file is local (not cloud)
+                        is_local = False
                         try:
                             if size > 10000:  # Not a placeholder
                                 with open(video_path, 'rb') as f:
                                     f.read(1024)  # Try to read
-                                is_ready = True
+                                is_local = True
                         except OSError as e:
                             if e.errno == 22:  # Cloud file
-                                # Trigger download
-                                if downloads_triggered < 10:  # Limit triggers per cycle
+                                if not offline_mode and downloads_triggered < 10:
                                     self._trigger_dropbox_download(video_path)
                                     downloads_triggered += 1
-                            is_ready = False
+                            continue  # Skip cloud files
 
-                        if is_ready:
-                            # Add to ready queue
-                            self.ready_queue.put((video_path, size))
-                            files_queued += 1
+                        if not is_local:
+                            continue
 
-                        files_checked += 1
+                        # FULL PRE-CHECK: Probe video to check codec and bitrate
+                        probe_data = self.probe_video(video_path)
+                        if not probe_data:
+                            files_skipped += 1
+                            continue
+
+                        # Skip if already HEVC
+                        if self.is_hevc(probe_data):
+                            self.mark_processed(video_path, "", "skipped_hevc", size, 0)
+                            files_skipped += 1
+                            continue
+
+                        # Skip if low bitrate (< 8 Mbps)
+                        bitrate = self.get_bitrate(probe_data, size)
+                        if bitrate > 0 and bitrate < 8:
+                            self.mark_processed(video_path, "", "skipped_lowbitrate", size, 0)
+                            files_skipped += 1
+                            continue
+
+                        # Check if output already exists
+                        output_folder = video_path.parent / 'h265'
+                        output_path = output_folder / video_path.name
+                        if output_path.exists():
+                            self.mark_processed(video_path, str(output_path), "skipped_exists", size, output_path.stat().st_size)
+                            files_skipped += 1
+                            continue
+
+                        # ALL CHECKS PASSED - Add to ready queue
+                        self.ready_queue.put((video_path, size))
+                        files_queued += 1
 
                     finally:
                         with self.files_being_checked_lock:
                             self.files_being_checked.discard(path_str)
 
                     # Don't hog CPU
-                    if files_checked % 50 == 0:
-                        time.sleep(0.1)
+                    time.sleep(0.05)
 
-                # Log status periodically
-                if files_queued > 0:
-                    self.root.after(0, lambda q=files_queued, d=downloads_triggered:
-                        self.log(f"Ready queue: +{q} files ready, {d} downloads triggered", "info"))
+                # Accumulate stats for periodic logging
+                total_queued_since_log += files_queued
+                total_skipped_since_log += files_skipped
+                total_downloads_since_log += downloads_triggered
+
+                # Log status every 30 seconds (not every cycle)
+                now = time.time()
+                if now - last_log_time >= 30 and (total_queued_since_log > 0 or total_skipped_since_log > 0):
+                    queue_size = self.ready_queue.qsize()
+                    self.root.after(0, lambda q=total_queued_since_log, s=total_skipped_since_log, d=total_downloads_since_log, qs=queue_size:
+                        self.log(f"Ready queue: {qs} ready, +{q} added, {s} skipped, {d} downloads", "info"))
+                    total_queued_since_log = 0
+                    total_skipped_since_log = 0
+                    total_downloads_since_log = 0
+                    last_log_time = now
 
                 # Wait before next scan (shorter if queue is empty)
-                wait_time = 2 if self.ready_queue.qsize() < 3 else 10
+                wait_time = 3 if self.ready_queue.qsize() < 3 else 15
                 for _ in range(wait_time * 2):
                     if not self.running or not self.ready_queue_worker_running:
                         break
@@ -2258,14 +2326,13 @@ class TranscoderGUI:
 
     def scan_and_process(self):
         """Process files from the ready queue. No scanning - ready_queue_worker handles that."""
-        folder = Path(self.watch_folder.get())
-
-        if not folder.exists():
-            self.root.after(0, lambda: self.log(f"Folder not found: {folder}", "error"))
+        folders = self.get_watch_folders()
+        if not folders:
+            self.root.after(0, lambda: self.log("No valid watch folders found", "error"))
             return
 
-        # Check disk space before starting
-        free_gb = self.get_free_disk_space(folder)
+        # Check disk space before starting (use first folder)
+        free_gb = self.get_free_disk_space(folders[0])
         if free_gb < 5:  # Less than 5GB free
             self.root.after(0, lambda g=free_gb: self.log(
                 f"Low disk space ({g:.1f} GB free). Waiting...", "warning"))
@@ -2293,8 +2360,8 @@ class TranscoderGUI:
         # Process files from ready queue (already verified as downloaded!)
         idx = 0
         while not self.ready_queue.empty() and self.running:
-            # Check disk space
-            free_gb = self.get_free_disk_space(folder)
+            # Check disk space (use first watch folder)
+            free_gb = self.get_free_disk_space(folders[0])
             if free_gb < 5:
                 self.root.after(0, lambda g=free_gb: self.log(
                     f"Low disk space ({g:.1f} GB). Pausing...", "warning"))
@@ -2740,6 +2807,21 @@ class TranscoderGUI:
                 if not h264_files:
                     continue
 
+                # Skip folders with files younger than 60 days
+                import time
+                now = time.time()
+                has_young_files = False
+                for h264_file in h264_files:
+                    try:
+                        file_age_days = (now - h264_file.stat().st_ctime) / (24 * 60 * 60)
+                        if file_age_days < 60:
+                            has_young_files = True
+                            break
+                    except:
+                        pass
+                if has_young_files:
+                    continue  # Don't delete folders with files < 60 days old
+
                 # Verify ALL h264 files have valid h265 counterparts
                 all_verified = True
                 for h264_file in h264_files:
@@ -2966,6 +3048,33 @@ class TranscoderGUI:
 
         except Exception:
             return False
+
+    def _record_transcode_speed(self, bytes_processed: int, seconds_taken: float):
+        """Record a transcode for hourly speed calculation."""
+        now = time.time()
+        self._hourly_transcode_records.append((now, bytes_processed, seconds_taken))
+        # Remove records older than 1 hour
+        one_hour_ago = now - 3600
+        self._hourly_transcode_records = [r for r in self._hourly_transcode_records if r[0] > one_hour_ago]
+
+    def get_hourly_speed_gbh(self) -> float:
+        """Calculate transcoding speed in GB/h based on last hour of work."""
+        if not self._hourly_transcode_records:
+            return 0.0
+        now = time.time()
+        one_hour_ago = now - 3600
+        # Filter to last hour
+        recent = [r for r in self._hourly_transcode_records if r[0] > one_hour_ago]
+        if not recent:
+            return 0.0
+        total_bytes = sum(r[1] for r in recent)
+        total_seconds = sum(r[2] for r in recent)
+        if total_seconds <= 0:
+            return 0.0
+        # GB per hour = (bytes / seconds) * 3600 / (1024^3)
+        bytes_per_second = total_bytes / total_seconds
+        gb_per_hour = (bytes_per_second * 3600) / (1024**3)
+        return gb_per_hour
 
     def get_free_disk_space(self, path: Path) -> float:
         """Get free disk space in GB for the drive containing path."""
@@ -3386,9 +3495,13 @@ class TranscoderGUI:
             output_size = output_path.stat().st_size
             reduction = (1 - output_size/input_size) * 100
             transcode_time = time.time() - transcode_start_time  # Calculate actual transcode time
+            input_size_gb = input_size / (1024**3)
 
-            self.root.after(0, lambda r=reduction, t=transcode_time: self.log(
-                f"Done! {r:.1f}% smaller in {t:.0f}s", "success"))
+            self.root.after(0, lambda r=reduction, t=transcode_time, s=input_size_gb: self.log(
+                f"Done! {s:.2f} GB → {r:.1f}% smaller in {t:.0f}s", "success"))
+
+            # Track for hourly speed calculation
+            self._record_transcode_speed(input_size, transcode_time)
 
             # Reorganize files:
             # 1. Move original H.264 to h264/ folder
