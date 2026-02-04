@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 
 import socket
 import subprocess
@@ -752,10 +752,28 @@ class TranscoderGUI:
             self.log(f"Error checking FFmpeg: {e}", "warning")
 
     def browse_folder(self):
-        """Open folder browser dialog."""
-        folder = filedialog.askdirectory(initialdir=self.watch_folder.get())
+        """Open folder browser dialog. Appends with semicolon if holding Shift or if current has folders."""
+        # Get current value
+        current = self.watch_folder.get().strip()
+
+        # Use last folder as initial dir, or current if only one
+        if ';' in current:
+            parts = [p.strip() for p in current.split(';') if p.strip()]
+            initial = parts[-1] if parts else current
+        else:
+            initial = current
+
+        folder = filedialog.askdirectory(initialdir=initial)
         if folder:
-            self.watch_folder.set(folder)
+            # Check if folder is already in the list
+            existing = [p.strip() for p in current.split(';') if p.strip()]
+            if folder not in existing:
+                if current and current != str(self.dropbox_base):
+                    # Append with semicolon
+                    self.watch_folder.set(f"{current}; {folder}")
+                else:
+                    # Replace
+                    self.watch_folder.set(folder)
             self.save_settings()
 
     def browse_log_folder(self):
@@ -1572,8 +1590,8 @@ class TranscoderGUI:
             self.cloud_manifest.update_estimates(needs_transcoding, needs_transcoding_size)
             self.cloud_manifest.save(force=True)
 
-        # Proactively trigger downloads for first 50 pending files
-        if pending_files_list:
+        # Proactively trigger downloads for first 50 pending files (skip in offline mode)
+        if pending_files_list and not self.offline_mode.get():
             # Sort by size (smaller first) for faster progress
             pending_files_list.sort(key=lambda x: x[1])
             files_to_trigger = pending_files_list[:50]
@@ -1869,7 +1887,8 @@ class TranscoderGUI:
                 except OSError as e:
                     if e.errno == 22:  # Invalid argument - cloud file
                         cloud_files += 1
-                        if triggered_size + size <= available_for_download:
+                        # Only trigger download if not in offline mode
+                        if not self.offline_mode.get() and triggered_size + size <= available_for_download:
                             self._trigger_dropbox_download(wav_path)
                             triggered += 1
                             triggered_size += size
@@ -1984,6 +2003,11 @@ class TranscoderGUI:
 
     def _do_scan_trigger(self):
         """Worker for scan and trigger download."""
+        # Skip entirely in offline mode
+        if self.offline_mode.get():
+            self.root.after(0, lambda: self.log("Offline mode: download trigger skipped", "info"))
+            return
+
         folder = Path(self.watch_folder.get())
 
         if not folder.exists():
@@ -2727,26 +2751,42 @@ class TranscoderGUI:
                         all_verified = False
                         break
 
-                # All checks passed - delete entire h264 folder
+                # All checks passed - handle h264 folder
                 if all_verified:
                     import shutil
-                    # Calculate folder size before deletion
                     folder_size = sum(f.stat().st_size for f in h264_folder.rglob('*') if f.is_file())
                     folder_size_gb = folder_size / (1024**3)
                     file_count = len(h264_files)
-                    shutil.rmtree(h264_folder)
-                    self.root.after(0, lambda p=h264_folder, n=file_count, s=folder_size_gb: self.log(
-                        f"H264 folder deleted: {n} files, {s:.2f} GB freed - {p.name}", "success"))
 
-                    # Log deletion timestamp to h265 feito.txt
-                    h265_folder = parent_folder / 'h265'
-                    h265_folder.mkdir(parents=True, exist_ok=True)
-                    log_file = h265_folder / "h265 feito.txt"
-                    try:
-                        with open(log_file, 'a', encoding='utf-8') as f:
-                            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED\n")
-                    except:
-                        pass
+                    # In offline mode, create txt marker instead of deleting
+                    if self.offline_mode.get():
+                        marker_file = h264_folder / "h264 ok for deletion.txt"
+                        try:
+                            with open(marker_file, 'w', encoding='utf-8') as f:
+                                f.write(f"Verified: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                                f.write(f"Files: {file_count}\n")
+                                f.write(f"Size: {folder_size_gb:.2f} GB\n")
+                                f.write(f"PC: {self.pc_name}\n")
+                                f.write("This folder is safe to delete - all h265 files verified.\n")
+                            self.root.after(0, lambda p=h264_folder, n=file_count, s=folder_size_gb: self.log(
+                                f"H264 marked for deletion: {n} files, {s:.2f} GB - {p.name}", "info"))
+                        except Exception as e:
+                            self.root.after(0, lambda err=e: self.log(f"Could not create marker: {err}", "warning"))
+                    else:
+                        # Normal mode: delete the folder
+                        shutil.rmtree(h264_folder)
+                        self.root.after(0, lambda p=h264_folder, n=file_count, s=folder_size_gb: self.log(
+                            f"H264 folder deleted: {n} files, {s:.2f} GB freed - {p.name}", "success"))
+
+                        # Log deletion timestamp to h265 feito.txt
+                        h265_folder = parent_folder / 'h265'
+                        h265_folder.mkdir(parents=True, exist_ok=True)
+                        log_file = h265_folder / "h265 feito.txt"
+                        try:
+                            with open(log_file, 'a', encoding='utf-8') as f:
+                                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED\n")
+                        except:
+                            pass
 
                 self._scheduled_h264_folders.discard(folder_key)
 
@@ -2807,20 +2847,25 @@ class TranscoderGUI:
                 if not h264_files:
                     continue
 
-                # Skip folders with files younger than 60 days
-                import time
-                now = time.time()
-                has_young_files = False
-                for h264_file in h264_files:
-                    try:
-                        file_age_days = (now - h264_file.stat().st_ctime) / (24 * 60 * 60)
-                        if file_age_days < 60:
-                            has_young_files = True
-                            break
-                    except:
-                        pass
-                if has_young_files:
-                    continue  # Don't delete folders with files < 60 days old
+                # Check for "h264 ok for deletion.txt" marker (from offline mode)
+                marker_file = h264_folder / "h264 ok for deletion.txt"
+                has_marker = marker_file.exists()
+
+                # If no marker, check 60-day rule
+                if not has_marker:
+                    import time
+                    now = time.time()
+                    has_young_files = False
+                    for h264_file in h264_files:
+                        try:
+                            file_age_days = (now - h264_file.stat().st_ctime) / (24 * 60 * 60)
+                            if file_age_days < 60:
+                                has_young_files = True
+                                break
+                        except:
+                            pass
+                    if has_young_files:
+                        continue  # Don't delete folders with files < 60 days old (unless marked)
 
                 # Verify ALL h264 files have valid h265 counterparts
                 all_verified = True
@@ -3155,6 +3200,10 @@ class TranscoderGUI:
 
             # If file is very small, it's probably a placeholder (online-only)
             if current_size < 10000:  # Less than 10KB
+                # In offline mode, just skip cloud files
+                if self.offline_mode.get():
+                    return False
+
                 # Check if we can trigger another download (space + count limits)
                 if not self._can_trigger_download(estimated_size):
                     pending_count, pending_gb = self._get_pending_download_stats()
@@ -3178,6 +3227,10 @@ class TranscoderGUI:
                     f.read(1024)  # Read 1KB
             except OSError as e:
                 if e.errno == 22:  # Invalid argument - online-only file
+                    # In offline mode, just skip cloud files
+                    if self.offline_mode.get():
+                        return False
+
                     # Check if we can trigger another download
                     if not self._can_trigger_download(estimated_size):
                         pending_count, pending_gb = self._get_pending_download_stats()
