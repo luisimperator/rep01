@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.5.0"
+VERSION = "1.5.1"
 
 import socket
 import subprocess
@@ -2694,10 +2694,11 @@ class TranscoderGUI:
         threading.Thread(target=delete_folder_after_delay, daemon=True).start()
 
     def run_all_cleanups(self):
-        """Run all cleanup operations: h264 folders and old proxy folders."""
+        """Run all cleanup operations: h264, proxies, and Premiere previews."""
         self.cleanup_orphaned_h264_folders()
-        # Small delay then run proxy cleanup
+        # Small delay then run other cleanups
         self.root.after(2000, self.cleanup_old_proxy_folders)
+        self.root.after(4000, self.cleanup_old_premiere_previews)
 
     def cleanup_orphaned_h264_folders(self):
         """
@@ -2873,6 +2874,74 @@ class TranscoderGUI:
                     f"Proxy cleanup complete: {d} folders, {f} files, {g:.2f} GB freed", "success"))
             else:
                 self.root.after(0, lambda: self.log("No old Proxy folders to delete (all < 60 days)", "info"))
+
+        # Run in background
+        threading.Thread(target=cleanup_thread, daemon=True).start()
+
+    def cleanup_old_premiere_previews(self):
+        """
+        Find and delete 'Adobe Premiere Pro Video Previews' folders older than 30 days.
+        """
+        folder = Path(self.watch_folder.get())
+        if not folder.exists():
+            self.log(f"Folder not found: {folder}", "error")
+            return
+
+        def cleanup_thread():
+            import time
+            self.root.after(0, lambda: self.log("Scanning for old Premiere Preview folders...", "info"))
+
+            # Find all Adobe Premiere Pro Video Previews folders
+            preview_folders = list(folder.rglob('Adobe Premiere Pro Video Previews'))
+            preview_folders = [f for f in preview_folders if f.is_dir()]
+
+            if not preview_folders:
+                self.root.after(0, lambda: self.log("No Premiere Preview folders found", "info"))
+                return
+
+            self.root.after(0, lambda n=len(preview_folders): self.log(
+                f"Found {n} Premiere Preview folders to check", "info"))
+
+            deleted_count = 0
+            total_freed_gb = 0
+            total_files_deleted = 0
+            now = time.time()
+
+            for preview_folder in preview_folders:
+                try:
+                    # Check folder age (creation time)
+                    folder_ctime = preview_folder.stat().st_ctime
+                    age_days = (now - folder_ctime) / (24 * 60 * 60)
+
+                    if age_days < 30:
+                        continue  # Skip folders less than 30 days old
+
+                    # Calculate folder size
+                    folder_size = sum(f.stat().st_size for f in preview_folder.rglob('*') if f.is_file())
+                    folder_size_gb = folder_size / (1024**3)
+                    file_count = len(list(preview_folder.rglob('*')))
+
+                    # Delete the folder
+                    import shutil
+                    shutil.rmtree(preview_folder)
+
+                    deleted_count += 1
+                    total_freed_gb += folder_size_gb
+                    total_files_deleted += file_count
+
+                    self.root.after(0, lambda p=preview_folder.parent.name, n=file_count, s=folder_size_gb, d=int(age_days): self.log(
+                        f"Deleted Premiere Previews ({d} days old): {n} files, {s:.2f} GB freed - {p}", "success"))
+
+                except Exception as e:
+                    self.root.after(0, lambda err=e, p=preview_folder: self.log(
+                        f"Could not delete {p}: {err}", "warning"))
+
+            # Summary
+            if deleted_count > 0:
+                self.root.after(0, lambda d=deleted_count, f=total_files_deleted, g=total_freed_gb: self.log(
+                    f"Premiere Preview cleanup: {d} folders, {f} files, {g:.2f} GB freed", "success"))
+            else:
+                self.root.after(0, lambda: self.log("No old Premiere Preview folders to delete (all < 30 days)", "info"))
 
         # Run in background
         threading.Thread(target=cleanup_thread, daemon=True).start()
