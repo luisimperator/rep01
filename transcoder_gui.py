@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.6.3"
+VERSION = "1.6.4"
 
 import socket
 import subprocess
@@ -3014,19 +3014,19 @@ class TranscoderGUI:
                     break
 
                 try:
-                    # Check folder age (creation time)
-                    folder_ctime = proxy_folder.stat().st_ctime
-                    age_days = (now - folder_ctime) / (24 * 60 * 60)
-
-                    if age_days < 60:
-                        continue  # Skip folders less than 60 days old
-
                     # Check if folder contains _Proxy .mov files
                     proxy_files = [f for f in proxy_folder.glob('*.mov') if '_Proxy' in f.name]
                     proxy_files += [f for f in proxy_folder.glob('*.MOV') if '_Proxy' in f.name]
 
                     if not proxy_files:
                         continue  # No proxy files found
+
+                    # Check age based on NEWEST file modification time (st_mtime is more reliable than st_ctime)
+                    newest_mtime = max(f.stat().st_mtime for f in proxy_files)
+                    age_days = (now - newest_mtime) / (24 * 60 * 60)
+
+                    if age_days < 60:
+                        continue  # Skip if any file is less than 60 days old
 
                     # Calculate folder size
                     folder_size = sum(f.stat().st_size for f in proxy_folder.rglob('*') if f.is_file())
@@ -3089,17 +3089,23 @@ class TranscoderGUI:
 
             for preview_folder in preview_folders:
                 try:
-                    # Check folder age (creation time)
-                    folder_ctime = preview_folder.stat().st_ctime
-                    age_days = (now - folder_ctime) / (24 * 60 * 60)
+                    # Get all files in this preview folder
+                    preview_files = [f for f in preview_folder.rglob('*') if f.is_file()]
+                    if not preview_files:
+                        continue  # Skip empty folders
+
+                    # Check age based on NEWEST file modification time (st_mtime is more reliable than st_ctime)
+                    # st_ctime on Windows gets reset when files are copied/synced via Dropbox
+                    newest_mtime = max(f.stat().st_mtime for f in preview_files)
+                    age_days = (now - newest_mtime) / (24 * 60 * 60)
 
                     if age_days < 30:
                         continue  # Skip folders less than 30 days old
 
-                    # Calculate folder size
-                    folder_size = sum(f.stat().st_size for f in preview_folder.rglob('*') if f.is_file())
+                    # Calculate folder size (reuse the files list we already have)
+                    folder_size = sum(f.stat().st_size for f in preview_files)
                     folder_size_gb = folder_size / (1024**3)
-                    file_count = len(list(preview_folder.rglob('*')))
+                    file_count = len(preview_files)
 
                     # Delete the folder
                     import shutil
