@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.6.5"
+VERSION = "1.6.6"
 
 import socket
 import subprocess
@@ -2158,6 +2158,10 @@ class TranscoderGUI:
 
         while self.ready_queue_worker_running and self.running:
             try:
+                # Clear stale tracking entries at start of each cycle
+                with self.files_being_checked_lock:
+                    self.files_being_checked.clear()
+
                 # Skip download triggering in offline mode
                 offline_mode = self.offline_mode.get()
 
