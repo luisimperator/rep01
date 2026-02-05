@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.7.0"
+VERSION = "1.7.1"
 
 import socket
 import subprocess
@@ -1671,19 +1671,26 @@ class TranscoderGUI:
             self.cloud_manifest.update_estimates(needs_transcoding, needs_transcoding_size)
             self.cloud_manifest.save(force=True)
 
-        # Proactively trigger downloads for first 50 pending files (skip in offline mode)
+        # Smart download: only trigger downloads if ready queue needs more files (target: 50 minimum)
         if pending_files_list and not self.offline_mode.get():
-            # Sort by size (smaller first) for faster progress
-            pending_files_list.sort(key=lambda x: x[1])
-            files_to_trigger = pending_files_list[:50]
+            current_queue_size = self.ready_queue.qsize()
+            downloads_needed = max(0, 50 - current_queue_size)
 
-            self.root.after(0, lambda n=len(files_to_trigger): self.log(
-                f"Triggering downloads for {n} files...", "info"))
+            if downloads_needed > 0:
+                # Sort by size (smaller first) for faster progress
+                pending_files_list.sort(key=lambda x: x[1])
+                files_to_trigger = pending_files_list[:downloads_needed]
 
-            for file_path, size in files_to_trigger:
-                if len(self.pending_downloads) < self.max_pending_downloads:
-                    self._add_to_pending_downloads(file_path, size)
-                    self._trigger_dropbox_download(Path(file_path))
+                self.root.after(0, lambda n=len(files_to_trigger), q=current_queue_size: self.log(
+                    f"Ready queue has {q} files. Triggering downloads for {n} more...", "info"))
+
+                for file_path, size in files_to_trigger:
+                    if len(self.pending_downloads) < self.max_pending_downloads:
+                        self._add_to_pending_downloads(file_path, size)
+                        self._trigger_dropbox_download(Path(file_path))
+            else:
+                self.root.after(0, lambda q=current_queue_size: self.log(
+                    f"Ready queue already has {q} files. No downloads triggered.", "info"))
 
         # Show results
         def show_results():
@@ -2097,6 +2104,18 @@ class TranscoderGUI:
 
         self.root.after(0, lambda: self.log(f"Scanning {folder} to trigger downloads..."))
 
+        # Smart download: check how many files we need in ready queue (target: 50 minimum)
+        current_queue_size = self.ready_queue.qsize()
+        downloads_needed = max(0, 50 - current_queue_size)
+
+        if downloads_needed == 0:
+            self.root.after(0, lambda q=current_queue_size: self.log(
+                f"Ready queue already has {q} files. No downloads needed.", "info"))
+            return
+
+        self.root.after(0, lambda n=downloads_needed, q=current_queue_size: self.log(
+            f"Ready queue has {q} files. Will download up to {n} more.", "info"))
+
         # Check available disk space - reserve 10GB minimum
         free_gb = self.get_free_disk_space(folder)
         available_for_download = max(0, (free_gb - 10) * 1024**3)  # Convert to bytes, keep 10GB free
@@ -2141,11 +2160,13 @@ class TranscoderGUI:
                 except OSError as e:
                     if e.errno == 22:  # Invalid argument - cloud file
                         cloud_files += 1
-                        # Check if we have space for this file
-                        if triggered_size + size <= available_for_download:
+                        # Check if we have space AND haven't reached download limit
+                        if triggered < downloads_needed and triggered_size + size <= available_for_download:
                             self._trigger_dropbox_download(video_path)
                             triggered += 1
                             triggered_size += size
+                        elif triggered >= downloads_needed:
+                            pass  # Already have enough downloads queued
                         else:
                             skipped_space += 1
                     else:
