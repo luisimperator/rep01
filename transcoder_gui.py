@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.6.6"
+VERSION = "1.7.0"
 
 import socket
 import subprocess
@@ -466,6 +466,9 @@ class TranscoderGUI:
         # Hourly speed tracking - list of (timestamp, bytes, seconds) for last hour
         self._hourly_transcode_records = []
 
+        # Deletion tracking - list of (timestamp, bytes_deleted) for tracking GB freed
+        self._deletion_records = []
+
         # Stats
         self.files_processed = tk.IntVar(value=0)
         self.total_saved_gb = tk.DoubleVar(value=0)
@@ -700,6 +703,16 @@ class TranscoderGUI:
         ttk.Label(dash_daily, text="Últimos dias:", font=("", 8)).pack(side=tk.LEFT)
         self.dash_daily_label = ttk.Label(dash_daily, text="", font=("Consolas", 8))
         self.dash_daily_label.pack(side=tk.LEFT, padx=(5, 0))
+
+        # Deleted GB row
+        dash_deleted = ttk.Frame(dashboard_frame)
+        dash_deleted.pack(fill=tk.X, pady=(5, 0))
+
+        self.dash_deleted_today_label = ttk.Label(dash_deleted, text="Deletado hoje: 0 GB", font=("", 9), foreground="red")
+        self.dash_deleted_today_label.pack(side=tk.LEFT, padx=(0, 20))
+
+        self.dash_deleted_week_label = ttk.Label(dash_deleted, text="Últimos 7 dias: 0 GB", font=("", 9), foreground="red")
+        self.dash_deleted_week_label.pack(side=tk.LEFT)
 
         # Global pending info row (clarifies global vs local)
         dash_pending = ttk.Frame(dashboard_frame)
@@ -1442,6 +1455,12 @@ class TranscoderGUI:
                 daily_text += f"[{date_short}: {day['files']}arq {day['gb_saved']:.0f}GB] "
             self.dash_daily_label.config(text=daily_text.strip())
 
+            # Deleted GB stats
+            deleted_today = self.get_deleted_gb_today()
+            deleted_week = self.get_deleted_gb_last_days(7)
+            self.dash_deleted_today_label.config(text=f"Deletado hoje: {deleted_today:.1f} GB")
+            self.dash_deleted_week_label.config(text=f"Últimos 7 dias: {deleted_week:.1f} GB")
+
             self.log("Dashboard atualizado", "info")
         except Exception as e:
             self.log(f"Erro ao atualizar dashboard: {e}", "warning")
@@ -2165,6 +2184,11 @@ class TranscoderGUI:
                 # Skip download triggering in offline mode
                 offline_mode = self.offline_mode.get()
 
+                # Smart download: only download when ready queue needs more files
+                # Target minimum of 50 files in ready queue
+                current_queue_size = self.ready_queue.qsize()
+                downloads_needed = max(0, 50 - current_queue_size) if not offline_mode else 0
+
                 # Find video files from ALL watch folders
                 video_files = []
                 for folder in self.get_watch_folders():
@@ -2214,7 +2238,8 @@ class TranscoderGUI:
                                 is_local = True
                         except OSError as e:
                             if e.errno == 22:  # Cloud file
-                                if not offline_mode and downloads_triggered < 10:
+                                # Only download if ready queue needs more files (target: 50 minimum)
+                                if downloads_triggered < downloads_needed:
                                     self._trigger_dropbox_download(video_path)
                                     downloads_triggered += 1
                             continue  # Skip cloud files
@@ -2841,6 +2866,7 @@ class TranscoderGUI:
                     else:
                         # Normal mode: delete the folder
                         shutil.rmtree(h264_folder)
+                        self.record_deletion(folder_size)  # Track for dashboard
                         self.root.after(0, lambda p=h264_folder, n=file_count, s=folder_size_gb: self.log(
                             f"H264 folder deleted: {n} files, {s:.2f} GB freed - {p.name}", "success"))
 
@@ -2957,6 +2983,7 @@ class TranscoderGUI:
                         file_count = len(h264_files)
 
                         shutil.rmtree(h264_folder)
+                        self.record_deletion(folder_size)  # Track for dashboard
 
                         deleted_count += 1
                         total_freed_gb += folder_size_gb
@@ -3187,6 +3214,31 @@ class TranscoderGUI:
         bytes_per_second = total_bytes / total_seconds
         gb_per_hour = (bytes_per_second * 3600) / (1024**3)
         return gb_per_hour
+
+    def record_deletion(self, bytes_deleted: int):
+        """Record a deletion event for tracking GB freed."""
+        now = time.time()
+        self._deletion_records.append((now, bytes_deleted))
+        # Keep records for 30 days max
+        thirty_days_ago = now - (30 * 24 * 60 * 60)
+        self._deletion_records = [r for r in self._deletion_records if r[0] > thirty_days_ago]
+
+    def get_deleted_gb_today(self) -> float:
+        """Get total GB deleted today."""
+        from datetime import datetime
+        today = datetime.now().date()
+        total_bytes = 0
+        for ts, bytes_del in self._deletion_records:
+            record_date = datetime.fromtimestamp(ts).date()
+            if record_date == today:
+                total_bytes += bytes_del
+        return total_bytes / (1024**3)
+
+    def get_deleted_gb_last_days(self, days: int = 7) -> float:
+        """Get total GB deleted in the last N days."""
+        cutoff = time.time() - (days * 24 * 60 * 60)
+        total_bytes = sum(r[1] for r in self._deletion_records if r[0] > cutoff)
+        return total_bytes / (1024**3)
 
     def get_free_disk_space(self, path: Path) -> float:
         """Get free disk space in GB for the drive containing path."""
