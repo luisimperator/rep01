@@ -3589,21 +3589,36 @@ class TranscoderGUI:
     def _schedule_h264_deletion(self, h264_path: Path, h265_path: Path):
         """
         Schedule h264 FOLDER deletion after 20 minutes (in background thread).
-        Only deletes when ALL files in the folder have valid h265 versions.
+        Tracks processed files individually - only verifies files we know were transcoded.
         """
         h264_folder = h264_path.parent
+        parent_folder = h264_folder.parent  # Where h265 files should be
 
-        # Track folders already scheduled to avoid duplicates
-        if not hasattr(self, '_scheduled_h264_folders'):
-            self._scheduled_h264_folders = set()
+        # Track processed files per folder (not just folder scheduled status)
+        if not hasattr(self, '_h264_pending_deletions'):
+            self._h264_pending_deletions = {}  # folder_key -> {'files': set(), 'timer_started': bool}
 
-        # Skip if this folder is already scheduled
         folder_key = str(h264_folder)
-        if folder_key in self._scheduled_h264_folders:
+
+        # Add this file to the tracked set for this folder
+        if folder_key not in self._h264_pending_deletions:
+            self._h264_pending_deletions[folder_key] = {
+                'files': set(),
+                'timer_started': False,
+                'parent_folder': str(parent_folder)
+            }
+
+        # Track this specific file that was processed
+        self._h264_pending_deletions[folder_key]['files'].add(h264_path.name)
+
+        self.root.after(0, lambda f=h264_path.name, folder=h264_folder.name: self.log(
+            f"H264 file tracked for deletion: {f} in {folder}", "info"))
+
+        # Start timer only once per folder
+        if self._h264_pending_deletions[folder_key]['timer_started']:
             return
 
-        self._scheduled_h264_folders.add(folder_key)
-        parent_folder = h264_folder.parent  # Where h265 files should be
+        self._h264_pending_deletions[folder_key]['timer_started'] = True
 
         def delete_folder_after_delay():
             # Wait 20 minutes for Dropbox to sync
@@ -3611,48 +3626,83 @@ class TranscoderGUI:
 
             try:
                 if not h264_folder.exists():
-                    self._scheduled_h264_folders.discard(folder_key)
+                    self.root.after(0, lambda: self.log(
+                        f"H264 folder already deleted: {h264_folder}", "info"))
+                    self._h264_pending_deletions.pop(folder_key, None)
                     return
 
-                # Get all video files in h264 folder
-                h264_files = list(h264_folder.glob('*.mp4')) + list(h264_folder.glob('*.MP4'))
+                # Get the tracked files for this folder (files we know were processed)
+                tracked_info = self._h264_pending_deletions.get(folder_key, {})
+                tracked_files = tracked_info.get('files', set())
+                parent_folder_path = Path(tracked_info.get('parent_folder', str(h264_folder.parent)))
 
-                if not h264_files:
-                    self._scheduled_h264_folders.discard(folder_key)
+                if not tracked_files:
+                    self.root.after(0, lambda: self.log(
+                        f"No tracked files for folder: {h264_folder}", "warning"))
+                    self._h264_pending_deletions.pop(folder_key, None)
                     return
 
-                # Verify ALL h264 files have valid h265 counterparts
-                all_verified = True
-                for h264_file in h264_files:
-                    h265_file = parent_folder / h264_file.name
+                self.root.after(0, lambda n=len(tracked_files), folder=h264_folder.name: self.log(
+                    f"Verifying {n} tracked files in {folder}...", "info"))
+
+                # Verify only the tracked files (files we processed)
+                verified_count = 0
+                failed_files = []
+                for filename in tracked_files:
+                    h265_file = parent_folder_path / filename
 
                     # Check h265 exists
                     if not h265_file.exists():
-                        self.root.after(0, lambda f=h264_file.name: self.log(
-                            f"H265 not found for {f}, keeping h264 folder", "warning"))
-                        all_verified = False
-                        break
+                        failed_files.append(f"{filename}: h265 not found")
+                        continue
 
-                    # Verify h265 is playable
+                    # Check if file is cloud-only (skip ffprobe for cloud files)
+                    is_cloud = self._is_cloud_only_file(h265_file)
+                    if is_cloud:
+                        # For cloud files, just check size from attributes
+                        try:
+                            size = h265_file.stat().st_size
+                            if size >= 10000:
+                                verified_count += 1
+                                self.root.after(0, lambda f=filename: self.log(
+                                    f"H265 verified (cloud): {f}", "info"))
+                            else:
+                                failed_files.append(f"{filename}: cloud file too small")
+                        except:
+                            failed_files.append(f"{filename}: could not check cloud file")
+                        continue
+
+                    # For local files, verify with ffprobe
                     if not self._verify_output(h265_file):
-                        self.root.after(0, lambda f=h264_file.name: self.log(
-                            f"H265 verification failed for {f}, keeping h264 folder", "warning"))
-                        all_verified = False
-                        break
+                        failed_files.append(f"{filename}: ffprobe verification failed")
+                        continue
 
                     # Check file size is reasonable
-                    if h265_file.stat().st_size < 10000:
-                        self.root.after(0, lambda f=h264_file.name: self.log(
-                            f"H265 too small for {f}, keeping h264 folder", "warning"))
-                        all_verified = False
-                        break
+                    try:
+                        if h265_file.stat().st_size < 10000:
+                            failed_files.append(f"{filename}: h265 too small")
+                            continue
+                    except:
+                        failed_files.append(f"{filename}: could not check size")
+                        continue
 
-                # All checks passed - handle h264 folder
-                if all_verified:
+                    verified_count += 1
+
+                # Log failed files
+                for failure in failed_files:
+                    self.root.after(0, lambda f=failure: self.log(
+                        f"H264 deletion blocked: {f}", "warning"))
+
+                # Decide whether to delete
+                total_tracked = len(tracked_files)
+                self.root.after(0, lambda v=verified_count, t=total_tracked: self.log(
+                    f"H264 verification: {v}/{t} files verified", "info"))
+
+                # Delete if ALL tracked files are verified
+                if verified_count == total_tracked and verified_count > 0:
                     import shutil
                     folder_size = sum(f.stat().st_size for f in h264_folder.rglob('*') if f.is_file())
                     folder_size_gb = folder_size / (1024**3)
-                    file_count = len(h264_files)
 
                     # In offline mode, create txt marker instead of deleting
                     if self.offline_mode.get():
@@ -3660,37 +3710,44 @@ class TranscoderGUI:
                         try:
                             with open(marker_file, 'w', encoding='utf-8') as f:
                                 f.write(f"Verified: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-                                f.write(f"Files: {file_count}\n")
+                                f.write(f"Files: {verified_count}\n")
                                 f.write(f"Size: {folder_size_gb:.2f} GB\n")
                                 f.write(f"PC: {self.pc_name}\n")
                                 f.write("This folder is safe to delete - all h265 files verified.\n")
-                            self.root.after(0, lambda p=h264_folder, n=file_count, s=folder_size_gb: self.log(
+                            self.root.after(0, lambda p=h264_folder, n=verified_count, s=folder_size_gb: self.log(
                                 f"H264 marked for deletion: {n} files, {s:.2f} GB - {p.name}", "info"))
                         except Exception as e:
                             self.root.after(0, lambda err=e: self.log(f"Could not create marker: {err}", "warning"))
                     else:
                         # Normal mode: delete the folder
-                        shutil.rmtree(h264_folder)
-                        self.record_deletion(folder_size)  # Track for dashboard
-                        self.root.after(0, lambda p=h264_folder, n=file_count, s=folder_size_gb: self.log(
-                            f"H264 folder deleted: {n} files, {s:.2f} GB freed - {p.name}", "success"))
-
-                        # Log deletion timestamp to h265 feito.txt
-                        h265_folder = parent_folder / 'h265'
-                        h265_folder.mkdir(parents=True, exist_ok=True)
-                        log_file = h265_folder / "h265 feito.txt"
                         try:
-                            with open(log_file, 'a', encoding='utf-8') as f:
-                                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED\n")
-                        except:
-                            pass
+                            shutil.rmtree(h264_folder)
+                            self.record_deletion(folder_size)  # Track for dashboard
+                            self.root.after(0, lambda p=h264_folder, n=verified_count, s=folder_size_gb: self.log(
+                                f"✅ H264 FOLDER DELETED: {n} files, {s:.2f} GB freed - {p.name}", "success"))
 
-                self._scheduled_h264_folders.discard(folder_key)
+                            # Log deletion timestamp to h265 feito.txt
+                            h265_folder = parent_folder_path / 'h265'
+                            h265_folder.mkdir(parents=True, exist_ok=True)
+                            log_file = h265_folder / "h265 feito.txt"
+                            try:
+                                with open(log_file, 'a', encoding='utf-8') as f:
+                                    f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED\n")
+                            except:
+                                pass
+                        except Exception as del_err:
+                            self.root.after(0, lambda err=del_err: self.log(
+                                f"Could not delete h264 folder: {err}", "error"))
+                else:
+                    self.root.after(0, lambda folder=h264_folder.name, v=verified_count, t=total_tracked: self.log(
+                        f"H264 folder NOT deleted ({v}/{t} verified): {folder}", "warning"))
+
+                self._h264_pending_deletions.pop(folder_key, None)
 
             except Exception as e:
                 self.root.after(0, lambda err=e: self.log(
-                    f"Could not delete h264 folder: {err}", "warning"))
-                self._scheduled_h264_folders.discard(folder_key)
+                    f"Error during h264 deletion check: {err}", "error"))
+                self._h264_pending_deletions.pop(folder_key, None)
 
         # Run in background thread
         self.root.after(0, lambda: self.log(
