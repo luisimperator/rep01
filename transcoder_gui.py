@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.9.2"
+VERSION = "2.0.0"
 
 import socket
 import subprocess
@@ -457,6 +457,12 @@ class TranscoderGUI:
         self.local_eligible_exhausted = False  # Gate for downloads
         self.QUEUE_SNAPSHOT_FILE = self.dropbox_base / "App h265 Converter" / ".queue_snapshot.json"
         self._queue_items_set = set()  # Fast lookup to avoid duplicates
+
+        # PRE-PROBE BUFFER: Files already probed and ready for instant transcode
+        # This eliminates the 30+ second gap between transcodes
+        self.probed_queue = queue.Queue()  # Queue of (path, size, probe_data) tuples
+        self.probed_queue_worker_running = False
+        self.PROBED_BUFFER_SIZE = 5  # Keep 5 files pre-probed
 
         # Idle state tracking - avoid spamming "nothing to do" logs
         self._last_scan_had_work = True  # Assume work initially so first idle is logged
@@ -2060,7 +2066,12 @@ class TranscoderGUI:
         self.ready_queue_worker_thread = threading.Thread(target=self.ready_queue_worker, daemon=True)
         self.ready_queue_worker_thread.start()
 
-        # Start the main processing loop (transcodes from queue)
+        # Start the probed queue worker (pre-probes files for instant transcode)
+        self.probed_queue_worker_running = True
+        self.probed_queue_thread = threading.Thread(target=self.probed_queue_worker, daemon=True)
+        self.probed_queue_thread.start()
+
+        # Start the main processing loop (transcodes from probed queue)
         self.worker_thread = threading.Thread(target=self.process_loop, daemon=True)
         self.worker_thread.start()
 
@@ -2089,6 +2100,7 @@ class TranscoderGUI:
         self.running = False
         self.paused = False
         self.ready_queue_worker_running = False  # Stop the ready queue worker
+        self.probed_queue_worker_running = False  # Stop the probed queue worker
 
         # Clear the ready queue and tracking set
         while not self.ready_queue.empty():
@@ -2097,6 +2109,13 @@ class TranscoderGUI:
             except:
                 break
         self._queue_items_set.clear()
+
+        # Clear the probed queue
+        while not self.probed_queue.empty():
+            try:
+                self.probed_queue.get_nowait()
+            except:
+                break
 
         # Kill FFmpeg process if running
         if self.current_process:
@@ -2584,6 +2603,69 @@ class TranscoderGUI:
                 self.root.after(0, lambda err=e: self.log(f"Queue worker error: {err}", "warning"))
                 time.sleep(5)
 
+    def probed_queue_worker(self):
+        """
+        Background worker that pre-probes files from ready_queue.
+        Keeps PROBED_BUFFER_SIZE files ready for instant transcode.
+        This eliminates the 30+ second gap between transcodes.
+        """
+        while self.probed_queue_worker_running and self.running:
+            try:
+                # Check if probed_queue needs more files
+                probed_size = self.probed_queue.qsize()
+
+                if probed_size < self.PROBED_BUFFER_SIZE and not self.ready_queue.empty():
+                    # Get next file from ready_queue
+                    try:
+                        item = self.ready_queue.get_nowait()
+                        video_path = item[0]
+                        file_size = item[1]
+                        self._queue_items_set.discard(str(video_path))
+                    except:
+                        time.sleep(0.5)
+                        continue
+
+                    # Skip if file no longer exists or already processed
+                    if not video_path.exists() or self.is_processed(video_path):
+                        continue
+
+                    # Wait for file to be ready (downloaded)
+                    if not self.wait_for_file_ready(video_path, estimated_size=file_size):
+                        continue
+
+                    # PRE-PROBE: This is the expensive part we're doing ahead of time
+                    probe_data = self.probe_video(video_path)
+                    if not probe_data:
+                        continue
+
+                    # Check if already HEVC
+                    if self.is_hevc(probe_data):
+                        self.mark_processed(video_path, "", "skipped_hevc", file_size, 0)
+                        continue
+
+                    # Check bitrate
+                    bitrate = self.get_bitrate(probe_data, file_size)
+                    if bitrate > 0 and bitrate < 8:
+                        self.mark_processed(video_path, "", "skipped_lowbitrate", file_size, 0)
+                        continue
+
+                    # Check if output exists
+                    output_path = video_path.parent / 'h265' / video_path.name
+                    if output_path.exists():
+                        self.mark_processed(video_path, str(output_path), "skipped_exists",
+                                          file_size, output_path.stat().st_size)
+                        continue
+
+                    # All checks passed - add to probed queue with probe data
+                    self.probed_queue.put((video_path, file_size, probe_data))
+
+                else:
+                    # Probed queue is full or ready_queue is empty, wait
+                    time.sleep(0.5)
+
+            except Exception as e:
+                time.sleep(1)
+
     def _quick_scan_new_local_files(self) -> int:
         """
         Quick scan for NEW local files not already in queue.
@@ -2853,11 +2935,13 @@ class TranscoderGUI:
             return
 
         self._last_scan_had_work = True
-        self.root.after(0, lambda q=queue_size: self.log(f"Ready queue: {q} files ready to process"))
+        probed_size = self.probed_queue.qsize()
+        self.root.after(0, lambda q=queue_size, p=probed_size: self.log(
+            f"Queues: {p} pre-probed, {q} ready"))
 
-        # Process files from ready queue (already verified as downloaded!)
+        # Process files - PREFER probed_queue (instant) over ready_queue (needs probe)
         idx = 0
-        while not self.ready_queue.empty() and self.running:
+        while self.running:
             # Check disk space (use first watch folder)
             free_gb = self.get_free_disk_space(folders[0])
             if free_gb < 5:
@@ -2865,14 +2949,30 @@ class TranscoderGUI:
                     f"Low disk space ({g:.1f} GB). Pausing...", "warning"))
                 break
 
+            # Try probed_queue first (INSTANT - no probe needed!)
+            video_path = None
+            file_size = 0
+            probe_data = None
+
             try:
-                item = self.ready_queue.get_nowait()
-                # Item can be (path, size) or (path, size, priority)
+                item = self.probed_queue.get_nowait()
                 video_path = item[0]
                 file_size = item[1]
-                # Remove from tracking set
-                self._queue_items_set.discard(str(video_path))
+                probe_data = item[2]  # Already probed!
             except:
+                # probed_queue empty, try ready_queue
+                if not self.ready_queue.empty():
+                    try:
+                        item = self.ready_queue.get_nowait()
+                        video_path = item[0]
+                        file_size = item[1]
+                        self._queue_items_set.discard(str(video_path))
+                    except:
+                        break
+                else:
+                    break
+
+            if video_path is None:
                 break
 
             # Double-check file is still valid
@@ -2880,11 +2980,18 @@ class TranscoderGUI:
                 continue
 
             idx += 1
-            # Update queue counter
-            self.root.after(0, lambda i=idx, q=self.ready_queue.qsize():
+            total_queued = self.ready_queue.qsize() + self.probed_queue.qsize()
+            self.root.after(0, lambda i=idx, q=total_queued:
                 self.current_file_label.config(text=f"Processing {i} (queue: {q})"))
 
-            self.process_file(video_path, queue_pos=idx, queue_total=queue_size, file_size=file_size)
+            if probe_data:
+                # INSTANT: Use pre-probed data
+                self.process_file_preprobed(video_path, probe_data, queue_pos=idx,
+                                           queue_total=queue_size, file_size=file_size)
+            else:
+                # SLOW: Need to probe first
+                self.process_file(video_path, queue_pos=idx, queue_total=queue_size, file_size=file_size)
+
             files_processed_this_scan += 1
 
         # Process WAV files in "Audio Source Files" folders
@@ -3984,6 +4091,79 @@ class TranscoderGUI:
         except:
             pass
 
+    def process_file_preprobed(self, input_path: Path, probe_data: dict, queue_pos: int = 0,
+                                queue_total: int = 0, file_size: int = 0):
+        """
+        Process a file that was already probed (INSTANT - no wait, no probe).
+        This is called for files from the probed_queue.
+        """
+        queue_str = f"[{queue_pos}/{queue_total}] " if queue_pos else ""
+        self.root.after(0, lambda q=queue_str: self.current_file_label.config(
+            text=f"{q}Processing: {input_path.name}"))
+        self.root.after(0, lambda q=queue_str: self.log(f"{q}Processing: {input_path.name} (pre-probed)"))
+
+        size_gb = input_path.stat().st_size / (1024**3)
+        self.root.after(0, lambda s=size_gb: self.current_file_label.config(
+            text=f"Processing: {input_path.name} ({s:.2f} GB)"))
+
+        # Output path
+        output_folder = input_path.parent / 'h265'
+        output_path = output_folder / input_path.name
+
+        if output_path.exists():
+            self.root.after(0, lambda: self.log("Output already exists, skipping", "info"))
+            self.mark_processed(input_path, str(output_path), "skipped_exists",
+                              input_path.stat().st_size, output_path.stat().st_size)
+            return
+
+        # Transcode (same as process_file from here)
+        output_folder.mkdir(parents=True, exist_ok=True)
+        temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
+
+        # Get video duration for progress calculation
+        duration = self.get_duration(probe_data)
+
+        # Try encoding with current encoder, fallback to CPU if fails
+        encoder = self.encoder.get()
+        encoders_to_try = [encoder]
+        if encoder != 'cpu':
+            encoders_to_try.append('cpu')
+
+        encoding_success = False
+        transcode_start_time = time.time()
+
+        for try_encoder in encoders_to_try:
+            if not self.running:
+                break
+
+            self.root.after(0, lambda e=try_encoder: self.log(f"Encoding with {e}..."))
+            cmd = self.build_ffmpeg_command(input_path, temp_path, encoder=try_encoder, probe_data=probe_data)
+
+            self.root.after(0, lambda: self.progress_var.set(0))
+
+            success, error_msg = self._run_ffmpeg(cmd, duration)
+
+            if success and temp_path.exists():
+                if self._verify_output(temp_path):
+                    encoding_success = True
+                    break
+                else:
+                    temp_path.unlink(missing_ok=True)
+            else:
+                if try_encoder != 'cpu' and error_msg:
+                    self.root.after(0, lambda e=try_encoder, err=error_msg: self.log(
+                        f"{e} failed: {err}. Trying CPU...", "warning"))
+                temp_path.unlink(missing_ok=True)
+
+        if not encoding_success:
+            if self.running:
+                self.root.after(0, lambda: self.log("All encoders failed", "error"))
+                self.mark_processed(input_path, "", "error", 0, 0)
+            return
+
+        # Success - finish up (same as process_file)
+        self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start_time)
+
     def process_file(self, input_path: Path, queue_pos: int = 0, queue_total: int = 0, file_size: int = 0):
         """Process a single file."""
         process_start = time.time()
@@ -4098,59 +4278,7 @@ class TranscoderGUI:
                     temp_path.unlink()
 
         if encoding_success:
-            temp_path.rename(output_path)
-            input_size = input_path.stat().st_size
-            output_size = output_path.stat().st_size
-            reduction = (1 - output_size/input_size) * 100
-            transcode_time = time.time() - transcode_start_time  # Calculate actual transcode time
-            input_size_gb = input_size / (1024**3)
-
-            self.root.after(0, lambda r=reduction, t=transcode_time, s=input_size_gb: self.log(
-                f"Done! {s:.2f} GB → {r:.1f}% smaller in {t:.0f}s", "success"))
-
-            # Track for hourly speed calculation
-            self._record_transcode_speed(input_size, transcode_time)
-
-            # Reorganize files:
-            # 1. Move original H.264 to h264/ folder
-            # 2. Move H.265 from h265/ to original location
-            # Using shutil.move() with retry to handle file locks (FFmpeg/Dropbox)
-            try:
-                h264_folder = input_path.parent / 'h264'
-                h264_folder.mkdir(parents=True, exist_ok=True)
-                h264_backup_path = h264_folder / input_path.name
-
-                # Move original to h264/ with retry
-                self._move_with_retry(input_path, h264_backup_path)
-                self.root.after(0, lambda: self.log(
-                    f"Moved original to h264/{input_path.name}", "info"))
-
-                # Mark h264 backup as online-only to free up local space
-                self.set_dropbox_online_only(h264_backup_path)
-
-                # Move h265 output to original location with retry
-                final_path = input_path  # Same name/location as original
-                self._move_with_retry(output_path, final_path)
-                self.root.after(0, lambda: self.log(
-                    f"Moved H.265 to original location", "info"))
-
-                # Update output_path for logging
-                self.mark_processed(h264_backup_path, str(final_path), "done", input_size, output_size,
-                                   duration=duration, transcode_time=transcode_time)
-                self.write_success_log(h264_backup_path, final_path, input_size, output_size)
-                self.write_h265_done_log(output_folder, input_path.name, input_size, output_size)
-
-                # Schedule h264 backup deletion if enabled
-                if self.auto_delete_h264.get():
-                    self._schedule_h264_deletion(h264_backup_path, final_path)
-
-            except Exception as move_err:
-                self.root.after(0, lambda e=move_err: self.log(
-                    f"File reorganization failed: {e}", "error"))
-                # Still mark as done since encoding succeeded
-                self.mark_processed(input_path, str(output_path), "done", input_size, output_size,
-                                   duration=duration, transcode_time=transcode_time)
-                self.write_success_log(input_path, output_path, input_size, output_size)
+            self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start_time, duration)
         else:
             self.root.after(0, lambda: self.log("All encoders failed!", "error"))
             self.mark_processed(input_path, "", "error", 0, 0)
@@ -4160,6 +4288,59 @@ class TranscoderGUI:
         self.root.after(0, lambda: self.progress_var.set(0))
         self.root.after(0, lambda: self.progress_label.config(text=""))
         self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
+
+    def _finish_successful_transcode(self, input_path: Path, output_path: Path, temp_path: Path,
+                                     transcode_start_time: float, duration: float = 0):
+        """
+        Handle successful transcode: rename temp, move files, log, cleanup.
+        Extracted to share between process_file and process_file_preprobed.
+        """
+        output_folder = output_path.parent
+
+        temp_path.rename(output_path)
+        input_size = input_path.stat().st_size
+        output_size = output_path.stat().st_size
+        reduction = (1 - output_size/input_size) * 100
+        transcode_time = time.time() - transcode_start_time
+        input_size_gb = input_size / (1024**3)
+
+        self.root.after(0, lambda r=reduction, t=transcode_time, s=input_size_gb: self.log(
+            f"Done! {s:.2f} GB → {r:.1f}% smaller in {t:.0f}s", "success"))
+
+        # Track for hourly speed calculation
+        self._record_transcode_speed(input_size, transcode_time)
+
+        # Reorganize files
+        try:
+            h264_folder = input_path.parent / 'h264'
+            h264_folder.mkdir(parents=True, exist_ok=True)
+            h264_backup_path = h264_folder / input_path.name
+
+            self._move_with_retry(input_path, h264_backup_path)
+            self.root.after(0, lambda: self.log(
+                f"Moved original to h264/{input_path.name}", "info"))
+
+            self.set_dropbox_online_only(h264_backup_path)
+
+            final_path = input_path
+            self._move_with_retry(output_path, final_path)
+            self.root.after(0, lambda: self.log(
+                f"Moved H.265 to original location", "info"))
+
+            self.mark_processed(h264_backup_path, str(final_path), "done", input_size, output_size,
+                               duration=duration, transcode_time=transcode_time)
+            self.write_success_log(h264_backup_path, final_path, input_size, output_size)
+            self.write_h265_done_log(output_folder, input_path.name, input_size, output_size)
+
+            if self.auto_delete_h264.get():
+                self._schedule_h264_deletion(h264_backup_path, final_path)
+
+        except Exception as move_err:
+            self.root.after(0, lambda e=move_err: self.log(
+                f"File reorganization failed: {e}", "error"))
+            self.mark_processed(input_path, str(output_path), "done", input_size, output_size,
+                               duration=duration, transcode_time=transcode_time)
+            self.write_success_log(input_path, output_path, input_size, output_size)
 
     def probe_video(self, path: Path) -> dict:
         """Get video info."""
