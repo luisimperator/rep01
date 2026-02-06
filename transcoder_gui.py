@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.7.1"
+VERSION = "1.8.0"
 
 import socket
 import subprocess
@@ -28,6 +28,7 @@ import re
 import sqlite3
 import shutil
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
 import tkinter as tk
@@ -462,6 +463,7 @@ class TranscoderGUI:
         self.cq_value = tk.IntVar(value=24)
         self.auto_delete_h264 = tk.BooleanVar(value=False)  # Delete h264 backups after verification
         self.offline_mode = tk.BooleanVar(value=False)  # Don't trigger downloads, only process local files
+        self.auto_start = tk.BooleanVar(value=True)  # Auto-start processing on launch (daemon mode)
 
         # Hourly speed tracking - list of (timestamp, bytes, seconds) for last hour
         self._hourly_transcode_records = []
@@ -487,6 +489,10 @@ class TranscoderGUI:
 
         # Save settings when window closes
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+
+        # Auto-start processing after UI is ready (daemon mode)
+        if self.auto_start.get():
+            self.root.after(1000, self._auto_start_daemon)
 
     def get_watch_folders(self) -> list:
         """Get list of watch folders (supports semicolon-separated paths)."""
@@ -565,6 +571,13 @@ class TranscoderGUI:
             options_frame,
             text="Offline Mode (no downloads)",
             variable=self.offline_mode
+        ).pack(side=tk.LEFT, padx=(30, 0))
+
+        # Auto-start checkbox (daemon mode)
+        ttk.Checkbutton(
+            options_frame,
+            text="Auto-Start (daemon mode)",
+            variable=self.auto_start
         ).pack(side=tk.LEFT, padx=(30, 0))
 
         settings_frame.columnconfigure(1, weight=1)
@@ -835,6 +848,7 @@ class TranscoderGUI:
                     self.encoder.set(settings.get('encoder', self.encoder.get()))
                     self.cq_value.set(settings.get('cq_value', self.cq_value.get()))
                     self.min_size_gb.set(settings.get('min_size_gb', self.min_size_gb.get()))
+                    self.auto_start.set(settings.get('auto_start', True))  # Default to auto-start enabled
                     # SAFETY: auto_delete_h264 ALWAYS starts unchecked, never loaded from settings
                     # User must explicitly enable it each session
                     self.auto_delete_h264.set(False)
@@ -851,7 +865,8 @@ class TranscoderGUI:
                 'encoder': self.encoder.get(),
                 'cq_value': self.cq_value.get(),
                 'min_size_gb': self.min_size_gb.get(),
-                'auto_delete_h264': self.auto_delete_h264.get()
+                'auto_delete_h264': self.auto_delete_h264.get(),
+                'auto_start': self.auto_start.get()
             }
             with open(self.SETTINGS_FILE, 'w', encoding='utf-8') as f:
                 json.dump(settings, f, indent=2)
@@ -1997,6 +2012,12 @@ class TranscoderGUI:
             msg += f", {skipped_space} skipped (no space)"
         self.root.after(0, lambda m=msg: self.log(m, "success"))
 
+    def _auto_start_daemon(self):
+        """Auto-start processing in daemon mode. Called after UI initialization."""
+        if self.auto_start.get() and not self.running:
+            self.log("Auto-starting daemon mode...", "success")
+            self.toggle_processing()
+
     def toggle_processing(self):
         """Start processing."""
         if not self.running:
@@ -2186,15 +2207,98 @@ class TranscoderGUI:
             msg += f", {skipped_space} skipped (no space)"
         self.root.after(0, lambda m=msg: self.log(m, "success"))
 
+    def _check_single_file_for_queue(self, video_path: Path, min_size_gb: float) -> dict:
+        """
+        Check a single file for ready queue eligibility. Returns dict with result.
+        Designed to run in parallel threads.
+        """
+        result = {"status": None, "path": video_path, "size": 0, "needs_download": False}
+        path_str = str(video_path)
+
+        try:
+            # Skip if already processed
+            if self.is_processed(video_path):
+                result["status"] = "already_processed"
+                return result
+
+            # Check file size
+            try:
+                size = video_path.stat().st_size
+                result["size"] = size
+            except:
+                result["status"] = "stat_error"
+                return result
+
+            # Skip too small
+            if size / (1024**3) < min_size_gb:
+                result["status"] = "too_small"
+                return result
+
+            # Check if file is local (not cloud)
+            is_local = False
+            try:
+                if size > 10000:  # Not a placeholder
+                    with open(video_path, 'rb') as f:
+                        f.read(1024)  # Try to read
+                    is_local = True
+            except OSError as e:
+                if e.errno == 22:  # Cloud file
+                    result["status"] = "cloud"
+                    result["needs_download"] = True
+                    return result
+                result["status"] = "read_error"
+                return result
+
+            if not is_local:
+                result["status"] = "not_local"
+                return result
+
+            # Check if output already exists (fast check before probe)
+            output_folder = video_path.parent / 'h265'
+            output_path = output_folder / video_path.name
+            if output_path.exists():
+                result["status"] = "output_exists"
+                result["output_size"] = output_path.stat().st_size
+                return result
+
+            # FULL PRE-CHECK: Probe video to check codec and bitrate
+            probe_data = self.probe_video(video_path)
+            if not probe_data:
+                result["status"] = "probe_failed"
+                return result
+
+            # Skip if already HEVC
+            if self.is_hevc(probe_data):
+                result["status"] = "already_hevc"
+                return result
+
+            # Skip if low bitrate (< 8 Mbps)
+            bitrate = self.get_bitrate(probe_data, size)
+            if bitrate > 0 and bitrate < 8:
+                result["status"] = "low_bitrate"
+                return result
+
+            # ALL CHECKS PASSED
+            result["status"] = "ready"
+            return result
+
+        except Exception as e:
+            result["status"] = f"error:{e}"
+            return result
+
     def ready_queue_worker(self):
         """
         Background worker that keeps the ready_queue populated with files ready to transcode.
         Files are FULLY validated before being added: downloaded, not HEVC, not low-bitrate.
+        Uses parallel processing for faster scanning.
         """
         last_log_time = 0
         total_queued_since_log = 0
         total_skipped_since_log = 0
         total_downloads_since_log = 0
+
+        # Number of parallel workers for file checking (adjust based on CPU)
+        NUM_WORKERS = 16
 
         while self.ready_queue_worker_running and self.running:
             try:
@@ -2219,92 +2323,63 @@ class TranscoderGUI:
                                 and not f.name.startswith('._') and not f.name.upper().startswith('DJI_')):
                                 video_files.append(f)
 
+                if not video_files:
+                    time.sleep(2)
+                    continue
+
                 files_queued = 0
                 files_skipped = 0
                 downloads_triggered = 0
+                min_size_gb = self.min_size_gb.get()
 
-                for video_path in video_files:
-                    if not self.running or not self.ready_queue_worker_running:
-                        break
+                # Process files in parallel batches
+                with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
+                    # Submit all files for checking
+                    future_to_path = {
+                        executor.submit(self._check_single_file_for_queue, vp, min_size_gb): vp
+                        for vp in video_files
+                    }
 
-                    path_str = str(video_path)
+                    for future in as_completed(future_to_path):
+                        if not self.running or not self.ready_queue_worker_running:
+                            break
 
-                    # Skip if already processed
-                    if self.is_processed(video_path):
-                        continue
-
-                    # Skip if already in ready queue or being checked
-                    with self.files_being_checked_lock:
-                        if path_str in self.files_being_checked:
-                            continue
-                        self.files_being_checked.add(path_str)
-
-                    try:
-                        # Check file size
                         try:
-                            size = video_path.stat().st_size
-                        except:
-                            continue
+                            result = future.result()
+                            video_path = result["path"]
+                            size = result["size"]
+                            status = result["status"]
 
-                        # Skip too small
-                        if size / (1024**3) < self.min_size_gb.get():
-                            continue
+                            if status == "ready":
+                                # Add to ready queue
+                                self.ready_queue.put((video_path, size))
+                                files_queued += 1
 
-                        # Check if file is local (not cloud)
-                        is_local = False
-                        try:
-                            if size > 10000:  # Not a placeholder
-                                with open(video_path, 'rb') as f:
-                                    f.read(1024)  # Try to read
-                                is_local = True
-                        except OSError as e:
-                            if e.errno == 22:  # Cloud file
-                                # Only download if ready queue needs more files (target: 50 minimum)
+                            elif status == "cloud" and result.get("needs_download"):
+                                # Trigger download if needed
                                 if downloads_triggered < downloads_needed:
                                     self._trigger_dropbox_download(video_path)
                                     downloads_triggered += 1
-                            continue  # Skip cloud files
 
-                        if not is_local:
-                            continue
+                            elif status == "already_hevc":
+                                self.mark_processed(video_path, "", "skipped_hevc", size, 0)
+                                files_skipped += 1
 
-                        # FULL PRE-CHECK: Probe video to check codec and bitrate
-                        probe_data = self.probe_video(video_path)
-                        if not probe_data:
-                            files_skipped += 1
-                            continue
+                            elif status == "low_bitrate":
+                                self.mark_processed(video_path, "", "skipped_lowbitrate", size, 0)
+                                files_skipped += 1
 
-                        # Skip if already HEVC
-                        if self.is_hevc(probe_data):
-                            self.mark_processed(video_path, "", "skipped_hevc", size, 0)
-                            files_skipped += 1
-                            continue
+                            elif status == "output_exists":
+                                output_size = result.get("output_size", 0)
+                                output_path = video_path.parent / 'h265' / video_path.name
+                                self.mark_processed(video_path, str(output_path), "skipped_exists", size, output_size)
+                                files_skipped += 1
 
-                        # Skip if low bitrate (< 8 Mbps)
-                        bitrate = self.get_bitrate(probe_data, size)
-                        if bitrate > 0 and bitrate < 8:
-                            self.mark_processed(video_path, "", "skipped_lowbitrate", size, 0)
-                            files_skipped += 1
-                            continue
+                            elif status in ("already_processed", "too_small", "not_local", "probe_failed"):
+                                files_skipped += 1
 
-                        # Check if output already exists
-                        output_folder = video_path.parent / 'h265'
-                        output_path = output_folder / video_path.name
-                        if output_path.exists():
-                            self.mark_processed(video_path, str(output_path), "skipped_exists", size, output_path.stat().st_size)
-                            files_skipped += 1
-                            continue
-
-                        # ALL CHECKS PASSED - Add to ready queue
-                        self.ready_queue.put((video_path, size))
-                        files_queued += 1
-
-                    finally:
-                        with self.files_being_checked_lock:
-                            self.files_being_checked.discard(path_str)
-
-                    # Don't hog CPU
-                    time.sleep(0.05)
+                        except Exception:
+                            pass  # Individual file error, continue with others
 
                 # Accumulate stats for periodic logging
                 total_queued_since_log += files_queued
@@ -2322,8 +2397,8 @@ class TranscoderGUI:
                     total_downloads_since_log = 0
                     last_log_time = now
 
-                # Wait before next scan (shorter if queue is empty)
-                wait_time = 3 if self.ready_queue.qsize() < 3 else 15
+                # Wait before next scan (much shorter now with parallel processing)
+                wait_time = 1 if self.ready_queue.qsize() < 10 else 5
                 for _ in range(wait_time * 2):
                     if not self.running or not self.ready_queue_worker_running:
                         break
@@ -2334,24 +2409,42 @@ class TranscoderGUI:
                 time.sleep(5)
 
     def process_loop(self):
-        """Main processing loop."""
+        """Main processing loop with auto-recovery for daemon mode."""
+        consecutive_errors = 0
+        max_consecutive_errors = 10
+
         while self.running:
-            # Wait while paused
-            while self.paused and self.running:
-                time.sleep(0.5)
-
-            if not self.running:
-                break
-
-            self.scan_and_process()
-
-            for _ in range(30):  # Wait 30 seconds between scans
-                if not self.running:
-                    break
-                # Also check pause during wait
+            try:
+                # Wait while paused
                 while self.paused and self.running:
                     time.sleep(0.5)
-                time.sleep(1)
+
+                if not self.running:
+                    break
+
+                self.scan_and_process()
+                consecutive_errors = 0  # Reset on success
+
+                for _ in range(30):  # Wait 30 seconds between scans
+                    if not self.running:
+                        break
+                    # Also check pause during wait
+                    while self.paused and self.running:
+                        time.sleep(0.5)
+                    time.sleep(1)
+
+            except Exception as e:
+                consecutive_errors += 1
+                self.root.after(0, lambda err=e, n=consecutive_errors: self.log(
+                    f"Process loop error ({n}/{max_consecutive_errors}): {err}", "error"))
+
+                if consecutive_errors >= max_consecutive_errors:
+                    self.root.after(0, lambda: self.log(
+                        "Too many consecutive errors. Pausing for 5 minutes...", "error"))
+                    time.sleep(300)  # 5 minute cooldown
+                    consecutive_errors = 0
+                else:
+                    time.sleep(10)  # Brief pause before retry
 
         # Reset UI when stopped
         self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
