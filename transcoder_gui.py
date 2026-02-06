@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.8.1"
+VERSION = "1.8.2"
 
 import socket
 import subprocess
@@ -2167,35 +2167,24 @@ class TranscoderGUI:
                 # Check file size first
                 size = video_path.stat().st_size
 
-                # If file is very small, it's probably online-only
-                if size < 1000:
+                # Use safe cloud check (doesn't trigger download)
+                if self._is_cloud_only_file(video_path):
                     cloud_files += 1
-                    # Don't trigger download for tiny placeholders - we don't know real size
-                    continue
-
-                # Try to read 1 byte from the file - this triggers Dropbox download
-                try:
-                    with open(video_path, 'rb') as f:
-                        f.read(1)
-                    already_local += 1
-                except OSError as e:
-                    if e.errno == 22:  # Invalid argument - cloud file
-                        cloud_files += 1
-                        # Check if we have space AND haven't reached download limit
-                        if triggered < downloads_needed and triggered_size + size <= available_for_download:
-                            self._trigger_dropbox_download(video_path)
-                            triggered += 1
-                            triggered_size += size
-                        elif triggered >= downloads_needed:
-                            pass  # Already have enough downloads queued
-                        else:
-                            skipped_space += 1
+                    # Check if we have space AND haven't reached download limit
+                    if triggered < downloads_needed and triggered_size + size <= available_for_download:
+                        self._trigger_dropbox_download(video_path)
+                        triggered += 1
+                        triggered_size += size
+                    elif triggered >= downloads_needed:
+                        pass  # Already have enough downloads queued
                     else:
-                        raise
+                        skipped_space += 1
+                else:
+                    already_local += 1
 
             except PermissionError:
                 # File is being synced by Dropbox
-                triggered += 1
+                cloud_files += 1
             except Exception:
                 # Silent - don't spam log with errors for each file
                 cloud_files += 1
@@ -2229,28 +2218,28 @@ class TranscoderGUI:
                 result["status"] = "stat_error"
                 return result
 
-            # Skip too small
+            # Skip too small (but not cloud placeholders which are also small)
+            # First check if it's a cloud file using safe method (no download trigger)
+            if self._is_cloud_only_file(video_path):
+                result["status"] = "cloud"
+                result["needs_download"] = True
+                return result
+
+            # Now we know it's local - check size
             if size / (1024**3) < min_size_gb:
                 result["status"] = "too_small"
                 return result
 
-            # Check if file is local (not cloud)
-            is_local = False
+            # Verify file is actually readable (should be since it passed cloud check)
             try:
-                if size > 10000:  # Not a placeholder
-                    with open(video_path, 'rb') as f:
-                        f.read(1024)  # Try to read
-                    is_local = True
+                with open(video_path, 'rb') as f:
+                    f.read(1024)  # Try to read
             except OSError as e:
-                if e.errno == 22:  # Cloud file
+                if e.errno == 22:  # Cloud file (shouldn't happen but just in case)
                     result["status"] = "cloud"
                     result["needs_download"] = True
                     return result
                 result["status"] = "read_error"
-                return result
-
-            if not is_local:
-                result["status"] = "not_local"
                 return result
 
             # Check if output already exists (fast check before probe)
@@ -3673,6 +3662,42 @@ class TranscoderGUI:
                 remaining = len(self.pending_downloads)
                 self.root.after(0, lambda c=len(completed), r=len(removed), rem=remaining:
                     self.log(f"Download queue: {c} completed, {r} removed, {rem} pending", "info"))
+
+    def _is_cloud_only_file(self, file_path: Path) -> bool:
+        """
+        Check if a file is cloud-only (online-only) in Dropbox WITHOUT triggering download.
+        Uses attrib command to check file attributes safely.
+        Returns True if file is cloud-only, False if local.
+        """
+        try:
+            # Use attrib to check file attributes - this doesn't trigger download
+            result = subprocess.run(
+                ['attrib', str(file_path)],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                # Output format: "     O          P    path" or similar
+                # O = Offline (cloud-only), P = Pinned (local), U = Unpinned
+                attrs = result.stdout.strip()
+                # Check for 'O' attribute (Offline/cloud-only) or 'U' without 'P' (unpinned)
+                # Files with 'O' or 'U' but not 'P' are cloud-only
+                if ' O ' in attrs or (' U ' in attrs and ' P ' not in attrs):
+                    return True
+                # Also check by file size - very small files are placeholders
+                try:
+                    size = file_path.stat().st_size
+                    if size < 1000:  # Less than 1KB is definitely a placeholder
+                        return True
+                except:
+                    pass
+            return False
+        except Exception:
+            # If attrib fails, fall back to size check only
+            try:
+                size = file_path.stat().st_size
+                return size < 1000  # Placeholder files are tiny
+            except:
+                return True  # Assume cloud if we can't check
 
     def _trigger_dropbox_download(self, file_path: Path):
         """
