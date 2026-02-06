@@ -408,6 +408,7 @@ except ImportError:
 class TranscoderGUI:
     # Settings file path
     SETTINGS_FILE = Path(r"C:\transcoder\settings.json")
+    DELETION_RECORDS_FILE = Path(r"C:\transcoder\deletion_records.json")
 
     def __init__(self, root):
         self.root = root
@@ -515,6 +516,7 @@ class TranscoderGUI:
 
         # Deletion tracking - list of (timestamp, bytes_deleted) for tracking GB freed
         self._deletion_records = []
+        self._load_deletion_records()  # Load persisted records from disk
 
         # Stats
         self.files_processed = tk.IntVar(value=0)
@@ -3691,7 +3693,7 @@ class TranscoderGUI:
                         # Normal mode: delete the folder
                         try:
                             shutil.rmtree(h264_folder)
-                            self.record_deletion(folder_size)  # Track for dashboard
+                            self.root.after(0, lambda sz=folder_size: self.record_deletion(sz))  # Track for dashboard (main thread)
                             self.root.after(0, lambda p=h264_folder, n=verified_count, s=folder_size_gb: self.log(
                                 f"✅ H264 FOLDER DELETED: {n} files, {s:.2f} GB freed - {p.name}", "success"))
 
@@ -3814,7 +3816,7 @@ class TranscoderGUI:
                         file_count = len(h264_files)
 
                         shutil.rmtree(h264_folder)
-                        self.record_deletion(folder_size)  # Track for dashboard
+                        self.root.after(0, lambda sz=folder_size: self.record_deletion(sz))  # Track for dashboard (main thread)
 
                         deleted_count += 1
                         total_freed_gb += folder_size_gb
@@ -4053,6 +4055,34 @@ class TranscoderGUI:
         # Keep records for 30 days max
         thirty_days_ago = now - (30 * 24 * 60 * 60)
         self._deletion_records = [r for r in self._deletion_records if r[0] > thirty_days_ago]
+        # Persist to disk
+        self._save_deletion_records()
+
+    def _save_deletion_records(self):
+        """Save deletion records to disk."""
+        try:
+            self.DELETION_RECORDS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.DELETION_RECORDS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(self._deletion_records, f)
+        except Exception:
+            pass  # Silently fail if can't save
+
+    def _load_deletion_records(self):
+        """Load deletion records from disk."""
+        try:
+            if self.DELETION_RECORDS_FILE.exists():
+                with open(self.DELETION_RECORDS_FILE, 'r', encoding='utf-8') as f:
+                    records = json.load(f)
+                    # Validate and filter: keep only records from last 30 days
+                    now = time.time()
+                    thirty_days_ago = now - (30 * 24 * 60 * 60)
+                    self._deletion_records = [
+                        (ts, bytes_del) for ts, bytes_del in records
+                        if isinstance(ts, (int, float)) and isinstance(bytes_del, (int, float))
+                        and ts > thirty_days_ago
+                    ]
+        except Exception:
+            self._deletion_records = []  # Reset if can't load
 
     def get_deleted_gb_today(self) -> float:
         """Get total GB deleted today."""
