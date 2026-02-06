@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.9.1"
+VERSION = "1.9.2"
 
 import socket
 import subprocess
@@ -2525,7 +2525,8 @@ class TranscoderGUI:
                 # === PHASE 1: Monitor and maintain queue ===
 
                 # Periodically rescan for NEW local files (fast, no probe)
-                if now - last_local_rescan >= LOCAL_RESCAN_INTERVAL:
+                # SKIP if queue is large - no need to rescan with 1000+ files
+                if current_queue_size < 1000 and now - last_local_rescan >= LOCAL_RESCAN_INTERVAL:
                     new_local = self._quick_scan_new_local_files()
                     if new_local > 0:
                         self.local_eligible_exhausted = False
@@ -2534,7 +2535,8 @@ class TranscoderGUI:
                     last_local_rescan = now
 
                 # Periodically save queue snapshot for fast restart
-                if now - last_snapshot_time >= SNAPSHOT_INTERVAL:
+                # SKIP if queue is huge (>5000) - saving 71k files is slow
+                if current_queue_size < 5000 and now - last_snapshot_time >= SNAPSHOT_INTERVAL:
                     self.save_queue_snapshot()
                     last_snapshot_time = now
 
@@ -3984,6 +3986,7 @@ class TranscoderGUI:
 
     def process_file(self, input_path: Path, queue_pos: int = 0, queue_total: int = 0, file_size: int = 0):
         """Process a single file."""
+        process_start = time.time()
         queue_str = f"[{queue_pos}/{queue_total}] " if queue_pos else ""
         self.root.after(0, lambda q=queue_str: self.current_file_label.config(
             text=f"{q}Processing: {input_path.name}"))
@@ -3993,16 +3996,27 @@ class TranscoderGUI:
         if not self.wait_for_file_ready(input_path, estimated_size=file_size):
             return
 
+        wait_time = time.time() - process_start
+
         size_gb = input_path.stat().st_size / (1024**3)
         self.root.after(0, lambda: self.current_file_label.config(
             text=f"Processing: {input_path.name} ({size_gb:.2f} GB)"))
 
         # Probe video
+        probe_start = time.time()
         probe_data = self.probe_video(input_path)
+        probe_time = time.time() - probe_start
+
         if not probe_data:
             self.root.after(0, lambda: self.log("Could not probe video", "error"))
             self.mark_processed(input_path, "", "error", 0, 0)
             return
+
+        # Log timing if significant delay
+        total_prep_time = time.time() - process_start
+        if total_prep_time > 5:
+            self.root.after(0, lambda w=wait_time, p=probe_time, t=total_prep_time: self.log(
+                f"Prep time: {t:.1f}s (wait:{w:.1f}s, probe:{p:.1f}s)", "info"))
 
         # Check if already HEVC
         if self.is_hevc(probe_data):
