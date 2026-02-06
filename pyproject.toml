@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "dropbox-video-transcoder"
-version = "2.1.0"
+version = "2.2.0"
 description = "Robust Dropbox video transcoder daemon (H.264 → H.265/HEVC)"
 readme = "README.md"
 license = {text = "MIT"}
