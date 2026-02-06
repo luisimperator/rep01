@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.8.2"
+VERSION = "1.9.0"
 
 import socket
 import subprocess
@@ -444,11 +444,19 @@ class TranscoderGUI:
         # READY QUEUE: Files confirmed downloaded and ready to transcode
         # This decouples downloading from transcoding - no more waiting!
         import queue
-        self.ready_queue = queue.Queue()  # Queue of (path, size) tuples
+        self.ready_queue = queue.Queue()  # Queue of (path, size, folder_priority) tuples
         self.ready_queue_worker_running = False
         self.ready_queue_worker_thread = None
         self.files_being_checked = set()  # Files currently being checked for readiness
         self.files_being_checked_lock = threading.Lock()
+
+        # NEW ARCHITECTURE: 3-phase scheduler
+        # Phase 0: Warm start from local (instant, no probe, no download)
+        # Phase 1: Transcode from queue
+        # Phase 2: Only probe/download when queue < 50 AND local exhausted
+        self.local_eligible_exhausted = False  # Gate for downloads
+        self.QUEUE_SNAPSHOT_FILE = self.dropbox_base / "App h265 Converter" / ".queue_snapshot.json"
+        self._queue_items_set = set()  # Fast lookup to avoid duplicates
 
         # Idle state tracking - avoid spamming "nothing to do" logs
         self._last_scan_had_work = True  # Assume work initially so first idle is logged
@@ -1497,7 +1505,9 @@ class TranscoderGUI:
         # Put items back and build display list
         for item in temp_items:
             self.ready_queue.put(item)
-            path, size = item
+            # Item can be (path, size) or (path, size, priority)
+            path = item[0]
+            size = item[1]
             size_gb = size / (1024**3)
             queue_items.append(f"{path.name}  ({size_gb:.2f} GB)\n   {path.parent}")
 
@@ -2019,7 +2029,7 @@ class TranscoderGUI:
             self.toggle_processing()
 
     def toggle_processing(self):
-        """Start processing."""
+        """Start processing with instant queue from snapshot or warm start."""
         if not self.running:
             self.running = True
             self.paused = False
@@ -2028,15 +2038,28 @@ class TranscoderGUI:
             self.stop_btn.config(state=tk.NORMAL)
             self.progress_var.set(0)
 
-            # Start the ready queue worker (populates queue with ready files)
+            # === NEW: INSTANT START - Load queue first, THEN start workers ===
+            # Try to load queue from snapshot (instant restart)
+            if not self.load_queue_snapshot():
+                # No snapshot - run warm start (fast local scan, no probe)
+                self.warm_start_local_queue()
+
+            queue_size = self.ready_queue.qsize()
+            self.log(f"Ready queue: {queue_size} files ready to transcode", "success")
+
+            # Start the ready queue worker (monitors queue, triggers downloads when needed)
             self.ready_queue_worker_running = True
             self.ready_queue_worker_thread = threading.Thread(target=self.ready_queue_worker, daemon=True)
             self.ready_queue_worker_thread.start()
 
-            # Start the main processing loop
+            # Start the main processing loop (transcodes from queue)
             self.worker_thread = threading.Thread(target=self.process_loop, daemon=True)
             self.worker_thread.start()
-            self.log("Started monitoring (ready queue enabled)", "success")
+
+            if queue_size > 0:
+                self.log("Starting transcoding immediately!", "success")
+            else:
+                self.log("Queue empty - will scan for files...", "info")
 
     def toggle_pause(self):
         """Pause or resume encoding."""
@@ -2059,12 +2082,13 @@ class TranscoderGUI:
         self.paused = False
         self.ready_queue_worker_running = False  # Stop the ready queue worker
 
-        # Clear the ready queue
+        # Clear the ready queue and tracking set
         while not self.ready_queue.empty():
             try:
                 self.ready_queue.get_nowait()
             except:
                 break
+        self._queue_items_set.clear()
 
         # Kill FFmpeg process if running
         if self.current_process:
@@ -2275,141 +2299,354 @@ class TranscoderGUI:
             result["status"] = f"error:{e}"
             return result
 
+    # ==================== NEW ARCHITECTURE: 3-PHASE SCHEDULER ====================
+
+    def save_queue_snapshot(self):
+        """Persist ready queue to disk for instant restart."""
+        try:
+            # Extract items from queue without removing them
+            items = []
+            temp_items = []
+            while not self.ready_queue.empty():
+                try:
+                    item = self.ready_queue.get_nowait()
+                    temp_items.append(item)
+                    # item is (path, size) or (path, size, priority)
+                    path = str(item[0])
+                    size = item[1]
+                    priority = item[2] if len(item) > 2 else 0
+                    items.append({"path": path, "size": size, "priority": priority})
+                except:
+                    break
+            # Put items back
+            for item in temp_items:
+                self.ready_queue.put(item)
+
+            # Save to file
+            snapshot = {
+                "version": 2,
+                "timestamp": time.time(),
+                "local_eligible_exhausted": self.local_eligible_exhausted,
+                "items": items
+            }
+            self.QUEUE_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.QUEUE_SNAPSHOT_FILE, 'w', encoding='utf-8') as f:
+                json.dump(snapshot, f)
+        except Exception as e:
+            pass  # Silent fail - persistence is nice-to-have
+
+    def load_queue_snapshot(self) -> bool:
+        """Load queue from disk snapshot. Returns True if loaded successfully."""
+        try:
+            if not self.QUEUE_SNAPSHOT_FILE.exists():
+                return False
+
+            with open(self.QUEUE_SNAPSHOT_FILE, 'r', encoding='utf-8') as f:
+                snapshot = json.load(f)
+
+            if snapshot.get("version", 1) < 2:
+                return False  # Old format, rebuild
+
+            # Check if snapshot is too old (> 24 hours)
+            age_hours = (time.time() - snapshot.get("timestamp", 0)) / 3600
+            if age_hours > 24:
+                self.root.after(0, lambda: self.log("Queue snapshot too old, rebuilding...", "info"))
+                return False
+
+            items = snapshot.get("items", [])
+            if not items:
+                return False
+
+            # Validate and load items
+            loaded = 0
+            for item in items:
+                path = Path(item["path"])
+                if path.exists() and not self._is_cloud_only_file(path):
+                    # Verify not already processed
+                    if not self.is_processed(path):
+                        size = item.get("size", path.stat().st_size)
+                        priority = item.get("priority", 0)
+                        path_str = str(path)
+                        if path_str not in self._queue_items_set:
+                            self.ready_queue.put((path, size, priority))
+                            self._queue_items_set.add(path_str)
+                            loaded += 1
+
+            if loaded > 0:
+                self.local_eligible_exhausted = snapshot.get("local_eligible_exhausted", False)
+                self.root.after(0, lambda n=loaded: self.log(
+                    f"Loaded {n} files from queue snapshot - instant start!", "success"))
+                return True
+
+            return False
+        except Exception as e:
+            return False
+
+    def warm_start_local_queue(self):
+        """
+        PHASE 0: Fast local-only scan. NO PROBE, NO DOWNLOAD.
+        Builds a huge ready queue instantly from local files.
+        Priority: complete h264 folders first, then alphabetical by folder.
+        """
+        self.root.after(0, lambda: self.log("=" * 60, "info"))
+        self.root.after(0, lambda: self.log("WARM START: Scanning local files only...", "info"))
+        self.root.after(0, lambda: self.log("(No probe, no download - instant queue build)", "info"))
+
+        start_time = time.time()
+        min_size_bytes = int(self.min_size_gb.get() * 1024**3)
+
+        # Collect all candidate files with their folder info
+        candidates = []  # List of (path, size, folder_path, has_h264_folder)
+
+        for watch_folder in self.get_watch_folders():
+            for ext in ['.mp4', '.MP4']:
+                for f in watch_folder.rglob(f'*{ext}'):
+                    # Skip h264/h265 folders, macOS metadata, DJI files
+                    path_str = str(f)
+                    if ('h265' in path_str.lower() or 'h264' in path_str.lower()
+                        or f.name.startswith('._') or f.name.upper().startswith('DJI_')):
+                        continue
+
+                    # Skip if already in queue
+                    if path_str in self._queue_items_set:
+                        continue
+
+                    # Skip if already processed (use manifest - fast lookup)
+                    if self.is_processed(f):
+                        continue
+
+                    # Check if cloud-only (safe check, no download trigger)
+                    if self._is_cloud_only_file(f):
+                        continue  # Skip cloud files for now
+
+                    # Check file size
+                    try:
+                        size = f.stat().st_size
+                        if size < min_size_bytes:
+                            continue
+                        if size < 10000:  # Placeholder
+                            continue
+                    except:
+                        continue
+
+                    # Check if h264 folder exists locally (means this folder has work in progress)
+                    folder = f.parent
+                    h264_folder = folder / 'h264'
+                    has_h264_local = h264_folder.exists() and any(h264_folder.iterdir()) if h264_folder.exists() else False
+
+                    candidates.append((f, size, str(folder), has_h264_local))
+
+        # Sort candidates:
+        # 1. Folders with h264 already local (complete these first!)
+        # 2. Alphabetical by folder name
+        # 3. Alphabetical by file name
+        candidates.sort(key=lambda x: (
+            not x[3],  # has_h264_local=True comes first (False=0, True=1, so "not" inverts)
+            x[2].lower(),  # folder path alphabetical
+            str(x[0]).lower()  # file path alphabetical
+        ))
+
+        # Add to queue
+        added = 0
+        for path, size, folder, has_h264 in candidates:
+            path_str = str(path)
+            if path_str not in self._queue_items_set:
+                priority = 1 if has_h264 else 0  # Higher priority for h264 folders
+                self.ready_queue.put((path, size, priority))
+                self._queue_items_set.add(path_str)
+                added += 1
+
+        elapsed = time.time() - start_time
+
+        if added > 0:
+            self.root.after(0, lambda n=added, t=elapsed: self.log(
+                f"WARM START COMPLETE: {n} local files queued in {t:.1f}s", "success"))
+            self.local_eligible_exhausted = False
+        else:
+            self.root.after(0, lambda t=elapsed: self.log(
+                f"No local files found ({t:.1f}s). Will check cloud files...", "info"))
+            self.local_eligible_exhausted = True
+
+        # Save snapshot for next restart
+        self.save_queue_snapshot()
+
+        self.root.after(0, lambda: self.log("=" * 60, "info"))
+
     def ready_queue_worker(self):
         """
-        Background worker that keeps the ready_queue populated with files ready to transcode.
-        Files are FULLY validated before being added: downloaded, not HEVC, not low-bitrate.
-        Uses parallel processing for faster scanning.
+        NEW ARCHITECTURE: 3-Phase Queue Worker
+
+        Phase 0 (startup): warm_start_local_queue() already ran - queue is populated
+        Phase 1 (this): Monitor queue, rescan for new local files periodically
+        Phase 2: Only when queue < 50 AND local_eligible_exhausted, trigger downloads
+
+        NO PROBING HERE - probing happens at transcode time in process_file()
         """
         last_log_time = 0
-        total_queued_since_log = 0
-        total_skipped_since_log = 0
-        total_downloads_since_log = 0
-
-        # Number of parallel workers for file checking (adjust based on CPU)
-        NUM_WORKERS = 16
+        last_snapshot_time = time.time()
+        last_local_rescan = time.time()
+        LOCAL_RESCAN_INTERVAL = 60  # Rescan for new local files every 60 seconds
+        SNAPSHOT_INTERVAL = 30  # Save queue snapshot every 30 seconds
 
         while self.ready_queue_worker_running and self.running:
             try:
-                # Clear stale tracking entries at start of each cycle
-                with self.files_being_checked_lock:
-                    self.files_being_checked.clear()
-
-                # Skip download triggering in offline mode
-                offline_mode = self.offline_mode.get()
-
-                # Find video files from ALL watch folders
-                video_files = []
-                for folder in self.get_watch_folders():
-                    for ext in ['.mp4', '.MP4']:
-                        for f in folder.rglob(f'*{ext}'):
-                            if ('h265' not in str(f).lower() and 'h264' not in str(f).lower()
-                                and not f.name.startswith('._') and not f.name.upper().startswith('DJI_')):
-                                video_files.append(f)
-
-                if not video_files:
-                    time.sleep(2)
-                    continue
-
-                files_queued = 0
-                files_skipped = 0
-                downloads_triggered = 0
-                min_size_gb = self.min_size_gb.get()
-
-                # TWO-PASS APPROACH:
-                # Pass 1: Check all files and collect results (don't download yet)
-                # Pass 2: Add local files to queue, then download only if needed
-
-                all_results = []
-                cloud_files_pending = []
-
-                # Pass 1: Check all files in parallel
-                with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
-                    future_to_path = {
-                        executor.submit(self._check_single_file_for_queue, vp, min_size_gb): vp
-                        for vp in video_files
-                    }
-
-                    for future in as_completed(future_to_path):
-                        if not self.running or not self.ready_queue_worker_running:
-                            break
-
-                        try:
-                            result = future.result()
-                            all_results.append(result)
-                        except Exception:
-                            pass
-
-                # Pass 2: Process results - LOCAL FILES FIRST
-                for result in all_results:
-                    video_path = result["path"]
-                    size = result["size"]
-                    status = result["status"]
-
-                    if status == "ready":
-                        # Local file ready - add to queue immediately
-                        self.ready_queue.put((video_path, size))
-                        files_queued += 1
-
-                    elif status == "cloud" and result.get("needs_download"):
-                        # Save cloud files for later (after we know queue size)
-                        cloud_files_pending.append(video_path)
-
-                    elif status == "already_hevc":
-                        self.mark_processed(video_path, "", "skipped_hevc", size, 0)
-                        files_skipped += 1
-
-                    elif status == "low_bitrate":
-                        self.mark_processed(video_path, "", "skipped_lowbitrate", size, 0)
-                        files_skipped += 1
-
-                    elif status == "output_exists":
-                        output_size = result.get("output_size", 0)
-                        output_path = video_path.parent / 'h265' / video_path.name
-                        self.mark_processed(video_path, str(output_path), "skipped_exists", size, output_size)
-                        files_skipped += 1
-
-                    elif status in ("already_processed", "too_small", "not_local", "probe_failed"):
-                        files_skipped += 1
-
-                # Pass 3: NOW check if we need downloads (after adding all local files)
-                if cloud_files_pending and not offline_mode:
-                    current_queue_size = self.ready_queue.qsize()
-                    downloads_needed = max(0, 50 - current_queue_size)
-
-                    if downloads_needed > 0:
-                        # Sort by path for consistency, take only what we need
-                        cloud_files_pending.sort(key=lambda p: str(p))
-                        for cloud_path in cloud_files_pending[:downloads_needed]:
-                            self._trigger_dropbox_download(cloud_path)
-                            downloads_triggered += 1
-
-                # Accumulate stats for periodic logging
-                total_queued_since_log += files_queued
-                total_skipped_since_log += files_skipped
-                total_downloads_since_log += downloads_triggered
-
-                # Log status every 30 seconds (not every cycle)
+                current_queue_size = self.ready_queue.qsize()
                 now = time.time()
-                if now - last_log_time >= 30 and (total_queued_since_log > 0 or total_skipped_since_log > 0):
+
+                # === PHASE 1: Monitor and maintain queue ===
+
+                # Periodically rescan for NEW local files (fast, no probe)
+                if now - last_local_rescan >= LOCAL_RESCAN_INTERVAL:
+                    new_local = self._quick_scan_new_local_files()
+                    if new_local > 0:
+                        self.local_eligible_exhausted = False
+                        self.root.after(0, lambda n=new_local: self.log(
+                            f"Found {n} new local files", "info"))
+                    last_local_rescan = now
+
+                # Periodically save queue snapshot for fast restart
+                if now - last_snapshot_time >= SNAPSHOT_INTERVAL:
+                    self.save_queue_snapshot()
+                    last_snapshot_time = now
+
+                # === PHASE 2: Only probe/download when queue needs it ===
+                if current_queue_size < 50:
+                    if not self.local_eligible_exhausted:
+                        # Try to find more local files first (full rescan)
+                        self.root.after(0, lambda q=current_queue_size: self.log(
+                            f"Queue low ({q} files). Rescanning local...", "info"))
+                        before = current_queue_size
+                        self._quick_scan_new_local_files()
+                        after = self.ready_queue.qsize()
+
+                        if after <= before:
+                            # No new local files found
+                            self.local_eligible_exhausted = True
+                            self.root.after(0, lambda: self.log(
+                                "Local files exhausted. Will probe cloud files...", "info"))
+
+                    elif not self.offline_mode.get():
+                        # Local exhausted AND queue < 50 - now we can probe/download
+                        downloads_needed = max(0, 50 - current_queue_size)
+                        if downloads_needed > 0:
+                            triggered = self._probe_and_download_cloud_files(downloads_needed)
+                            if triggered > 0:
+                                self.root.after(0, lambda n=triggered: self.log(
+                                    f"Triggered {n} cloud downloads", "info"))
+
+                # Log queue status periodically
+                if now - last_log_time >= 30:
                     queue_size = self.ready_queue.qsize()
-                    self.root.after(0, lambda q=total_queued_since_log, s=total_skipped_since_log, d=total_downloads_since_log, qs=queue_size:
-                        self.log(f"Ready queue: {qs} ready, +{q} added, {s} skipped, {d} downloads", "info"))
-                    total_queued_since_log = 0
-                    total_skipped_since_log = 0
-                    total_downloads_since_log = 0
+                    status = "LOCAL MODE" if not self.local_eligible_exhausted else "CLOUD MODE"
+                    self.root.after(0, lambda qs=queue_size, s=status: self.log(
+                        f"Queue: {qs} files ready [{s}]", "info"))
                     last_log_time = now
 
-                # Wait before next scan (much shorter now with parallel processing)
-                wait_time = 1 if self.ready_queue.qsize() < 10 else 5
+                # Wait before next cycle (longer if queue is healthy)
+                wait_time = 2 if current_queue_size < 20 else 10
                 for _ in range(wait_time * 2):
                     if not self.running or not self.ready_queue_worker_running:
                         break
                     time.sleep(0.5)
 
             except Exception as e:
-                self.root.after(0, lambda err=e: self.log(f"Ready queue worker error: {err}", "warning"))
+                self.root.after(0, lambda err=e: self.log(f"Queue worker error: {err}", "warning"))
                 time.sleep(5)
+
+    def _quick_scan_new_local_files(self) -> int:
+        """
+        Quick scan for NEW local files not already in queue.
+        NO PROBING - just checks: exists, local, not processed.
+        Returns number of files added.
+        """
+        min_size_bytes = int(self.min_size_gb.get() * 1024**3)
+        added = 0
+
+        for watch_folder in self.get_watch_folders():
+            for ext in ['.mp4', '.MP4']:
+                for f in watch_folder.rglob(f'*{ext}'):
+                    path_str = str(f)
+
+                    # Skip if already in queue
+                    if path_str in self._queue_items_set:
+                        continue
+
+                    # Skip h264/h265 folders, macOS metadata, DJI
+                    if ('h265' in path_str.lower() or 'h264' in path_str.lower()
+                        or f.name.startswith('._') or f.name.upper().startswith('DJI_')):
+                        continue
+
+                    # Skip if already processed
+                    if self.is_processed(f):
+                        continue
+
+                    # Skip if cloud-only (safe check)
+                    if self._is_cloud_only_file(f):
+                        continue
+
+                    # Check size
+                    try:
+                        size = f.stat().st_size
+                        if size < min_size_bytes or size < 10000:
+                            continue
+                    except:
+                        continue
+
+                    # Add to queue with folder priority
+                    folder = f.parent
+                    h264_folder = folder / 'h264'
+                    has_h264 = h264_folder.exists() and any(h264_folder.iterdir()) if h264_folder.exists() else False
+                    priority = 1 if has_h264 else 0
+
+                    self.ready_queue.put((f, size, priority))
+                    self._queue_items_set.add(path_str)
+                    added += 1
+
+        return added
+
+    def _probe_and_download_cloud_files(self, max_downloads: int) -> int:
+        """
+        PHASE 2 ONLY: Probe cloud files and trigger downloads.
+        Only called when local_eligible_exhausted AND queue < 50.
+        Returns number of downloads triggered.
+        """
+        min_size_gb = self.min_size_gb.get()
+        triggered = 0
+        cloud_candidates = []
+
+        # Find cloud-only files
+        for watch_folder in self.get_watch_folders():
+            for ext in ['.mp4', '.MP4']:
+                for f in watch_folder.rglob(f'*{ext}'):
+                    if triggered >= max_downloads:
+                        break
+
+                    path_str = str(f)
+
+                    # Skip if in queue or processed
+                    if path_str in self._queue_items_set:
+                        continue
+                    if self.is_processed(f):
+                        continue
+
+                    # Skip h264/h265, metadata, DJI
+                    if ('h265' in path_str.lower() or 'h264' in path_str.lower()
+                        or f.name.startswith('._') or f.name.upper().startswith('DJI_')):
+                        continue
+
+                    # Must be cloud-only
+                    if not self._is_cloud_only_file(f):
+                        continue
+
+                    cloud_candidates.append(f)
+
+        # Sort alphabetically and trigger downloads
+        cloud_candidates.sort(key=lambda p: str(p).lower())
+        for cloud_path in cloud_candidates[:max_downloads]:
+            self._trigger_dropbox_download(cloud_path)
+            triggered += 1
+
+        return triggered
 
     def process_loop(self):
         """Main processing loop with auto-recovery for daemon mode."""
@@ -2600,7 +2837,12 @@ class TranscoderGUI:
                 break
 
             try:
-                video_path, file_size = self.ready_queue.get_nowait()
+                item = self.ready_queue.get_nowait()
+                # Item can be (path, size) or (path, size, priority)
+                video_path = item[0]
+                file_size = item[1]
+                # Remove from tracking set
+                self._queue_items_set.discard(str(video_path))
             except:
                 break
 
