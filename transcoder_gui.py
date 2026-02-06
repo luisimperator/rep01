@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 import socket
 import subprocess
@@ -450,13 +450,44 @@ class TranscoderGUI:
         self.files_being_checked = set()  # Files currently being checked for readiness
         self.files_being_checked_lock = threading.Lock()
 
-        # NEW ARCHITECTURE: 3-phase scheduler
-        # Phase 0: Warm start from local (instant, no probe, no download)
-        # Phase 1: Transcode from queue
-        # Phase 2: Only probe/download when queue < 50 AND local exhausted
-        self.local_eligible_exhausted = False  # Gate for downloads
-        self.QUEUE_SNAPSHOT_FILE = self.dropbox_base / "App h265 Converter" / ".queue_snapshot.json"
+        # === NEW ARCHITECTURE v2.0: Queue-first, folder-complete, zero mass-probe ===
+        # Objetivo: manter fila de ~100 arquivos sem varrer 70k/200k arquivos
+        # Princípios:
+        # 1. Queue-first: se tenho 100 na fila, não preciso olhar o universo
+        # 2. Folder-complete: priorizar completar uma pasta antes de começar outra
+        # 3. Zero mass-probe: varredura incremental por pasta, nunca global
+
+        self.QUEUE_TARGET_SIZE = 100  # Tamanho alvo da fila
+        self.QUEUE_REFILL_THRESHOLD = 99  # Refill quando cair abaixo disso
+
+        # Estados dos itens na fila
+        # READY_LOCAL, QUEUED_REMOTE, DOWNLOADING, FAILED_RETRY, TRANSCODING, DONE
+
+        # Folder tracker: estado de cada pasta em progresso
+        # {folder_path: {
+        #     'status': 'ACTIVE' | 'COMPLETING' | 'DONE',
+        #     'total_known': int,      # arquivos conhecidos (pode crescer)
+        #     'selected': int,         # quantos na fila ativa
+        #     'done': int,             # quantos finalizados
+        #     'last_file_index': int,  # último arquivo listado (paginação)
+        #     'files_list': list,      # cache dos arquivos da pasta (ordem alfabética)
+        # }}
+        self.folder_tracker = {}
+        self.folder_tracker_lock = threading.Lock()
+
+        # Lista de pastas a processar (ordem alfabética, lazy-loaded)
+        self.pending_folders = []  # [(folder_path, priority)]
+        self.pending_folders_index = 0  # Próxima pasta a explorar
+        self.pending_folders_loaded = False  # Se já carregou a lista de pastas
+
+        # Active queue: itens selecionados (até QUEUE_TARGET_SIZE)
+        # Cada item: {'path': Path, 'size': int, 'folder': str, 'status': str, 'retry_at': float}
+        self.active_queue = []  # Lista ordenada de itens
+        self.active_queue_lock = threading.Lock()
         self._queue_items_set = set()  # Fast lookup to avoid duplicates
+
+        self.local_eligible_exhausted = False  # Gate for downloads
+        self.QUEUE_SNAPSHOT_FILE = self.dropbox_base / "App h265 Converter" / ".queue_snapshot_v2.json"
 
         # PRE-PROBE BUFFER: Files already probed and ready for instant transcode
         # This eliminates the 30+ second gap between transcodes
@@ -2326,44 +2357,58 @@ class TranscoderGUI:
             result["status"] = f"error:{e}"
             return result
 
-    # ==================== NEW ARCHITECTURE: 3-PHASE SCHEDULER ====================
+    # ==================== NEW ARCHITECTURE v2.0: QUEUE-FIRST ====================
 
     def save_queue_snapshot(self):
-        """Persist ready queue to disk for instant restart."""
+        """
+        v2.0: Persiste active_queue, folder_tracker e pending_folders_index.
+        Permite restart instantâneo sem varredura.
+        """
         try:
-            # Extract items from queue without removing them
-            items = []
-            temp_items = []
-            while not self.ready_queue.empty():
-                try:
-                    item = self.ready_queue.get_nowait()
-                    temp_items.append(item)
-                    # item is (path, size) or (path, size, priority)
-                    path = str(item[0])
-                    size = item[1]
-                    priority = item[2] if len(item) > 2 else 0
-                    items.append({"path": path, "size": size, "priority": priority})
-                except:
-                    break
-            # Put items back
-            for item in temp_items:
-                self.ready_queue.put(item)
+            # Serializar active_queue
+            with self.active_queue_lock:
+                items = []
+                for item in self.active_queue:
+                    items.append({
+                        "path": str(item['path']),
+                        "size": item['size'],
+                        "folder": item['folder'],
+                        "status": item['status'],
+                        "retry_at": item.get('retry_at', 0)
+                    })
 
-            # Save to file
+            # Serializar folder_tracker
+            with self.folder_tracker_lock:
+                folders = {}
+                for folder_path, info in self.folder_tracker.items():
+                    folders[folder_path] = {
+                        'status': info['status'],
+                        'total_known': info['total_known'],
+                        'selected': info['selected'],
+                        'done': info['done'],
+                        'priority': info.get('priority', 0)
+                    }
+
             snapshot = {
-                "version": 2,
+                "version": 3,  # v3 = nova arquitetura queue-first
                 "timestamp": time.time(),
-                "local_eligible_exhausted": self.local_eligible_exhausted,
-                "items": items
+                "pending_folders_index": self.pending_folders_index,
+                "active_queue": items,
+                "folder_tracker": folders
             }
+
             self.QUEUE_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
             with open(self.QUEUE_SNAPSHOT_FILE, 'w', encoding='utf-8') as f:
-                json.dump(snapshot, f)
+                json.dump(snapshot, f, indent=2)
+
         except Exception as e:
             pass  # Silent fail - persistence is nice-to-have
 
     def load_queue_snapshot(self) -> bool:
-        """Load queue from disk snapshot. Returns True if loaded successfully."""
+        """
+        v2.0: Carrega snapshot e restaura estado completo.
+        Retorna True se carregou com sucesso.
+        """
         try:
             if not self.QUEUE_SNAPSHOT_FILE.exists():
                 return False
@@ -2371,41 +2416,74 @@ class TranscoderGUI:
             with open(self.QUEUE_SNAPSHOT_FILE, 'r', encoding='utf-8') as f:
                 snapshot = json.load(f)
 
-            if snapshot.get("version", 1) < 2:
-                return False  # Old format, rebuild
+            # Verificar versão
+            version = snapshot.get("version", 1)
+            if version < 3:
+                self.root.after(0, lambda: self.log("Old snapshot format, rebuilding...", "info"))
+                return False
 
-            # Check if snapshot is too old (> 24 hours)
+            # Verificar idade (> 24 horas = reconstruir)
             age_hours = (time.time() - snapshot.get("timestamp", 0)) / 3600
             if age_hours > 24:
-                self.root.after(0, lambda: self.log("Queue snapshot too old, rebuilding...", "info"))
+                self.root.after(0, lambda: self.log("Snapshot too old, rebuilding...", "info"))
                 return False
 
-            items = snapshot.get("items", [])
-            if not items:
-                return False
+            # Carregar pending_folders primeiro (necessário para índice)
+            self._load_pending_folders()
+            self.pending_folders_index = min(
+                snapshot.get("pending_folders_index", 0),
+                len(self.pending_folders)
+            )
 
-            # Validate and load items
+            # Carregar folder_tracker
+            folders = snapshot.get("folder_tracker", {})
+            with self.folder_tracker_lock:
+                for folder_path, info in folders.items():
+                    self.folder_tracker[folder_path] = info
+
+            # Carregar active_queue (validando arquivos)
+            items = snapshot.get("active_queue", [])
             loaded = 0
-            for item in items:
-                path = Path(item["path"])
-                if path.exists() and not self._is_cloud_only_file(path):
-                    # Verify not already processed
-                    if not self.is_processed(path):
-                        size = item.get("size", path.stat().st_size)
-                        priority = item.get("priority", 0)
-                        path_str = str(path)
-                        if path_str not in self._queue_items_set:
-                            self.ready_queue.put((path, size, priority))
-                            self._queue_items_set.add(path_str)
-                            loaded += 1
+
+            for item_data in items:
+                path = Path(item_data["path"])
+                path_str = str(path)
+
+                # Validar arquivo
+                if not path.exists():
+                    continue
+                if path_str in self._queue_items_set:
+                    continue
+                if self.is_processed(path):
+                    continue
+
+                # Verificar se ainda é local
+                is_local = self._is_likely_local_file_fast(path)
+                status = 'READY_LOCAL' if is_local else item_data.get('status', 'QUEUED_REMOTE')
+
+                item = {
+                    'path': path,
+                    'size': item_data.get('size', 0),
+                    'folder': item_data.get('folder', str(path.parent)),
+                    'status': status,
+                    'retry_at': item_data.get('retry_at', 0)
+                }
+
+                with self.active_queue_lock:
+                    self.active_queue.append(item)
+                    self._queue_items_set.add(path_str)
+                    loaded += 1
 
             if loaded > 0:
-                self.local_eligible_exhausted = snapshot.get("local_eligible_exhausted", False)
                 self.root.after(0, lambda n=loaded: self.log(
-                    f"Loaded {n} files from queue snapshot - instant start!", "success"))
+                    f"Loaded {n} files from snapshot - instant start!", "success"))
+
+                # Sincronizar para ready_queue
+                self._sync_to_ready_queue()
                 return True
 
             return False
+
         except Exception as e:
             return False
 
@@ -2423,177 +2501,431 @@ class TranscoderGUI:
         except:
             return False
 
-    def warm_start_local_queue(self):
-        """
-        PHASE 0: Fast local-only scan. NO PROBE, NO DOWNLOAD, NO SUBPROCESS.
-        Builds a huge ready queue instantly from local files.
-        Priority: complete h264 folders first, then alphabetical by folder.
-        """
-        self.root.after(0, lambda: self.log("=" * 60, "info"))
-        self.root.after(0, lambda: self.log("WARM START: Scanning local files only...", "info"))
-        self.root.after(0, lambda: self.log("(No probe, no download - instant queue build)", "info"))
+    # =========================================================================
+    # NEW ARCHITECTURE v2.0: Queue-first, folder-complete, zero mass-probe
+    # =========================================================================
 
+    def _load_pending_folders(self):
+        """
+        Carrega lista de pastas que contêm arquivos MP4, em ordem alfabética.
+        NÃO lista os arquivos ainda - só as pastas. Lazy loading.
+        """
+        if self.pending_folders_loaded:
+            return
+
+        self.root.after(0, lambda: self.log("Discovering folders (not files)...", "info"))
         start_time = time.time()
-        min_size_bytes = int(self.min_size_gb.get() * 1024**3)
 
-        # Collect all candidate files with their folder info
-        candidates = []  # List of (path, size, folder_path, has_h264_folder)
-        files_scanned = 0
-        last_progress_log = time.time()
+        folders_with_mp4 = set()
 
         for watch_folder in self.get_watch_folders():
-            for ext in ['.mp4', '.MP4']:
-                for f in watch_folder.rglob(f'*{ext}'):
-                    files_scanned += 1
+            # Usa os.walk que é mais eficiente para descobrir diretórios
+            import os
+            for dirpath, dirnames, filenames in os.walk(str(watch_folder)):
+                # Skip h264/h265 folders
+                dirpath_lower = dirpath.lower()
+                if 'h265' in dirpath_lower or 'h264' in dirpath_lower:
+                    continue
 
-                    # Log progress every 2 seconds
-                    now = time.time()
-                    if now - last_progress_log >= 2:
-                        self.root.after(0, lambda n=files_scanned, c=len(candidates): self.log(
-                            f"Scanning... {n} files checked, {c} candidates", "info"))
-                        last_progress_log = now
+                # Check if folder has MP4 files
+                has_mp4 = any(f.lower().endswith('.mp4') for f in filenames
+                             if not f.startswith('._') and not f.upper().startswith('DJI_'))
+                if has_mp4:
+                    folders_with_mp4.add(dirpath)
 
-                    # Skip h264/h265 folders, macOS metadata, DJI files
-                    path_str = str(f)
-                    if ('h265' in path_str.lower() or 'h264' in path_str.lower()
-                        or f.name.startswith('._') or f.name.upper().startswith('DJI_')):
+        # Sort alphabetically
+        sorted_folders = sorted(folders_with_mp4, key=lambda x: x.lower())
+
+        # Priorizar pastas que já têm h264 (trabalho em progresso)
+        priority_folders = []
+        normal_folders = []
+
+        for folder_path in sorted_folders:
+            h264_path = Path(folder_path) / 'h264'
+            if h264_path.exists():
+                try:
+                    if any(h264_path.iterdir()):
+                        priority_folders.append((folder_path, 1))  # Priority 1 = has h264
                         continue
+                except:
+                    pass
+            normal_folders.append((folder_path, 0))  # Priority 0 = normal
 
-                    # Skip if already in queue
-                    if path_str in self._queue_items_set:
+        self.pending_folders = priority_folders + normal_folders
+        self.pending_folders_index = 0
+        self.pending_folders_loaded = True
+
+        elapsed = time.time() - start_time
+        self.root.after(0, lambda n=len(self.pending_folders), t=elapsed: self.log(
+            f"Found {n} folders with MP4 files in {t:.1f}s", "success"))
+
+    def _get_folder_files(self, folder_path: str) -> list:
+        """
+        Lista arquivos MP4 de uma pasta específica, em ordem alfabética.
+        Retorna lista de (path, size) para arquivos elegíveis.
+        NÃO faz probe - apenas lista.
+        """
+        folder = Path(folder_path)
+        min_size_bytes = int(self.min_size_gb.get() * 1024**3)
+        files = []
+
+        try:
+            for f in sorted(folder.iterdir(), key=lambda x: str(x).lower()):
+                if not f.is_file():
+                    continue
+                if not f.suffix.lower() == '.mp4':
+                    continue
+                if f.name.startswith('._') or f.name.upper().startswith('DJI_'):
+                    continue
+
+                path_str = str(f)
+
+                # Skip if already in queue
+                if path_str in self._queue_items_set:
+                    continue
+
+                # Skip if already processed
+                if self.is_processed(f):
+                    continue
+
+                # Check size
+                try:
+                    size = f.stat().st_size
+                    if size < min_size_bytes:
                         continue
+                    # Cloud placeholder check (< 100KB = likely cloud)
+                    is_local = size > 100000
+                except:
+                    continue
 
-                    # Skip if already processed (use manifest - fast lookup)
-                    if self.is_processed(f):
-                        continue
+                files.append({
+                    'path': f,
+                    'size': size,
+                    'folder': folder_path,
+                    'is_local': is_local,
+                    'status': 'READY_LOCAL' if is_local else 'QUEUED_REMOTE',
+                    'retry_at': 0
+                })
+        except Exception as e:
+            pass
 
-                    # FAST check: file size only (no subprocess!)
-                    try:
-                        size = f.stat().st_size
-                        if size < min_size_bytes:
-                            continue
-                        if size < 100000:  # < 100KB = likely cloud placeholder
-                            continue
-                    except:
-                        continue
+        return files
 
-                    # Check if h264 folder exists locally (means this folder has work in progress)
-                    folder = f.parent
-                    h264_folder = folder / 'h264'
-                    has_h264_local = h264_folder.exists() and any(h264_folder.iterdir()) if h264_folder.exists() else False
+    def _refill_queue_incremental(self) -> int:
+        """
+        Adiciona arquivos à fila até atingir QUEUE_TARGET_SIZE.
+        Estratégia incremental:
+        1. Primeiro, completa pastas já ativas (folder_tracker)
+        2. Depois, abre novas pastas da lista (pending_folders)
+        Retorna número de arquivos adicionados.
+        """
+        with self.active_queue_lock:
+            current_size = len(self.active_queue)
+            if current_size >= self.QUEUE_TARGET_SIZE:
+                return 0
 
-                    candidates.append((f, size, str(folder), has_h264_local))
+            needed = self.QUEUE_TARGET_SIZE - current_size
 
-        # Sort candidates:
-        # 1. Folders with h264 already local (complete these first!)
-        # 2. Alphabetical by folder name
-        # 3. Alphabetical by file name
-        candidates.sort(key=lambda x: (
-            not x[3],  # has_h264_local=True comes first (False=0, True=1, so "not" inverts)
-            x[2].lower(),  # folder path alphabetical
-            str(x[0]).lower()  # file path alphabetical
-        ))
-
-        # Add to queue
         added = 0
-        for path, size, folder, has_h264 in candidates:
-            path_str = str(path)
-            if path_str not in self._queue_items_set:
-                priority = 1 if has_h264 else 0  # Higher priority for h264 folders
-                self.ready_queue.put((path, size, priority))
-                self._queue_items_set.add(path_str)
+
+        # === FASE 1: Completar pastas já ativas ===
+        with self.folder_tracker_lock:
+            active_folders = [(path, info) for path, info in self.folder_tracker.items()
+                             if info['status'] in ('ACTIVE', 'COMPLETING')]
+            # Sort by priority (completing first) then by how close to completion
+            active_folders.sort(key=lambda x: (
+                0 if x[1]['status'] == 'COMPLETING' else 1,
+                x[1]['total_known'] - x[1]['done']  # Fewer remaining = higher priority
+            ))
+
+        for folder_path, info in active_folders:
+            if added >= needed:
+                break
+
+            # Get more files from this folder
+            files = self._get_folder_files(folder_path)
+            for file_info in files:
+                if added >= needed:
+                    break
+
+                path_str = str(file_info['path'])
+                if path_str in self._queue_items_set:
+                    continue
+
+                with self.active_queue_lock:
+                    self.active_queue.append(file_info)
+                    self._queue_items_set.add(path_str)
+
+                with self.folder_tracker_lock:
+                    if folder_path in self.folder_tracker:
+                        self.folder_tracker[folder_path]['selected'] += 1
+
                 added += 1
+
+        # === FASE 2: Abrir novas pastas se ainda precisar ===
+        while added < needed and self.pending_folders_index < len(self.pending_folders):
+            folder_path, priority = self.pending_folders[self.pending_folders_index]
+
+            # Skip if already tracked
+            with self.folder_tracker_lock:
+                if folder_path in self.folder_tracker:
+                    self.pending_folders_index += 1
+                    continue
+
+            # Get files from this new folder
+            files = self._get_folder_files(folder_path)
+
+            if not files:
+                # Pasta vazia ou todos processados
+                self.pending_folders_index += 1
+                continue
+
+            # Initialize folder tracker
+            with self.folder_tracker_lock:
+                self.folder_tracker[folder_path] = {
+                    'status': 'ACTIVE',
+                    'total_known': len(files),
+                    'selected': 0,
+                    'done': 0,
+                    'priority': priority
+                }
+
+            # Add files to queue
+            for file_info in files:
+                if added >= needed:
+                    break
+
+                path_str = str(file_info['path'])
+                if path_str in self._queue_items_set:
+                    continue
+
+                with self.active_queue_lock:
+                    self.active_queue.append(file_info)
+                    self._queue_items_set.add(path_str)
+
+                with self.folder_tracker_lock:
+                    self.folder_tracker[folder_path]['selected'] += 1
+
+                added += 1
+
+            self.pending_folders_index += 1
+
+        return added
+
+    def _get_next_transcode_item(self) -> dict:
+        """
+        Retorna próximo item pronto para transcodificar.
+        Prioridade:
+        1. READY_LOCAL de pastas COMPLETING
+        2. READY_LOCAL de pastas ACTIVE
+        3. Nada (espera downloads)
+        """
+        with self.active_queue_lock:
+            # Primeiro: itens de pastas que estão quase prontas
+            for i, item in enumerate(self.active_queue):
+                if item['status'] == 'READY_LOCAL':
+                    # Verificar se pasta está em COMPLETING
+                    with self.folder_tracker_lock:
+                        folder_info = self.folder_tracker.get(item['folder'], {})
+                        if folder_info.get('status') == 'COMPLETING':
+                            item = self.active_queue.pop(i)
+                            self._queue_items_set.discard(str(item['path']))
+                            return item
+
+            # Segundo: qualquer READY_LOCAL
+            for i, item in enumerate(self.active_queue):
+                if item['status'] == 'READY_LOCAL':
+                    item = self.active_queue.pop(i)
+                    self._queue_items_set.discard(str(item['path']))
+                    return item
+
+        return None
+
+    def _mark_item_done(self, file_path: Path):
+        """Marca item como concluído e atualiza folder tracker."""
+        folder_path = str(file_path.parent)
+
+        with self.folder_tracker_lock:
+            if folder_path in self.folder_tracker:
+                self.folder_tracker[folder_path]['done'] += 1
+                info = self.folder_tracker[folder_path]
+
+                # Verificar se pasta está completa
+                if info['done'] >= info['total_known']:
+                    self.folder_tracker[folder_path]['status'] = 'DONE'
+                    self.root.after(0, lambda p=folder_path: self.log(
+                        f"📁 FOLDER COMPLETE: {Path(p).name}", "success"))
+                elif info['done'] >= info['total_known'] * 0.8:
+                    # 80% completa - marcar como COMPLETING
+                    self.folder_tracker[folder_path]['status'] = 'COMPLETING'
+
+    def _trigger_downloads_incremental(self, max_downloads: int) -> int:
+        """
+        Dispara downloads para itens QUEUED_REMOTE na fila.
+        NÃO faz varredura global - só olha a fila ativa.
+        """
+        if self.offline_mode.get():
+            return 0
+
+        triggered = 0
+
+        with self.active_queue_lock:
+            for item in self.active_queue:
+                if triggered >= max_downloads:
+                    break
+
+                if item['status'] == 'QUEUED_REMOTE':
+                    # Verificar se pode iniciar download
+                    file_path = item['path']
+                    if self._can_trigger_download(item['size']):
+                        self._trigger_dropbox_download(file_path)
+                        item['status'] = 'DOWNLOADING'
+                        triggered += 1
+
+        return triggered
+
+    def _check_download_completion(self):
+        """
+        Verifica itens em DOWNLOADING e atualiza para READY_LOCAL se prontos.
+        """
+        with self.active_queue_lock:
+            for item in self.active_queue:
+                if item['status'] == 'DOWNLOADING':
+                    file_path = item['path']
+                    if self._is_likely_local_file_fast(file_path):
+                        item['status'] = 'READY_LOCAL'
+                        self._remove_from_pending_downloads(str(file_path))
+                elif item['status'] == 'FAILED_RETRY':
+                    # Verificar se pode tentar novamente
+                    if time.time() >= item.get('retry_at', 0):
+                        item['status'] = 'QUEUED_REMOTE'
+
+    def _get_queue_stats(self) -> dict:
+        """Retorna estatísticas da fila."""
+        with self.active_queue_lock:
+            stats = {
+                'total': len(self.active_queue),
+                'ready_local': sum(1 for i in self.active_queue if i['status'] == 'READY_LOCAL'),
+                'downloading': sum(1 for i in self.active_queue if i['status'] == 'DOWNLOADING'),
+                'queued_remote': sum(1 for i in self.active_queue if i['status'] == 'QUEUED_REMOTE'),
+                'failed_retry': sum(1 for i in self.active_queue if i['status'] == 'FAILED_RETRY'),
+            }
+        with self.folder_tracker_lock:
+            stats['active_folders'] = sum(1 for f in self.folder_tracker.values()
+                                          if f['status'] in ('ACTIVE', 'COMPLETING'))
+            stats['completing_folders'] = sum(1 for f in self.folder_tracker.values()
+                                             if f['status'] == 'COMPLETING')
+            stats['done_folders'] = sum(1 for f in self.folder_tracker.values()
+                                        if f['status'] == 'DONE')
+        return stats
+
+    def warm_start_local_queue(self):
+        """
+        v2.0: Startup rápido sem mass-probe.
+        1. Tenta carregar snapshot
+        2. Se não, carrega lista de pastas (não arquivos)
+        3. Preenche fila com primeiros 100 arquivos
+        """
+        self.root.after(0, lambda: self.log("=" * 60, "info"))
+        self.root.after(0, lambda: self.log("QUEUE-FIRST STARTUP v2.0", "info"))
+        self.root.after(0, lambda: self.log("Target queue: 100 files | Zero mass-probe", "info"))
+
+        start_time = time.time()
+
+        # Carregar lista de pastas (rápido - não lista arquivos)
+        self._load_pending_folders()
+
+        # Preencher fila até o target
+        added = self._refill_queue_incremental()
 
         elapsed = time.time() - start_time
 
-        if added > 0:
-            self.root.after(0, lambda n=added, t=elapsed: self.log(
-                f"WARM START COMPLETE: {n} local files queued in {t:.1f}s", "success"))
-            self.local_eligible_exhausted = False
-        else:
-            self.root.after(0, lambda t=elapsed: self.log(
-                f"No local files found ({t:.1f}s). Will check cloud files...", "info"))
-            self.local_eligible_exhausted = True
+        stats = self._get_queue_stats()
+        self.root.after(0, lambda s=stats, t=elapsed: self.log(
+            f"Queue ready: {s['ready_local']} local, {s['queued_remote']} cloud | {t:.1f}s", "success"))
 
-        # Save snapshot for next restart
-        self.save_queue_snapshot()
+        # Transferir para ready_queue (compatibilidade com sistema existente)
+        self._sync_to_ready_queue()
 
         self.root.after(0, lambda: self.log("=" * 60, "info"))
 
+    def _sync_to_ready_queue(self):
+        """
+        Sincroniza active_queue com ready_queue para compatibilidade.
+        Só adiciona itens READY_LOCAL.
+        """
+        with self.active_queue_lock:
+            for item in self.active_queue:
+                if item['status'] == 'READY_LOCAL':
+                    path = item['path']
+                    path_str = str(path)
+                    # Usar o ready_queue existente para compatibilidade
+                    folder = item['folder']
+                    h264_folder = Path(folder) / 'h264'
+                    has_h264 = h264_folder.exists()
+                    priority = 1 if has_h264 else 0
+                    self.ready_queue.put((path, item['size'], priority))
+
     def ready_queue_worker(self):
         """
-        NEW ARCHITECTURE: 3-Phase Queue Worker
+        v2.0: Queue-first, folder-complete, zero mass-probe
 
-        Phase 0 (startup): warm_start_local_queue() already ran - queue is populated
-        Phase 1 (this): Monitor queue, rescan for new local files periodically
-        Phase 2: Only when queue < 50 AND local_eligible_exhausted, trigger downloads
-
-        NO PROBING HERE - probing happens at transcode time in process_file()
+        Mantém a fila com ~100 arquivos sem varredura global.
+        Só adiciona mais quando cai para 99 ou menos.
+        Prioriza completar pastas antes de começar outras.
         """
         last_log_time = 0
         last_snapshot_time = time.time()
-        last_local_rescan = time.time()
-        LOCAL_RESCAN_INTERVAL = 60  # Rescan for new local files every 60 seconds
-        SNAPSHOT_INTERVAL = 30  # Save queue snapshot every 30 seconds
+        SNAPSHOT_INTERVAL = 60  # Save every 60 seconds
 
         while self.ready_queue_worker_running and self.running:
             try:
-                current_queue_size = self.ready_queue.qsize()
                 now = time.time()
 
-                # === PHASE 1: Monitor and maintain queue ===
+                # === Verificar downloads em progresso ===
+                self._check_download_completion()
 
-                # Periodically rescan for NEW local files (fast, no probe)
-                # SKIP if queue is large - no need to rescan with 1000+ files
-                if current_queue_size < 1000 and now - last_local_rescan >= LOCAL_RESCAN_INTERVAL:
-                    new_local = self._quick_scan_new_local_files()
-                    if new_local > 0:
-                        self.local_eligible_exhausted = False
-                        self.root.after(0, lambda n=new_local: self.log(
-                            f"Found {n} new local files", "info"))
-                    last_local_rescan = now
+                # Sincronizar novos READY_LOCAL para ready_queue
+                self._sync_to_ready_queue()
 
-                # Periodically save queue snapshot for fast restart
-                # SKIP if queue is huge (>5000) - saving 71k files is slow
-                if current_queue_size < 5000 and now - last_snapshot_time >= SNAPSHOT_INTERVAL:
+                # === Refill: só quando fila cai abaixo do threshold ===
+                current_ready = self.ready_queue.qsize()
+
+                if current_ready < self.QUEUE_REFILL_THRESHOLD:
+                    # Primeiro, tentar refill incremental (pastas já conhecidas + novas)
+                    added = self._refill_queue_incremental()
+
+                    if added > 0:
+                        self._sync_to_ready_queue()
+                        self.root.after(0, lambda n=added: self.log(
+                            f"Refill: +{n} files added to queue", "info"))
+
+                    # Se ainda não tem arquivos locais suficientes, disparar downloads
+                    stats = self._get_queue_stats()
+                    if stats['ready_local'] < 10 and stats['queued_remote'] > 0:
+                        max_downloads = min(10, self.max_pending_downloads)
+                        triggered = self._trigger_downloads_incremental(max_downloads)
+                        if triggered > 0:
+                            self.root.after(0, lambda n=triggered: self.log(
+                                f"Triggered {n} cloud downloads", "info"))
+
+                # === Log status periodicamente ===
+                if now - last_log_time >= 30:
+                    stats = self._get_queue_stats()
+                    self.root.after(0, lambda s=stats: self.log(
+                        f"Queue: {s['ready_local']} local | {s['downloading']} downloading | "
+                        f"{s['queued_remote']} remote | Folders: {s['active_folders']} active, "
+                        f"{s['completing_folders']} completing", "info"))
+                    last_log_time = now
+
+                # === Salvar snapshot periodicamente ===
+                if now - last_snapshot_time >= SNAPSHOT_INTERVAL:
                     self.save_queue_snapshot()
                     last_snapshot_time = now
 
-                # === PHASE 2: Only probe/download when queue needs it ===
-                if current_queue_size < 50:
-                    if not self.local_eligible_exhausted:
-                        # Try to find more local files first (full rescan)
-                        self.root.after(0, lambda q=current_queue_size: self.log(
-                            f"Queue low ({q} files). Rescanning local...", "info"))
-                        before = current_queue_size
-                        self._quick_scan_new_local_files()
-                        after = self.ready_queue.qsize()
-
-                        if after <= before:
-                            # No new local files found
-                            self.local_eligible_exhausted = True
-                            self.root.after(0, lambda: self.log(
-                                "Local files exhausted. Will probe cloud files...", "info"))
-
-                    elif not self.offline_mode.get():
-                        # Local exhausted AND queue < 50 - now we can probe/download
-                        downloads_needed = max(0, 50 - current_queue_size)
-                        if downloads_needed > 0:
-                            triggered = self._probe_and_download_cloud_files(downloads_needed)
-                            if triggered > 0:
-                                self.root.after(0, lambda n=triggered: self.log(
-                                    f"Triggered {n} cloud downloads", "info"))
-
-                # Log queue status periodically
-                if now - last_log_time >= 30:
-                    queue_size = self.ready_queue.qsize()
-                    status = "LOCAL MODE" if not self.local_eligible_exhausted else "CLOUD MODE"
-                    self.root.after(0, lambda qs=queue_size, s=status: self.log(
-                        f"Queue: {qs} files ready [{s}]", "info"))
-                    last_log_time = now
-
-                # Wait before next cycle (longer if queue is healthy)
-                wait_time = 2 if current_queue_size < 20 else 10
+                # Esperar antes do próximo ciclo
+                current_ready = self.ready_queue.qsize()
+                wait_time = 2 if current_ready < 20 else 5
                 for _ in range(wait_time * 2):
                     if not self.running or not self.ready_queue_worker_running:
                         break
@@ -4332,6 +4664,9 @@ class TranscoderGUI:
             self.write_success_log(h264_backup_path, final_path, input_size, output_size)
             self.write_h265_done_log(output_folder, input_path.name, input_size, output_size)
 
+            # v2.0: Atualizar folder_tracker
+            self._mark_item_done(input_path)
+
             if self.auto_delete_h264.get():
                 self._schedule_h264_deletion(h264_backup_path, final_path)
 
@@ -4341,6 +4676,8 @@ class TranscoderGUI:
             self.mark_processed(input_path, str(output_path), "done", input_size, output_size,
                                duration=duration, transcode_time=transcode_time)
             self.write_success_log(input_path, output_path, input_size, output_size)
+            # v2.0: Atualizar folder_tracker mesmo em caso de erro de reorganização
+            self._mark_item_done(input_path)
 
     def probe_video(self, path: Path) -> dict:
         """Get video info."""
