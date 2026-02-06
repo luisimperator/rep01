@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.8.0"
+VERSION = "1.8.1"
 
 import socket
 import subprocess
@@ -2309,11 +2309,6 @@ class TranscoderGUI:
                 # Skip download triggering in offline mode
                 offline_mode = self.offline_mode.get()
 
-                # Smart download: only download when ready queue needs more files
-                # Target minimum of 50 files in ready queue
-                current_queue_size = self.ready_queue.qsize()
-                downloads_needed = max(0, 50 - current_queue_size) if not offline_mode else 0
-
                 # Find video files from ALL watch folders
                 video_files = []
                 for folder in self.get_watch_folders():
@@ -2332,9 +2327,15 @@ class TranscoderGUI:
                 downloads_triggered = 0
                 min_size_gb = self.min_size_gb.get()
 
-                # Process files in parallel batches
+                # TWO-PASS APPROACH:
+                # Pass 1: Check all files and collect results (don't download yet)
+                # Pass 2: Add local files to queue, then download only if needed
+
+                all_results = []
+                cloud_files_pending = []
+
+                # Pass 1: Check all files in parallel
                 with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
-                    # Submit all files for checking
                     future_to_path = {
                         executor.submit(self._check_single_file_for_queue, vp, min_size_gb): vp
                         for vp in video_files
@@ -2346,40 +2347,53 @@ class TranscoderGUI:
 
                         try:
                             result = future.result()
-                            video_path = result["path"]
-                            size = result["size"]
-                            status = result["status"]
-
-                            if status == "ready":
-                                # Add to ready queue
-                                self.ready_queue.put((video_path, size))
-                                files_queued += 1
-
-                            elif status == "cloud" and result.get("needs_download"):
-                                # Trigger download if needed
-                                if downloads_triggered < downloads_needed:
-                                    self._trigger_dropbox_download(video_path)
-                                    downloads_triggered += 1
-
-                            elif status == "already_hevc":
-                                self.mark_processed(video_path, "", "skipped_hevc", size, 0)
-                                files_skipped += 1
-
-                            elif status == "low_bitrate":
-                                self.mark_processed(video_path, "", "skipped_lowbitrate", size, 0)
-                                files_skipped += 1
-
-                            elif status == "output_exists":
-                                output_size = result.get("output_size", 0)
-                                output_path = video_path.parent / 'h265' / video_path.name
-                                self.mark_processed(video_path, str(output_path), "skipped_exists", size, output_size)
-                                files_skipped += 1
-
-                            elif status in ("already_processed", "too_small", "not_local", "probe_failed"):
-                                files_skipped += 1
-
+                            all_results.append(result)
                         except Exception:
-                            pass  # Individual file error, continue with others
+                            pass
+
+                # Pass 2: Process results - LOCAL FILES FIRST
+                for result in all_results:
+                    video_path = result["path"]
+                    size = result["size"]
+                    status = result["status"]
+
+                    if status == "ready":
+                        # Local file ready - add to queue immediately
+                        self.ready_queue.put((video_path, size))
+                        files_queued += 1
+
+                    elif status == "cloud" and result.get("needs_download"):
+                        # Save cloud files for later (after we know queue size)
+                        cloud_files_pending.append(video_path)
+
+                    elif status == "already_hevc":
+                        self.mark_processed(video_path, "", "skipped_hevc", size, 0)
+                        files_skipped += 1
+
+                    elif status == "low_bitrate":
+                        self.mark_processed(video_path, "", "skipped_lowbitrate", size, 0)
+                        files_skipped += 1
+
+                    elif status == "output_exists":
+                        output_size = result.get("output_size", 0)
+                        output_path = video_path.parent / 'h265' / video_path.name
+                        self.mark_processed(video_path, str(output_path), "skipped_exists", size, output_size)
+                        files_skipped += 1
+
+                    elif status in ("already_processed", "too_small", "not_local", "probe_failed"):
+                        files_skipped += 1
+
+                # Pass 3: NOW check if we need downloads (after adding all local files)
+                if cloud_files_pending and not offline_mode:
+                    current_queue_size = self.ready_queue.qsize()
+                    downloads_needed = max(0, 50 - current_queue_size)
+
+                    if downloads_needed > 0:
+                        # Sort by path for consistency, take only what we need
+                        cloud_files_pending.sort(key=lambda p: str(p))
+                        for cloud_path in cloud_files_pending[:downloads_needed]:
+                            self._trigger_dropbox_download(cloud_path)
+                            downloads_triggered += 1
 
                 # Accumulate stats for periodic logging
                 total_queued_since_log += files_queued
