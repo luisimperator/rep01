@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "1.9.0"
+VERSION = "1.9.1"
 
 import socket
 import subprocess
@@ -2038,28 +2038,36 @@ class TranscoderGUI:
             self.stop_btn.config(state=tk.NORMAL)
             self.progress_var.set(0)
 
-            # === NEW: INSTANT START - Load queue first, THEN start workers ===
-            # Try to load queue from snapshot (instant restart)
-            if not self.load_queue_snapshot():
-                # No snapshot - run warm start (fast local scan, no probe)
-                self.warm_start_local_queue()
+            # Start initialization in background thread to not block UI
+            threading.Thread(target=self._startup_sequence, daemon=True).start()
 
-            queue_size = self.ready_queue.qsize()
-            self.log(f"Ready queue: {queue_size} files ready to transcode", "success")
+    def _startup_sequence(self):
+        """Background startup: load queue then start workers."""
+        # === PHASE 0: Load queue (instant if snapshot exists) ===
+        self.root.after(0, lambda: self.log("Initializing...", "info"))
 
-            # Start the ready queue worker (monitors queue, triggers downloads when needed)
-            self.ready_queue_worker_running = True
-            self.ready_queue_worker_thread = threading.Thread(target=self.ready_queue_worker, daemon=True)
-            self.ready_queue_worker_thread.start()
+        # Try to load queue from snapshot (instant restart)
+        if not self.load_queue_snapshot():
+            # No snapshot - run warm start (fast local scan, no probe)
+            self.warm_start_local_queue()
 
-            # Start the main processing loop (transcodes from queue)
-            self.worker_thread = threading.Thread(target=self.process_loop, daemon=True)
-            self.worker_thread.start()
+        queue_size = self.ready_queue.qsize()
+        self.root.after(0, lambda q=queue_size: self.log(
+            f"Ready queue: {q} files ready to transcode", "success"))
 
-            if queue_size > 0:
-                self.log("Starting transcoding immediately!", "success")
-            else:
-                self.log("Queue empty - will scan for files...", "info")
+        # Start the ready queue worker (monitors queue, triggers downloads when needed)
+        self.ready_queue_worker_running = True
+        self.ready_queue_worker_thread = threading.Thread(target=self.ready_queue_worker, daemon=True)
+        self.ready_queue_worker_thread.start()
+
+        # Start the main processing loop (transcodes from queue)
+        self.worker_thread = threading.Thread(target=self.process_loop, daemon=True)
+        self.worker_thread.start()
+
+        if queue_size > 0:
+            self.root.after(0, lambda: self.log("Starting transcoding immediately!", "success"))
+        else:
+            self.root.after(0, lambda: self.log("Queue empty - scanning for files...", "info"))
 
     def toggle_pause(self):
         """Pause or resume encoding."""
@@ -2382,9 +2390,23 @@ class TranscoderGUI:
         except Exception as e:
             return False
 
+    def _is_likely_local_file_fast(self, file_path: Path) -> bool:
+        """
+        FAST check if file is likely local (not cloud-only).
+        Uses only file size check - no subprocess calls.
+        Returns True if file is likely local and ready.
+        """
+        try:
+            size = file_path.stat().st_size
+            # Cloud placeholders are tiny (< 1KB typically)
+            # Real video files are much larger
+            return size > 100000  # > 100KB = likely local
+        except:
+            return False
+
     def warm_start_local_queue(self):
         """
-        PHASE 0: Fast local-only scan. NO PROBE, NO DOWNLOAD.
+        PHASE 0: Fast local-only scan. NO PROBE, NO DOWNLOAD, NO SUBPROCESS.
         Builds a huge ready queue instantly from local files.
         Priority: complete h264 folders first, then alphabetical by folder.
         """
@@ -2397,10 +2419,21 @@ class TranscoderGUI:
 
         # Collect all candidate files with their folder info
         candidates = []  # List of (path, size, folder_path, has_h264_folder)
+        files_scanned = 0
+        last_progress_log = time.time()
 
         for watch_folder in self.get_watch_folders():
             for ext in ['.mp4', '.MP4']:
                 for f in watch_folder.rglob(f'*{ext}'):
+                    files_scanned += 1
+
+                    # Log progress every 2 seconds
+                    now = time.time()
+                    if now - last_progress_log >= 2:
+                        self.root.after(0, lambda n=files_scanned, c=len(candidates): self.log(
+                            f"Scanning... {n} files checked, {c} candidates", "info"))
+                        last_progress_log = now
+
                     # Skip h264/h265 folders, macOS metadata, DJI files
                     path_str = str(f)
                     if ('h265' in path_str.lower() or 'h264' in path_str.lower()
@@ -2415,16 +2448,12 @@ class TranscoderGUI:
                     if self.is_processed(f):
                         continue
 
-                    # Check if cloud-only (safe check, no download trigger)
-                    if self._is_cloud_only_file(f):
-                        continue  # Skip cloud files for now
-
-                    # Check file size
+                    # FAST check: file size only (no subprocess!)
                     try:
                         size = f.stat().st_size
                         if size < min_size_bytes:
                             continue
-                        if size < 10000:  # Placeholder
+                        if size < 100000:  # < 100KB = likely cloud placeholder
                             continue
                     except:
                         continue
@@ -2556,7 +2585,7 @@ class TranscoderGUI:
     def _quick_scan_new_local_files(self) -> int:
         """
         Quick scan for NEW local files not already in queue.
-        NO PROBING - just checks: exists, local, not processed.
+        NO PROBING, NO SUBPROCESS - just checks: exists, size > 100KB, not processed.
         Returns number of files added.
         """
         min_size_bytes = int(self.min_size_gb.get() * 1024**3)
@@ -2580,14 +2609,12 @@ class TranscoderGUI:
                     if self.is_processed(f):
                         continue
 
-                    # Skip if cloud-only (safe check)
-                    if self._is_cloud_only_file(f):
-                        continue
-
-                    # Check size
+                    # FAST size check (no subprocess!) - files < 100KB are likely cloud
                     try:
                         size = f.stat().st_size
-                        if size < min_size_bytes or size < 10000:
+                        if size < 100000:  # < 100KB = likely cloud placeholder
+                            continue
+                        if size < min_size_bytes:
                             continue
                     except:
                         continue
