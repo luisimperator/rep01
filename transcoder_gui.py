@@ -2821,14 +2821,28 @@ class TranscoderGUI:
 
     def warm_start_local_queue(self):
         """
-        v2.0: Startup rápido sem mass-probe.
-        1. Tenta carregar snapshot
-        2. Se não, carrega lista de pastas (não arquivos)
+        v2.1: Startup rápido sem mass-probe.
+        1. LIMPA ready_queue antiga
+        2. Carrega lista de pastas (não arquivos)
         3. Preenche fila com primeiros 100 arquivos
         """
         self.root.after(0, lambda: self.log("=" * 60, "info"))
-        self.root.after(0, lambda: self.log("QUEUE-FIRST STARTUP v2.0", "info"))
+        self.root.after(0, lambda: self.log("QUEUE-FIRST STARTUP v2.1", "info"))
         self.root.after(0, lambda: self.log("Target queue: 100 files | Zero mass-probe", "info"))
+
+        # v2.1: LIMPAR ready_queue antiga para garantir fila pequena
+        cleared = 0
+        while not self.ready_queue.empty():
+            try:
+                self.ready_queue.get_nowait()
+                cleared += 1
+            except:
+                break
+        if cleared > 0:
+            self.root.after(0, lambda n=cleared: self.log(f"Cleared {n} items from old queue", "info"))
+
+        # Limpar também o set de tracking
+        self._queue_items_set.clear()
 
         start_time = time.time()
 
@@ -2851,20 +2865,59 @@ class TranscoderGUI:
 
     def _sync_to_ready_queue(self):
         """
-        Sincroniza active_queue com ready_queue para compatibilidade.
-        Só adiciona itens READY_LOCAL.
+        v2.1: Sincroniza active_queue com ready_queue para compatibilidade.
+        LIMITA a ready_queue ao QUEUE_TARGET_SIZE.
+        Só adiciona itens READY_LOCAL que não estão já na fila.
         """
+        # Primeiro, verificar tamanho atual da ready_queue
+        current_ready_size = self.ready_queue.qsize()
+
+        # Se ready_queue já está no limite, não adicionar mais
+        if current_ready_size >= self.QUEUE_TARGET_SIZE:
+            return
+
+        # Criar set de paths já na ready_queue para evitar duplicatas
+        # (não podemos iterar a queue sem removê-la, então usamos _queue_items_set)
+        ready_paths = set()
+
+        # Extrair e recolocar para ver o que já está lá
+        temp_items = []
+        while not self.ready_queue.empty():
+            try:
+                item = self.ready_queue.get_nowait()
+                temp_items.append(item)
+                ready_paths.add(str(item[0]))
+            except:
+                break
+
+        # Recolocar os itens
+        for item in temp_items:
+            self.ready_queue.put(item)
+
+        # Adicionar novos READY_LOCAL que não estão já na fila
+        added = 0
+        max_to_add = self.QUEUE_TARGET_SIZE - len(temp_items)
+
         with self.active_queue_lock:
             for item in self.active_queue:
+                if added >= max_to_add:
+                    break
+
                 if item['status'] == 'READY_LOCAL':
                     path = item['path']
                     path_str = str(path)
-                    # Usar o ready_queue existente para compatibilidade
+
+                    # Skip if already in ready_queue
+                    if path_str in ready_paths:
+                        continue
+
                     folder = item['folder']
                     h264_folder = Path(folder) / 'h264'
                     has_h264 = h264_folder.exists()
                     priority = 1 if has_h264 else 0
                     self.ready_queue.put((path, item['size'], priority))
+                    ready_paths.add(path_str)
+                    added += 1
 
     def ready_queue_worker(self):
         """
@@ -3000,96 +3053,21 @@ class TranscoderGUI:
 
     def _quick_scan_new_local_files(self) -> int:
         """
-        Quick scan for NEW local files not already in queue.
-        NO PROBING, NO SUBPROCESS - just checks: exists, size > 100KB, not processed.
-        Returns number of files added.
+        DEPRECATED in v2.1 - replaced by _refill_queue_incremental()
+        Kept for compatibility but does nothing.
         """
-        min_size_bytes = int(self.min_size_gb.get() * 1024**3)
-        added = 0
-
-        for watch_folder in self.get_watch_folders():
-            for ext in ['.mp4', '.MP4']:
-                for f in watch_folder.rglob(f'*{ext}'):
-                    path_str = str(f)
-
-                    # Skip if already in queue
-                    if path_str in self._queue_items_set:
-                        continue
-
-                    # Skip h264/h265 folders, macOS metadata, DJI
-                    if ('h265' in path_str.lower() or 'h264' in path_str.lower()
-                        or f.name.startswith('._') or f.name.upper().startswith('DJI_')):
-                        continue
-
-                    # Skip if already processed
-                    if self.is_processed(f):
-                        continue
-
-                    # FAST size check (no subprocess!) - files < 100KB are likely cloud
-                    try:
-                        size = f.stat().st_size
-                        if size < 100000:  # < 100KB = likely cloud placeholder
-                            continue
-                        if size < min_size_bytes:
-                            continue
-                    except:
-                        continue
-
-                    # Add to queue with folder priority
-                    folder = f.parent
-                    h264_folder = folder / 'h264'
-                    has_h264 = h264_folder.exists() and any(h264_folder.iterdir()) if h264_folder.exists() else False
-                    priority = 1 if has_h264 else 0
-
-                    self.ready_queue.put((f, size, priority))
-                    self._queue_items_set.add(path_str)
-                    added += 1
-
-        return added
+        # v2.1: Este método fazia rglob de todos os arquivos (70k+)
+        # Agora usamos _refill_queue_incremental() que é incremental por pasta
+        return 0
 
     def _probe_and_download_cloud_files(self, max_downloads: int) -> int:
         """
-        PHASE 2 ONLY: Probe cloud files and trigger downloads.
-        Only called when local_eligible_exhausted AND queue < 50.
-        Returns number of downloads triggered.
+        DEPRECATED in v2.1 - replaced by _trigger_downloads_incremental()
+        Kept for compatibility but does nothing.
         """
-        min_size_gb = self.min_size_gb.get()
-        triggered = 0
-        cloud_candidates = []
-
-        # Find cloud-only files
-        for watch_folder in self.get_watch_folders():
-            for ext in ['.mp4', '.MP4']:
-                for f in watch_folder.rglob(f'*{ext}'):
-                    if triggered >= max_downloads:
-                        break
-
-                    path_str = str(f)
-
-                    # Skip if in queue or processed
-                    if path_str in self._queue_items_set:
-                        continue
-                    if self.is_processed(f):
-                        continue
-
-                    # Skip h264/h265, metadata, DJI
-                    if ('h265' in path_str.lower() or 'h264' in path_str.lower()
-                        or f.name.startswith('._') or f.name.upper().startswith('DJI_')):
-                        continue
-
-                    # Must be cloud-only
-                    if not self._is_cloud_only_file(f):
-                        continue
-
-                    cloud_candidates.append(f)
-
-        # Sort alphabetically and trigger downloads
-        cloud_candidates.sort(key=lambda p: str(p).lower())
-        for cloud_path in cloud_candidates[:max_downloads]:
-            self._trigger_dropbox_download(cloud_path)
-            triggered += 1
-
-        return triggered
+        # v2.1: Este método fazia rglob de todos os arquivos (70k+)
+        # Agora usamos _trigger_downloads_incremental() que trabalha só com a fila ativa
+        return 0
 
     def process_loop(self):
         """Main processing loop with auto-recovery for daemon mode."""
