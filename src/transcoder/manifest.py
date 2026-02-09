@@ -21,43 +21,99 @@ from pathlib import Path
 from typing import Optional, Dict, List
 
 
+def _read_dropbox_info_json() -> Optional[Path]:
+    """
+    Read the official Dropbox config at %APPDATA%/Dropbox/info.json
+    to get the real Dropbox root path. Works on Windows, Mac and Linux.
+    Returns the root Dropbox folder path, or None if not found.
+    """
+    try:
+        if os.name == 'nt':
+            appdata = os.environ.get('APPDATA', '')
+            if not appdata:
+                appdata = str(Path.home() / 'AppData' / 'Roaming')
+            info_path = Path(appdata) / 'Dropbox' / 'info.json'
+        else:
+            info_path = Path.home() / '.dropbox' / 'info.json'
+
+        if info_path.exists():
+            with open(info_path, 'r', encoding='utf-8') as f:
+                info = json.load(f)
+            # Try personal first, then business
+            for account_type in ('personal', 'business'):
+                if account_type in info and 'path' in info[account_type]:
+                    dropbox_root = Path(info[account_type]['path'])
+                    if dropbox_root.exists():
+                        print(f"[Manifest] Dropbox root from info.json ({account_type}): {dropbox_root}")
+                        return dropbox_root
+    except Exception as e:
+        print(f"[Manifest] Could not read Dropbox info.json: {e}")
+    return None
+
+
 def find_dropbox_path() -> Optional[Path]:
     """
-    Auto-detect HeavyDrops Dropbox path by searching available drives.
-    Works for Heavy1-Heavy6 (D:) and Heavy7 (C:).
+    Auto-detect HeavyDrops Dropbox path.
+
+    Detection order:
+    1. Read %APPDATA%/Dropbox/info.json (official Dropbox config)
+    2. Scan available drives for "HeavyDrops Dropbox" folder
+    3. Fallback to common user-relative locations
     """
-    # The folder structure we're looking for
     dropbox_folder = "HeavyDrops Dropbox"
     app_subfolder = Path("HeavyDrops") / "App h265 Converter"
 
-    # Check common drives in order of preference
-    drives_to_check = ['D', 'C', 'E', 'F', 'G', 'H']
+    # === Method 1: Official Dropbox info.json ===
+    dropbox_root = _read_dropbox_info_json()
+    if dropbox_root:
+        # The info.json gives us the root (e.g. C:\Users\X\HeavyDrops Dropbox)
+        # Check if the app subfolder exists under it
+        full_path = dropbox_root / app_subfolder
+        if full_path.parent.exists():
+            print(f"[Manifest] Found Dropbox at: {full_path}")
+            return full_path
+        # Also check if root IS the "HeavyDrops Dropbox" folder directly
+        if dropbox_root.name == dropbox_folder:
+            full_path = dropbox_root / app_subfolder
+            if full_path.parent.exists():
+                print(f"[Manifest] Found Dropbox at: {full_path}")
+                return full_path
 
-    # Also check all available drive letters on Windows
+    # === Method 2: Scan drives (Windows) ===
     if os.name == 'nt':
         available_drives = []
         for letter in string.ascii_uppercase:
             drive_path = Path(f"{letter}:\\")
-            if drive_path.exists():
-                available_drives.append(letter)
-        # Prioritize D and C, then add others
-        drives_to_check = ['D', 'C'] + [d for d in available_drives if d not in ['D', 'C']]
+            try:
+                if drive_path.exists():
+                    available_drives.append(letter)
+            except OSError:
+                # Skip drives that raise errors (phantom drives, card readers)
+                continue
+        # Prioritize C first (most common), then others
+        drives_to_check = ['C'] + [d for d in available_drives if d != 'C']
+    else:
+        drives_to_check = []
 
     for drive in drives_to_check:
         dropbox_root = Path(f"{drive}:\\{dropbox_folder}")
-        if dropbox_root.exists():
-            full_path = dropbox_root / app_subfolder
-            print(f"[Manifest] Found Dropbox at: {full_path}")
-            return full_path
+        try:
+            if dropbox_root.exists():
+                full_path = dropbox_root / app_subfolder
+                print(f"[Manifest] Found Dropbox at: {full_path}")
+                return full_path
+        except OSError:
+            # Skip drives that raise errors (WinError 21: device not ready)
+            continue
 
-    # Fallback: try common locations
+    # === Method 3: Fallback to user-relative locations ===
     fallback_paths = [
-        Path(os.path.expanduser("~")) / "Dropbox" / "HeavyDrops" / "App h265 Converter",
-        Path(os.path.expanduser("~")) / dropbox_folder / "HeavyDrops" / "App h265 Converter",
+        Path.home() / dropbox_folder / "HeavyDrops" / "App h265 Converter",
+        Path.home() / "Dropbox" / "HeavyDrops" / "App h265 Converter",
     ]
 
     for path in fallback_paths:
-        if path.parent.exists():  # Check if HeavyDrops folder exists
+        if path.parent.exists():
             print(f"[Manifest] Found Dropbox at: {path}")
             return path
 
@@ -367,8 +423,8 @@ class GlobalManifestManager:
             if detected:
                 self.base_path = detected
             else:
-                # Last resort fallback
-                self.base_path = Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
+                # Last resort fallback - use user home instead of hardcoded drive
+                self.base_path = Path.home() / "HeavyDrops Dropbox" / "HeavyDrops" / "App h265 Converter"
                 print(f"[Manifest] WARNING: Could not detect Dropbox, using default: {self.base_path}")
 
         self.manifest_path = self.base_path / self.MANIFEST_FILENAME

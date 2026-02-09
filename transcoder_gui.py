@@ -44,22 +44,61 @@ except ImportError:
     import string as _string
 
     def find_dropbox_path():
-        """Auto-detect HeavyDrops Dropbox path by searching available drives."""
+        """Auto-detect HeavyDrops Dropbox path. Reads Dropbox info.json first, then scans drives."""
         import os
         dropbox_folder = "HeavyDrops Dropbox"
         app_subfolder = Path("HeavyDrops") / "App h265 Converter"
 
-        # Check common drives
-        drives_to_check = ['D', 'C', 'E', 'F', 'G', 'H']
+        # Method 1: Read official Dropbox info.json
+        try:
+            if os.name == 'nt':
+                appdata = os.environ.get('APPDATA', '')
+                if not appdata:
+                    appdata = str(Path.home() / 'AppData' / 'Roaming')
+                info_path = Path(appdata) / 'Dropbox' / 'info.json'
+            else:
+                info_path = Path.home() / '.dropbox' / 'info.json'
+
+            if info_path.exists():
+                with open(info_path, 'r', encoding='utf-8') as f:
+                    info = json.load(f)
+                for acct in ('personal', 'business'):
+                    if acct in info and 'path' in info[acct]:
+                        dropbox_root = Path(info[acct]['path'])
+                        if dropbox_root.exists():
+                            full_path = dropbox_root / app_subfolder
+                            if full_path.parent.exists():
+                                return full_path
+                            if dropbox_root.name == dropbox_folder:
+                                full_path = dropbox_root / app_subfolder
+                                if full_path.parent.exists():
+                                    return full_path
+        except Exception:
+            pass
+
+        # Method 2: Scan drives (skip phantom drives safely)
+        drives_to_check = ['C']
         if os.name == 'nt':
             for letter in _string.ascii_uppercase:
-                if Path(f"{letter}:\\").exists() and letter not in drives_to_check:
-                    drives_to_check.append(letter)
+                try:
+                    if Path(f"{letter}:\\").exists() and letter not in drives_to_check:
+                        drives_to_check.append(letter)
+                except OSError:
+                    continue
 
         for drive in drives_to_check:
-            dropbox_root = Path(f"{drive}:\\{dropbox_folder}")
-            if dropbox_root.exists():
-                return dropbox_root / app_subfolder
+            try:
+                dropbox_root = Path(f"{drive}:\\{dropbox_folder}")
+                if dropbox_root.exists():
+                    return dropbox_root / app_subfolder
+            except OSError:
+                continue
+
+        # Method 3: User home fallback
+        home_path = Path.home() / dropbox_folder / "HeavyDrops" / "App h265 Converter"
+        if home_path.parent.exists():
+            return home_path
+
         return None
 
     def get_pc_name():
@@ -79,7 +118,7 @@ except ImportError:
                 self.base_path = Path(base_dropbox_path)
             else:
                 detected = find_dropbox_path()
-                self.base_path = detected if detected else Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
+                self.base_path = detected if detected else Path.home() / "HeavyDrops Dropbox" / "HeavyDrops" / "App h265 Converter"
 
             self.manifest_path = self.base_path / self.MANIFEST_FILENAME
             self.pc_name = get_pc_name()
@@ -394,8 +433,8 @@ def get_dropbox_base_path() -> Path:
     detected = find_dropbox_path()
     if detected:
         return detected
-    # Fallback to D: drive (most common)
-    return Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
+    # Fallback to user home (never hardcode a drive letter)
+    return Path.home() / "HeavyDrops Dropbox" / "HeavyDrops" / "App h265 Converter"
 
 # Windows-specific for beep sound
 try:
@@ -1433,7 +1472,10 @@ class TranscoderGUI:
                 processed_at TEXT
             )
         """)
-        self.db_conn.commit()
+        try:
+            self.db_conn.commit()
+        except sqlite3.OperationalError:
+            pass  # DDL auto-committed, no active transaction
 
     def setup_cloud_manifest(self):
         """Initialize cloud manifest for persistent state in Dropbox."""
@@ -1444,10 +1486,15 @@ class TranscoderGUI:
         try:
             self.log(f"Dropbox base detectado: {self.dropbox_base}", "info")
 
-            # Check if path exists
-            if not self.dropbox_base.exists():
-                self.log(f"Criando pasta: {self.dropbox_base}", "info")
-                self.dropbox_base.mkdir(parents=True, exist_ok=True)
+            # Check if path exists - handle OSError (WinError 21: device not ready)
+            try:
+                if not self.dropbox_base.exists():
+                    self.log(f"Criando pasta: {self.dropbox_base}", "info")
+                    self.dropbox_base.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                self.log(f"Cannot access Dropbox path: {e} - cloud manifest disabled", "warning")
+                self.cloud_manifest = None
+                return
 
             self.cloud_manifest = ManifestManager(
                 base_dropbox_path=str(self.dropbox_base)
@@ -1866,13 +1913,16 @@ class TranscoderGUI:
                       duration: float = 0, transcode_time: float = 0):
         """Mark file as processed in local DB and cloud manifest."""
         # Save to local database
-        self.db_conn.execute("""
-            INSERT OR REPLACE INTO processed
-            (input_path, output_path, status, input_size, output_size, processed_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (str(input_path), output_path, status, input_size, output_size,
-              datetime.now().isoformat()))
-        self.db_conn.commit()
+        try:
+            self.db_conn.execute("""
+                INSERT OR REPLACE INTO processed
+                (input_path, output_path, status, input_size, output_size, processed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (str(input_path), output_path, status, input_size, output_size,
+                  datetime.now().isoformat()))
+            self.db_conn.commit()
+        except sqlite3.OperationalError:
+            pass  # Commit failed (no active transaction), data was already written
         self.load_stats()
 
         # Save to cloud manifest (survives SSD wipes)
@@ -1913,8 +1963,11 @@ class TranscoderGUI:
             return
 
         if messagebox.askyesno("Confirm", f"Reset {total} failed files for retry?"):
-            self.db_conn.execute("DELETE FROM processed WHERE status = 'error'")
-            self.db_conn.commit()
+            try:
+                self.db_conn.execute("DELETE FROM processed WHERE status = 'error'")
+                self.db_conn.commit()
+            except sqlite3.OperationalError:
+                pass
             # Also reset in cloud manifest
             if self.cloud_manifest:
                 self.cloud_manifest.reset_failed()
@@ -1923,8 +1976,11 @@ class TranscoderGUI:
     def clear_history(self):
         """Clear processing history."""
         if messagebox.askyesno("Confirm", "Clear all processing history?"):
-            self.db_conn.execute("DELETE FROM processed")
-            self.db_conn.commit()
+            try:
+                self.db_conn.execute("DELETE FROM processed")
+                self.db_conn.commit()
+            except sqlite3.OperationalError:
+                pass
             self.load_stats()
             self.log("History cleared", "warning")
 
@@ -3395,6 +3451,17 @@ class TranscoderGUI:
         Returns True if successful.
         """
         try:
+            # Verify the file and its parent directory actually exist
+            if not wav_path.exists():
+                self.root.after(0, lambda p=wav_path.name: self.log(
+                    f"WAV file not found (path invalid?): {p}", "warning"))
+                return False
+
+            if not wav_path.parent.exists():
+                self.root.after(0, lambda p=str(wav_path.parent): self.log(
+                    f"Parent folder not found: {p}", "warning"))
+                return False
+
             # Create wav backup folder and mp3 output path
             wav_folder = wav_path.parent / 'wav'
             wav_folder.mkdir(parents=True, exist_ok=True)
@@ -4463,6 +4530,11 @@ class TranscoderGUI:
         Process a file that was already probed (INSTANT - no wait, no probe).
         This is called for files from the probed_queue.
         """
+        if not probe_data:
+            self.root.after(0, lambda: self.log("Pre-probed data is None, falling back to full probe", "warning"))
+            self.process_file(input_path, queue_pos=queue_pos, queue_total=queue_total, file_size=file_size)
+            return
+
         queue_str = f"[{queue_pos}/{queue_total}] " if queue_pos else ""
         self.root.after(0, lambda q=queue_str: self.current_file_label.config(
             text=f"{q}Processing: {input_path.name}"))
@@ -4727,6 +4799,8 @@ class TranscoderGUI:
 
     def is_hevc(self, probe_data: dict) -> bool:
         """Check if video is HEVC."""
+        if not probe_data:
+            return False
         for stream in probe_data.get('streams', []):
             if stream.get('codec_type') == 'video':
                 codec = stream.get('codec_name', '').lower()
@@ -4738,6 +4812,8 @@ class TranscoderGUI:
         Get video bitrate in Mbps from probe data.
         Returns bitrate in Mbps (megabits per second).
         """
+        if not probe_data:
+            return 0
         try:
             # Try to get bitrate from format
             if 'format' in probe_data and 'bit_rate' in probe_data['format']:
@@ -4763,6 +4839,8 @@ class TranscoderGUI:
 
     def get_duration(self, probe_data: dict) -> float:
         """Get video duration in seconds from probe data."""
+        if not probe_data:
+            return 0
         try:
             # Try format duration first
             if 'format' in probe_data and 'duration' in probe_data['format']:
