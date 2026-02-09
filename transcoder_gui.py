@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "2.3.0"
+VERSION = "3.0.0"
 
 import socket
 import subprocess
@@ -497,8 +497,8 @@ class TranscoderGUI:
         # 2. Folder-complete: priorizar completar uma pasta antes de começar outra
         # 3. Zero mass-probe: varredura incremental por pasta, nunca global
 
-        self.QUEUE_TARGET_SIZE = 100  # Tamanho alvo da fila
-        self.QUEUE_REFILL_THRESHOLD = 99  # Refill quando cair abaixo disso
+        self.QUEUE_TARGET_SIZE = 500  # Raw file pool (pre-filter) - large to survive HEVC-heavy folders
+        self.QUEUE_REFILL_THRESHOLD = 400  # Refill when below this to keep probed_queue_worker fed
 
         # Estados dos itens na fila
         # READY_LOCAL, QUEUED_REMOTE, DOWNLOADING, FAILED_RETRY, TRANSCODING, DONE
@@ -533,7 +533,7 @@ class TranscoderGUI:
         # This eliminates the 30+ second gap between transcodes
         self.probed_queue = queue.Queue()  # Queue of (path, size, probe_data) tuples
         self.probed_queue_worker_running = False
-        self.PROBED_BUFFER_SIZE = 5  # Keep 5 files pre-probed
+        self.PROBED_BUFFER_SIZE = 100  # Keep 100 pre-probed files ready for transcoding
 
         # Idle state tracking - avoid spamming "nothing to do" logs
         self._last_scan_had_work = True  # Assume work initially so first idle is logged
@@ -3034,9 +3034,9 @@ class TranscoderGUI:
                     self.save_queue_snapshot()
                     last_snapshot_time = now
 
-                # Esperar antes do próximo ciclo
+                # Esperar antes do próximo ciclo - fast when queue is low
                 current_ready = self.ready_queue.qsize()
-                wait_time = 2 if current_ready < 20 else 5
+                wait_time = 1 if current_ready < 50 else 3
                 for _ in range(wait_time * 2):
                     if not self.running or not self.ready_queue_worker_running:
                         break
@@ -3048,63 +3048,81 @@ class TranscoderGUI:
 
     def probed_queue_worker(self):
         """
-        Background worker that pre-probes files from ready_queue.
-        Keeps PROBED_BUFFER_SIZE files ready for instant transcode.
-        This eliminates the 30+ second gap between transcodes.
+        Background worker: sole consumer of ready_queue.
+        Probes files, filters out HEVC/low-bitrate/exists, and feeds probed_queue.
+        probed_queue is the ONLY source for scan_and_process().
+        Runs aggressively - no sleeps while there's work to do.
         """
+        skipped_this_batch = 0
         while self.probed_queue_worker_running and self.running:
             try:
                 # Check if probed_queue needs more files
                 probed_size = self.probed_queue.qsize()
 
-                if probed_size < self.PROBED_BUFFER_SIZE and not self.ready_queue.empty():
-                    # Get next file from ready_queue
-                    try:
-                        item = self.ready_queue.get_nowait()
-                        video_path = item[0]
-                        file_size = item[1]
-                        self._queue_items_set.discard(str(video_path))
-                    except:
-                        time.sleep(0.5)
-                        continue
-
-                    # Skip if file no longer exists or already processed
-                    if not video_path.exists() or self.is_processed(video_path):
-                        continue
-
-                    # Wait for file to be ready (downloaded)
-                    if not self.wait_for_file_ready(video_path, estimated_size=file_size):
-                        continue
-
-                    # PRE-PROBE: This is the expensive part we're doing ahead of time
-                    probe_data = self.probe_video(video_path)
-                    if not probe_data:
-                        continue
-
-                    # Check if already HEVC
-                    if self.is_hevc(probe_data):
-                        self.mark_processed(video_path, "", "skipped_hevc", file_size, 0)
-                        continue
-
-                    # Check bitrate
-                    bitrate = self.get_bitrate(probe_data, file_size)
-                    if bitrate > 0 and bitrate < 8:
-                        self.mark_processed(video_path, "", "skipped_lowbitrate", file_size, 0)
-                        continue
-
-                    # Check if output exists
-                    output_path = video_path.parent / 'h265' / video_path.name
-                    if output_path.exists():
-                        self.mark_processed(video_path, str(output_path), "skipped_exists",
-                                          file_size, output_path.stat().st_size)
-                        continue
-
-                    # All checks passed - add to probed queue with probe data
-                    self.probed_queue.put((video_path, file_size, probe_data))
-
-                else:
-                    # Probed queue is full or ready_queue is empty, wait
+                if probed_size >= self.PROBED_BUFFER_SIZE or self.ready_queue.empty():
+                    # Queue full or no raw files - brief wait
+                    if skipped_this_batch > 0:
+                        self.root.after(0, lambda n=skipped_this_batch: self.log(
+                            f"Pre-filter: skipped {n} files (HEVC/exists/low-bitrate)", "info"))
+                        skipped_this_batch = 0
                     time.sleep(0.5)
+                    continue
+
+                # Get next file from ready_queue
+                try:
+                    item = self.ready_queue.get_nowait()
+                    video_path = item[0]
+                    file_size = item[1]
+                    self._queue_items_set.discard(str(video_path))
+                except Exception:
+                    time.sleep(0.2)
+                    continue
+
+                # Skip if file no longer exists or already processed
+                if not video_path.exists() or self.is_processed(video_path):
+                    self._mark_item_done(video_path)
+                    skipped_this_batch += 1
+                    continue
+
+                # Wait for file to be ready (downloaded)
+                if not self.wait_for_file_ready(video_path, estimated_size=file_size):
+                    self._mark_item_done(video_path)
+                    continue
+
+                # PRE-PROBE: This is the expensive part we're doing ahead of time
+                probe_data = self.probe_video(video_path)
+                if not probe_data:
+                    self.mark_processed(video_path, "", "skipped_probe_failed", file_size, 0)
+                    self._mark_item_done(video_path)
+                    skipped_this_batch += 1
+                    continue
+
+                # Check if already HEVC
+                if self.is_hevc(probe_data):
+                    self.mark_processed(video_path, "", "skipped_hevc", file_size, 0)
+                    self._mark_item_done(video_path)
+                    skipped_this_batch += 1
+                    continue
+
+                # Check bitrate
+                bitrate = self.get_bitrate(probe_data, file_size)
+                if bitrate > 0 and bitrate < 8:
+                    self.mark_processed(video_path, "", "skipped_lowbitrate", file_size, 0)
+                    self._mark_item_done(video_path)
+                    skipped_this_batch += 1
+                    continue
+
+                # Check if output exists
+                output_path = video_path.parent / 'h265' / video_path.name
+                if output_path.exists():
+                    self.mark_processed(video_path, str(output_path), "skipped_exists",
+                                      file_size, output_path.stat().st_size)
+                    self._mark_item_done(video_path)
+                    skipped_this_batch += 1
+                    continue
+
+                # All checks passed - add to probed queue with probe data
+                self.probed_queue.put((video_path, file_size, probe_data))
 
             except Exception as e:
                 time.sleep(1)
@@ -3144,18 +3162,21 @@ class TranscoderGUI:
                 self.scan_and_process()
                 consecutive_errors = 0  # Reset on success
 
-                for _ in range(30):  # Wait 30 seconds between scans
+                # Wait 3s between scans (probed_queue_worker does the filtering)
+                # Short wait = transcoder picks up new probed files fast
+                for _ in range(6):
                     if not self.running:
                         break
-                    # Also check pause during wait
                     while self.paused and self.running:
                         time.sleep(0.5)
-                    time.sleep(1)
+                    time.sleep(0.5)
 
             except Exception as e:
+                import traceback
+                tb = traceback.format_exc()
                 consecutive_errors += 1
-                self.root.after(0, lambda err=e, n=consecutive_errors: self.log(
-                    f"Process loop error ({n}/{max_consecutive_errors}): {err}", "error"))
+                self.root.after(0, lambda err=e, n=consecutive_errors, t=tb: self.log(
+                    f"Process loop error ({n}/{max_consecutive_errors}): {err}\n{t}", "error"))
 
                 if consecutive_errors >= max_consecutive_errors:
                     self.root.after(0, lambda: self.log(
@@ -3273,7 +3294,11 @@ class TranscoderGUI:
         return files_to_transcode
 
     def scan_and_process(self):
-        """Process files from the ready queue. No scanning - ready_queue_worker handles that."""
+        """
+        Process files ONLY from probed_queue (pre-validated, ready to transcode).
+        Never touches ready_queue directly - probed_queue_worker handles filtering.
+        Waits for probed_queue to fill instead of processing junk.
+        """
         folders = self.get_watch_folders()
         if not folders:
             self.root.after(0, lambda: self.log("No valid watch folders found", "error"))
@@ -3291,74 +3316,63 @@ class TranscoderGUI:
 
         # Track files processed in this scan
         files_processed_this_scan = 0
-        queue_size = self.ready_queue.qsize()
 
-        if queue_size == 0:
-            # Only log if we just became idle
+        probed_size = self.probed_queue.qsize()
+        if probed_size == 0:
+            # Wait briefly for probed_queue_worker to filter files
+            # Don't log spam - only log transition to idle
             if self._last_scan_had_work:
-                self.root.after(0, lambda: self.log(
-                    "Ready queue empty - waiting for downloads...", "info"))
+                ready_size = self.ready_queue.qsize()
+                if ready_size > 0:
+                    self.root.after(0, lambda r=ready_size: self.log(
+                        f"Probed queue empty, {r} files being filtered...", "info"))
+                else:
+                    self.root.after(0, lambda: self.log(
+                        "Waiting for files...", "info"))
                 self._last_scan_had_work = False
             self.root.after(0, lambda: self.current_file_label.config(text="Waiting for ready files..."))
             return
 
         self._last_scan_had_work = True
-        probed_size = self.probed_queue.qsize()
-        self.root.after(0, lambda q=queue_size, p=probed_size: self.log(
-            f"Queues: {p} pre-probed, {q} ready"))
+        ready_size = self.ready_queue.qsize()
+        self.root.after(0, lambda p=probed_size, r=ready_size: self.log(
+            f"Probed queue: {p} ready to transcode | {r} being filtered"))
 
-        # Process files - PREFER probed_queue (instant) over ready_queue (needs probe)
+        # Process files - ONLY from probed_queue (all pre-validated)
         idx = 0
         while self.running:
-            # Check disk space (use first watch folder)
-            free_gb = self.get_free_disk_space(folders[0])
-            if free_gb < 5:
-                self.root.after(0, lambda g=free_gb: self.log(
-                    f"Low disk space ({g:.1f} GB). Pausing...", "warning"))
-                break
-
-            # Try probed_queue first (INSTANT - no probe needed!)
-            video_path = None
-            file_size = 0
-            probe_data = None
-
-            try:
-                item = self.probed_queue.get_nowait()
-                video_path = item[0]
-                file_size = item[1]
-                probe_data = item[2]  # Already probed!
-            except:
-                # probed_queue empty, try ready_queue
-                if not self.ready_queue.empty():
-                    try:
-                        item = self.ready_queue.get_nowait()
-                        video_path = item[0]
-                        file_size = item[1]
-                        self._queue_items_set.discard(str(video_path))
-                    except:
-                        break
-                else:
+            # Check disk space periodically
+            if idx % 5 == 0:
+                free_gb = self.get_free_disk_space(folders[0])
+                if free_gb < 5:
+                    self.root.after(0, lambda g=free_gb: self.log(
+                        f"Low disk space ({g:.1f} GB). Pausing...", "warning"))
                     break
 
-            if video_path is None:
+            # Get next pre-validated file from probed_queue
+            try:
+                item = self.probed_queue.get_nowait()
+            except Exception:
+                # probed_queue empty - return and let process_loop wait
+                # probed_queue_worker will refill in background
                 break
+
+            video_path = item[0]
+            file_size = item[1]
+            probe_data = item[2]
 
             # Double-check file is still valid
             if not video_path.exists() or self.is_processed(video_path):
                 continue
 
             idx += 1
-            total_queued = self.ready_queue.qsize() + self.probed_queue.qsize()
+            total_queued = self.probed_queue.qsize()
             self.root.after(0, lambda i=idx, q=total_queued:
-                self.current_file_label.config(text=f"Processing {i} (queue: {q})"))
+                self.current_file_label.config(text=f"Transcoding {i} (queue: {q})"))
 
-            if probe_data:
-                # INSTANT: Use pre-probed data
-                self.process_file_preprobed(video_path, probe_data, queue_pos=idx,
-                                           queue_total=queue_size, file_size=file_size)
-            else:
-                # SLOW: Need to probe first
-                self.process_file(video_path, queue_pos=idx, queue_total=queue_size, file_size=file_size)
+            # All files from probed_queue are pre-validated (not HEVC, not low bitrate)
+            self.process_file_preprobed(video_path, probe_data, queue_pos=idx,
+                                       queue_total=probed_size, file_size=file_size)
 
             files_processed_this_scan += 1
 
