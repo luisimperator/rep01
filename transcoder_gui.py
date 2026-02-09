@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.0.0"
+VERSION = "3.0.1"
 
 import socket
 import subprocess
@@ -3049,22 +3049,29 @@ class TranscoderGUI:
     def probed_queue_worker(self):
         """
         Background worker: sole consumer of ready_queue.
-        Probes files, filters out HEVC/low-bitrate/exists, and feeds probed_queue.
+        Probes LOCAL files, filters HEVC/low-bitrate/exists, feeds probed_queue.
         probed_queue is the ONLY source for scan_and_process().
-        Runs aggressively - no sleeps while there's work to do.
+        NEVER blocks on cloud files - uses attrib check, not file read.
         """
         skipped_this_batch = 0
+        probed_this_batch = 0
+        last_status_time = time.time()
         while self.probed_queue_worker_running and self.running:
             try:
+                # Log progress periodically
+                now = time.time()
+                if now - last_status_time >= 15 and (skipped_this_batch > 0 or probed_this_batch > 0):
+                    self.root.after(0, lambda s=skipped_this_batch, p=probed_this_batch,
+                                   pq=self.probed_queue.qsize(), rq=self.ready_queue.qsize(): self.log(
+                        f"Filter: {p} validated, {s} skipped | probed_queue: {pq} | ready_queue: {rq}", "info"))
+                    skipped_this_batch = 0
+                    probed_this_batch = 0
+                    last_status_time = now
+
                 # Check if probed_queue needs more files
                 probed_size = self.probed_queue.qsize()
 
                 if probed_size >= self.PROBED_BUFFER_SIZE or self.ready_queue.empty():
-                    # Queue full or no raw files - brief wait
-                    if skipped_this_batch > 0:
-                        self.root.after(0, lambda n=skipped_this_batch: self.log(
-                            f"Pre-filter: skipped {n} files (HEVC/exists/low-bitrate)", "info"))
-                        skipped_this_batch = 0
                     time.sleep(0.5)
                     continue
 
@@ -3084,12 +3091,22 @@ class TranscoderGUI:
                     skipped_this_batch += 1
                     continue
 
-                # Wait for file to be ready (downloaded)
-                if not self.wait_for_file_ready(video_path, estimated_size=file_size):
+                # FAST cloud check using attrib (NO file read, NO download trigger)
+                if self._is_cloud_only_file(video_path):
                     self._mark_item_done(video_path)
+                    skipped_this_batch += 1
                     continue
 
-                # PRE-PROBE: This is the expensive part we're doing ahead of time
+                # Check if output already exists (fast, no probe needed)
+                output_path = video_path.parent / 'h265' / video_path.name
+                if output_path.exists():
+                    self.mark_processed(video_path, str(output_path), "skipped_exists",
+                                      file_size, output_path.stat().st_size)
+                    self._mark_item_done(video_path)
+                    skipped_this_batch += 1
+                    continue
+
+                # PRE-PROBE with short timeout (local files probe in <1s)
                 probe_data = self.probe_video(video_path)
                 if not probe_data:
                     self.mark_processed(video_path, "", "skipped_probe_failed", file_size, 0)
@@ -3112,19 +3129,13 @@ class TranscoderGUI:
                     skipped_this_batch += 1
                     continue
 
-                # Check if output exists
-                output_path = video_path.parent / 'h265' / video_path.name
-                if output_path.exists():
-                    self.mark_processed(video_path, str(output_path), "skipped_exists",
-                                      file_size, output_path.stat().st_size)
-                    self._mark_item_done(video_path)
-                    skipped_this_batch += 1
-                    continue
-
                 # All checks passed - add to probed queue with probe data
                 self.probed_queue.put((video_path, file_size, probe_data))
+                probed_this_batch += 1
 
             except Exception as e:
+                self.root.after(0, lambda err=e: self.log(
+                    f"Filter worker error: {err}", "warning"))
                 time.sleep(1)
 
     def _quick_scan_new_local_files(self) -> int:
@@ -4800,11 +4811,11 @@ class TranscoderGUI:
             self._mark_item_done(input_path)
 
     def probe_video(self, path: Path) -> dict:
-        """Get video info."""
+        """Get video info. Timeout 10s - local files probe in <1s."""
         try:
             cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json',
                    '-show_format', '-show_streams', str(path)]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if result.returncode == 0:
                 return json.loads(result.stdout)
         except:
