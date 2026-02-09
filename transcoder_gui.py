@@ -3307,9 +3307,8 @@ class TranscoderGUI:
             files_processed_this_scan += 1
 
         # Process WAV files in "Audio Source Files" folders
-        for folder in folders:
-            audio_processed = self.process_audio_files(folder)
-            files_processed_this_scan += audio_processed
+        audio_processed = self.process_audio_files(folders[0])
+        files_processed_this_scan += audio_processed
 
         # Notify user if we finished processing files and queue is empty
         if files_processed_this_scan > 0:
