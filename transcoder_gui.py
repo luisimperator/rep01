@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.0.1"
+VERSION = "3.0.2"
 
 import socket
 import subprocess
@@ -2493,10 +2493,13 @@ class TranscoderGUI:
                 len(self.pending_folders)
             )
 
-            # Carregar folder_tracker
+            # Carregar folder_tracker (mark already-complete folders as DONE)
             folders = snapshot.get("folder_tracker", {})
             with self.folder_tracker_lock:
                 for folder_path, info in folders.items():
+                    # Pre-mark folders that are already complete
+                    if info.get('done', 0) >= info.get('total_known', 1):
+                        info['status'] = 'DONE'
                     self.folder_tracker[folder_path] = info
 
             # Carregar active_queue (validando arquivos)
@@ -2805,14 +2808,18 @@ class TranscoderGUI:
 
         with self.folder_tracker_lock:
             if folder_path in self.folder_tracker:
+                was_done = self.folder_tracker[folder_path]['status'] == 'DONE'
                 self.folder_tracker[folder_path]['done'] += 1
                 info = self.folder_tracker[folder_path]
 
-                # Verificar se pasta está completa
+                # Verificar se pasta está completa (only log if newly completed)
                 if info['done'] >= info['total_known']:
-                    self.folder_tracker[folder_path]['status'] = 'DONE'
-                    self.root.after(0, lambda p=folder_path: self.log(
-                        f"📁 FOLDER COMPLETE: {Path(p).name}", "success"))
+                    if not was_done:
+                        self.folder_tracker[folder_path]['status'] = 'DONE'
+                        self.root.after(0, lambda p=folder_path: self.log(
+                            f"📁 FOLDER COMPLETE: {Path(p).name}", "success"))
+                    else:
+                        self.folder_tracker[folder_path]['status'] = 'DONE'
                 elif info['done'] >= info['total_known'] * 0.8:
                     # 80% completa - marcar como COMPLETING
                     self.folder_tracker[folder_path]['status'] = 'COMPLETING'
@@ -3078,11 +3085,24 @@ class TranscoderGUI:
                 # Get next file from ready_queue
                 try:
                     item = self.ready_queue.get_nowait()
-                    video_path = item[0]
-                    file_size = item[1]
-                    self._queue_items_set.discard(str(video_path))
                 except Exception:
                     time.sleep(0.2)
+                    continue
+
+                # Unpack item safely (tuple: path, size[, priority])
+                try:
+                    if isinstance(item, (tuple, list)) and len(item) >= 2:
+                        video_path = item[0]
+                        file_size = item[1]
+                    elif isinstance(item, dict):
+                        video_path = item.get('path')
+                        file_size = item.get('size', 0)
+                    else:
+                        continue
+                    if video_path is None:
+                        continue
+                    self._queue_items_set.discard(str(video_path))
+                except Exception:
                     continue
 
                 # Skip if file no longer exists or already processed
@@ -3134,8 +3154,10 @@ class TranscoderGUI:
                 probed_this_batch += 1
 
             except Exception as e:
-                self.root.after(0, lambda err=e: self.log(
-                    f"Filter worker error: {err}", "warning"))
+                import traceback
+                tb = traceback.format_exc()
+                self.root.after(0, lambda err=e, t=tb: self.log(
+                    f"Filter worker error: {err}\n{t}", "warning"))
                 time.sleep(1)
 
     def _quick_scan_new_local_files(self) -> int:
