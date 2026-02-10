@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.0.3"
+VERSION = "3.0.4"
 
 import socket
 import subprocess
@@ -538,8 +538,10 @@ class TranscoderGUI:
         # Idle state tracking - avoid spamming "nothing to do" logs
         self._last_scan_had_work = True  # Assume work initially so first idle is logged
 
-        # Default settings (using auto-detected path)
-        default_folder = str(self.dropbox_base)
+        # Default settings - watch the Dropbox root (parent of app config folder)
+        # dropbox_base = .../HeavyDrops/App h265 Converter
+        # We want to scan .../HeavyDrops/ where the actual video files live
+        default_folder = str(self.dropbox_base.parent)
         default_logs = str(self.dropbox_base / "logs")
         self.watch_folder = tk.StringVar(value=default_folder)
         self.log_folder = tk.StringVar(value=default_logs)
@@ -2574,12 +2576,14 @@ class TranscoderGUI:
         if self.pending_folders_loaded:
             return
 
-        self.root.after(0, lambda: self.log("Discovering folders (not files)...", "info"))
+        watch_folders = self.get_watch_folders()
+        self.root.after(0, lambda wf=watch_folders: self.log(
+            f"Scanning: {'; '.join(str(f) for f in wf)}", "info"))
         start_time = time.time()
 
         folders_with_mp4 = set()
 
-        for watch_folder in self.get_watch_folders():
+        for watch_folder in watch_folders:
             # Usa os.walk que é mais eficiente para descobrir diretórios
             import os
             for dirpath, dirnames, filenames in os.walk(str(watch_folder)):
@@ -4254,14 +4258,17 @@ class TranscoderGUI:
     def get_free_disk_space(self, path: Path) -> float:
         """Get free disk space in GB for the drive containing path."""
         try:
-            import ctypes
-            free_bytes = ctypes.c_ulonglong(0)
-            ctypes.windll.kernel32.GetDiskFreeSpaceExW(
-                str(path), None, None, ctypes.pointer(free_bytes)
-            )
-            return free_bytes.value / (1024**3)
-        except:
-            return 999  # Assume enough space if can't check
+            # Use shutil.disk_usage - reliable cross-platform
+            usage = shutil.disk_usage(str(path))
+            return usage.free / (1024**3)
+        except Exception:
+            # Try drive root as fallback
+            try:
+                drive = Path(path.anchor)
+                usage = shutil.disk_usage(str(drive))
+                return usage.free / (1024**3)
+            except Exception:
+                return 999  # Assume enough space if can't check
 
     def _sort_by_folder_completion(self, pending_files: list) -> list:
         """
