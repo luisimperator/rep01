@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.0.4"
+VERSION = "3.0.5"
 
 import socket
 import subprocess
@@ -582,17 +582,11 @@ class TranscoderGUI:
         if self.auto_start.get():
             self.root.after(1000, self._auto_start_daemon)
 
-    def get_watch_folders(self) -> list:
-        """Get list of watch folders (supports semicolon-separated paths)."""
-        raw = self.watch_folder.get()
-        folders = []
-        for part in raw.split(';'):
-            part = part.strip()
-            if part:
-                p = Path(part)
-                if p.exists():
-                    folders.append(p)
-        return folders if folders else [Path(raw)]  # Fallback to original if no valid paths
+    def get_watch_folder(self) -> Path:
+        """Get the single watch folder path."""
+        raw = self.watch_folder.get().strip()
+        p = Path(raw)
+        return p
 
     def setup_ui(self):
         """Create the UI."""
@@ -604,8 +598,8 @@ class TranscoderGUI:
         settings_frame = ttk.LabelFrame(main_frame, text="Settings", padding="10")
         settings_frame.pack(fill=tk.X, pady=(0, 10))
 
-        # Watch folder (multiple folders separated by semicolon)
-        ttk.Label(settings_frame, text="Watch Folder(s):").grid(row=0, column=0, sticky=tk.W, pady=5)
+        # Watch folder
+        ttk.Label(settings_frame, text="Watch Folder:").grid(row=0, column=0, sticky=tk.W, pady=5)
         folder_frame = ttk.Frame(settings_frame)
         folder_frame.grid(row=0, column=1, sticky=tk.EW, pady=5)
         ttk.Entry(folder_frame, textvariable=self.watch_folder, width=60).pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -867,28 +861,11 @@ class TranscoderGUI:
             self.log(f"Error checking FFmpeg: {e}", "warning")
 
     def browse_folder(self):
-        """Open folder browser dialog. Appends with semicolon if holding Shift or if current has folders."""
-        # Get current value
+        """Open folder browser dialog."""
         current = self.watch_folder.get().strip()
-
-        # Use last folder as initial dir, or current if only one
-        if ';' in current:
-            parts = [p.strip() for p in current.split(';') if p.strip()]
-            initial = parts[-1] if parts else current
-        else:
-            initial = current
-
-        folder = filedialog.askdirectory(initialdir=initial)
+        folder = filedialog.askdirectory(initialdir=current)
         if folder:
-            # Check if folder is already in the list
-            existing = [p.strip() for p in current.split(';') if p.strip()]
-            if folder not in existing:
-                if current and current != str(self.dropbox_base):
-                    # Append with semicolon
-                    self.watch_folder.set(f"{current}; {folder}")
-                else:
-                    # Replace
-                    self.watch_folder.set(folder)
+            self.watch_folder.set(folder)
             self.save_settings()
 
     def browse_log_folder(self):
@@ -2576,27 +2553,26 @@ class TranscoderGUI:
         if self.pending_folders_loaded:
             return
 
-        watch_folders = self.get_watch_folders()
-        self.root.after(0, lambda wf=watch_folders: self.log(
-            f"Scanning: {'; '.join(str(f) for f in wf)}", "info"))
+        watch_folder = self.get_watch_folder()
+        self.root.after(0, lambda wf=watch_folder: self.log(
+            f"Scanning: {wf}", "info"))
         start_time = time.time()
 
         folders_with_mp4 = set()
 
-        for watch_folder in watch_folders:
-            # Usa os.walk que é mais eficiente para descobrir diretórios
-            import os
-            for dirpath, dirnames, filenames in os.walk(str(watch_folder)):
-                # Skip h264/h265 folders
-                dirpath_lower = dirpath.lower()
-                if 'h265' in dirpath_lower or 'h264' in dirpath_lower:
-                    continue
+        # Usa os.walk que é mais eficiente para descobrir diretórios
+        import os
+        for dirpath, dirnames, filenames in os.walk(str(watch_folder)):
+            # Skip h264/h265 folders
+            dirpath_lower = dirpath.lower()
+            if 'h265' in dirpath_lower or 'h264' in dirpath_lower:
+                continue
 
-                # Check if folder has MP4 files
-                has_mp4 = any(f.lower().endswith('.mp4') for f in filenames
-                             if not f.startswith('._') and not f.upper().startswith('DJI_'))
-                if has_mp4:
-                    folders_with_mp4.add(dirpath)
+            # Check if folder has MP4 files
+            has_mp4 = any(f.lower().endswith('.mp4') for f in filenames
+                         if not f.startswith('._') and not f.upper().startswith('DJI_'))
+            if has_mp4:
+                folders_with_mp4.add(dirpath)
 
         # Sort alphabetically
         sorted_folders = sorted(folders_with_mp4, key=lambda x: x.lower())
@@ -2627,12 +2603,17 @@ class TranscoderGUI:
     def _get_folder_files(self, folder_path: str) -> list:
         """
         Lista arquivos MP4 de uma pasta específica, em ordem alfabética.
-        Retorna lista de (path, size) para arquivos elegíveis.
+        Retorna lista de dicts para arquivos elegíveis.
         NÃO faz probe - apenas lista.
         """
         folder = Path(folder_path)
         min_size_bytes = int(self.min_size_gb.get() * 1024**3)
         files = []
+        skipped_processed = 0
+        skipped_exists = 0
+        skipped_size = 0
+        skipped_queue = 0
+        total_mp4 = 0
 
         try:
             for f in sorted(folder.iterdir(), key=lambda x: str(x).lower()):
@@ -2643,34 +2624,37 @@ class TranscoderGUI:
                 if f.name.startswith('._') or f.name.upper().startswith('DJI_'):
                     continue
 
+                total_mp4 += 1
                 path_str = str(f)
 
                 # Skip if already in queue
                 if path_str in self._queue_items_set:
+                    skipped_queue += 1
                     continue
 
-                # Skip if already processed
+                # Skip if already processed (local DB + cloud manifest)
                 if self.is_processed(f):
+                    skipped_processed += 1
                     continue
 
                 # Skip if h265 output already exists
                 output_path = f.parent / 'h265' / f.name
                 if output_path.exists():
-                    # Mark as processed so it's not checked again
                     try:
                         size = f.stat().st_size
                         self.mark_processed(f, str(output_path), "skipped_exists",
                                           size, output_path.stat().st_size)
                     except:
                         pass
+                    skipped_exists += 1
                     continue
 
                 # Check size
                 try:
                     size = f.stat().st_size
                     if size < min_size_bytes:
+                        skipped_size += 1
                         continue
-                    # Cloud placeholder check (< 100KB = likely cloud)
                     is_local = size > 100000
                 except:
                     continue
@@ -2685,6 +2669,13 @@ class TranscoderGUI:
                 })
         except Exception as e:
             pass
+
+        # Log diagnostics when folder has MP4s but none are eligible
+        if total_mp4 > 0 and len(files) == 0:
+            self.root.after(0, lambda fp=folder_path, t=total_mp4, p=skipped_processed,
+                           e=skipped_exists, q=skipped_queue, s=skipped_size: self.log(
+                f"Folder {Path(fp).name}: {t} MP4s, all filtered "
+                f"(processed:{p} exists:{e} queued:{q} small:{s})", "warning"))
 
         return files
 
@@ -3372,13 +3363,13 @@ class TranscoderGUI:
         Never touches ready_queue directly - probed_queue_worker handles filtering.
         Waits for probed_queue to fill instead of processing junk.
         """
-        folders = self.get_watch_folders()
-        if not folders:
-            self.root.after(0, lambda: self.log("No valid watch folders found", "error"))
+        watch_folder = self.get_watch_folder()
+        if not watch_folder.exists():
+            self.root.after(0, lambda: self.log("Watch folder not found", "error"))
             return
 
-        # Check disk space before starting (use first folder)
-        free_gb = self.get_free_disk_space(folders[0])
+        # Check disk space before starting
+        free_gb = self.get_free_disk_space(watch_folder)
         if free_gb < 5:  # Less than 5GB free
             self.root.after(0, lambda g=free_gb: self.log(
                 f"Low disk space ({g:.1f} GB free). Waiting...", "warning"))
@@ -3416,7 +3407,7 @@ class TranscoderGUI:
         while self.running:
             # Check disk space periodically
             if idx % 5 == 0:
-                free_gb = self.get_free_disk_space(folders[0])
+                free_gb = self.get_free_disk_space(watch_folder)
                 if free_gb < 5:
                     self.root.after(0, lambda g=free_gb: self.log(
                         f"Low disk space ({g:.1f} GB). Pausing...", "warning"))
@@ -3450,7 +3441,7 @@ class TranscoderGUI:
             files_processed_this_scan += 1
 
         # Process WAV files in "Audio Source Files" folders
-        audio_processed = self.process_audio_files(folders[0])
+        audio_processed = self.process_audio_files(watch_folder)
         files_processed_this_scan += audio_processed
 
         # Notify user if we finished processing files and queue is empty
