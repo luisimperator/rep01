@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.0.2"
+VERSION = "3.0.3"
 
 import socket
 import subprocess
@@ -2148,7 +2148,7 @@ class TranscoderGUI:
 
         queue_size = self.ready_queue.qsize()
         self.root.after(0, lambda q=queue_size: self.log(
-            f"Ready queue: {q} files ready to transcode", "success"))
+            f"Candidates: {q} files to validate (probe + filter)", "info"))
 
         # Start the ready queue worker (monitors queue, triggers downloads when needed)
         self.ready_queue_worker_running = True
@@ -2165,7 +2165,7 @@ class TranscoderGUI:
         self.worker_thread.start()
 
         if queue_size > 0:
-            self.root.after(0, lambda: self.log("Starting transcoding immediately!", "success"))
+            self.root.after(0, lambda: self.log("Validating files... transcoding starts when ready", "info"))
         else:
             self.root.after(0, lambda: self.log("Queue empty - scanning for files...", "info"))
 
@@ -2649,6 +2649,18 @@ class TranscoderGUI:
                 if self.is_processed(f):
                     continue
 
+                # Skip if h265 output already exists
+                output_path = f.parent / 'h265' / f.name
+                if output_path.exists():
+                    # Mark as processed so it's not checked again
+                    try:
+                        size = f.stat().st_size
+                        self.mark_processed(f, str(output_path), "skipped_exists",
+                                          size, output_path.stat().st_size)
+                    except:
+                        pass
+                    continue
+
                 # Check size
                 try:
                     size = f.stat().st_size
@@ -2803,8 +2815,15 @@ class TranscoderGUI:
         return None
 
     def _mark_item_done(self, file_path: Path):
-        """Marca item como concluído e atualiza folder tracker."""
+        """Marca item como concluído e atualiza folder tracker + remove from active_queue."""
+        path_str = str(file_path)
         folder_path = str(file_path.parent)
+
+        # Remove from active_queue so _sync_to_ready_queue won't re-add it
+        with self.active_queue_lock:
+            self.active_queue = [item for item in self.active_queue
+                                 if str(item.get('path', '')) != path_str]
+            self._queue_items_set.discard(path_str)
 
         with self.folder_tracker_lock:
             if folder_path in self.folder_tracker:
@@ -3070,7 +3089,7 @@ class TranscoderGUI:
                 if now - last_status_time >= 15 and (skipped_this_batch > 0 or probed_this_batch > 0):
                     self.root.after(0, lambda s=skipped_this_batch, p=probed_this_batch,
                                    pq=self.probed_queue.qsize(), rq=self.ready_queue.qsize(): self.log(
-                        f"Filter: {p} validated, {s} skipped | probed_queue: {pq} | ready_queue: {rq}", "info"))
+                        f"Filter: {p} validated, {s} skipped | ready: {pq} | pending: {rq}", "info"))
                     skipped_this_batch = 0
                     probed_this_batch = 0
                     last_status_time = now
@@ -3078,7 +3097,19 @@ class TranscoderGUI:
                 # Check if probed_queue needs more files
                 probed_size = self.probed_queue.qsize()
 
-                if probed_size >= self.PROBED_BUFFER_SIZE or self.ready_queue.empty():
+                if probed_size >= self.PROBED_BUFFER_SIZE:
+                    time.sleep(0.5)
+                    continue
+
+                if self.ready_queue.empty():
+                    # Log once when filter has nothing left to process
+                    if skipped_this_batch > 0 or probed_this_batch > 0:
+                        self.root.after(0, lambda s=skipped_this_batch, p=probed_this_batch,
+                                       pq=self.probed_queue.qsize(): self.log(
+                            f"Filter done: {p} validated, {s} skipped | ready: {pq}", "info"))
+                        skipped_this_batch = 0
+                        probed_this_batch = 0
+                        last_status_time = time.time()
                     time.sleep(0.5)
                     continue
 
@@ -3152,6 +3183,11 @@ class TranscoderGUI:
                 # All checks passed - add to probed queue with probe data
                 self.probed_queue.put((video_path, file_size, probe_data))
                 probed_this_batch += 1
+
+                # Log first validated file so user knows encoding will start
+                if probed_this_batch == 1 and self.probed_queue.qsize() == 1:
+                    self.root.after(0, lambda p=video_path: self.log(
+                        f"✓ First file validated: {p.name} - encoding starting!", "success"))
 
             except Exception as e:
                 import traceback
