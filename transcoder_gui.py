@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.0.6"
+VERSION = "3.0.7"
 
 import socket
 import subprocess
@@ -2529,17 +2529,10 @@ class TranscoderGUI:
 
     def _is_likely_local_file_fast(self, file_path: Path) -> bool:
         """
-        FAST check if file is likely local (not cloud-only).
-        Uses only file size check - no subprocess calls.
-        Returns True if file is likely local and ready.
+        Check if file is local (not cloud-only) using attrib.
+        Dropbox Smart Sync reports real size for cloud files, so size check is unreliable.
         """
-        try:
-            size = file_path.stat().st_size
-            # Cloud placeholders are tiny (< 1KB typically)
-            # Real video files are much larger
-            return size > 100000  # > 100KB = likely local
-        except:
-            return False
+        return not self._is_cloud_only_file(file_path)
 
     # =========================================================================
     # NEW ARCHITECTURE v2.0: Queue-first, folder-complete, zero mass-probe
@@ -2669,7 +2662,9 @@ class TranscoderGUI:
                 if size < min_size_bytes:
                     skipped_size += 1
                     continue
-                is_local = size > 100000
+                # Use attrib to properly detect cloud-only files
+                # (Dropbox Smart Sync reports real size for cloud files)
+                is_local = not self._is_cloud_only_file(f)
             except Exception:
                 continue
 
@@ -2866,10 +2861,11 @@ class TranscoderGUI:
                     break
 
                 if item['status'] == 'QUEUED_REMOTE':
-                    # Verificar se pode iniciar download
                     file_path = item['path']
-                    if self._can_trigger_download(item['size']):
+                    file_size = item.get('size', 0)
+                    if self._can_trigger_download(file_size):
                         self._trigger_dropbox_download(file_path)
+                        self._add_to_pending_downloads(str(file_path), file_size)
                         item['status'] = 'DOWNLOADING'
                         triggered += 1
 
@@ -2878,16 +2874,18 @@ class TranscoderGUI:
     def _check_download_completion(self):
         """
         Verifica itens em DOWNLOADING e atualiza para READY_LOCAL se prontos.
+        Uses attrib check (not size) to properly detect cloud-only files.
         """
         with self.active_queue_lock:
             for item in self.active_queue:
                 if item['status'] == 'DOWNLOADING':
                     file_path = item['path']
-                    if self._is_likely_local_file_fast(file_path):
+                    # Use attrib-based check (not size) - Dropbox Smart Sync
+                    # reports real size for cloud-only files
+                    if not self._is_cloud_only_file(file_path):
                         item['status'] = 'READY_LOCAL'
                         self._remove_from_pending_downloads(str(file_path))
                 elif item['status'] == 'FAILED_RETRY':
-                    # Verificar se pode tentar novamente
                     if time.time() >= item.get('retry_at', 0):
                         item['status'] = 'QUEUED_REMOTE'
 
@@ -4605,17 +4603,29 @@ class TranscoderGUI:
 
     def _trigger_dropbox_download(self, file_path: Path):
         """
-        Try to trigger Dropbox to download a cloud-only file.
-        Uses attrib to set file as pinned (always available).
+        Trigger Dropbox to download a cloud-only file.
+        Method 1: attrib +P (pin file via Windows Cloud Files API)
+        Method 2: read 1 byte (forces Dropbox to hydrate the file)
         """
+        path_str = str(file_path)
         try:
-            # Use attrib to pin file (request download) - fast, no PowerShell
-            subprocess.Popen(
-                ['attrib', '-U', '+P', str(file_path)],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            # Method 1: Pin via attrib (non-blocking, works on newer Dropbox)
+            subprocess.run(
+                ['attrib', '+P', '-U', path_str],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=5
             )
-        except:
+        except Exception:
             pass
+
+        # Method 2: Read 1 byte in background thread (universal trigger)
+        def _read_trigger():
+            try:
+                with open(path_str, 'rb') as f:
+                    f.read(1)  # Blocks until Dropbox starts hydrating
+            except Exception:
+                pass
+        threading.Thread(target=_read_trigger, daemon=True).start()
 
     def process_file_preprobed(self, input_path: Path, probe_data: dict, queue_pos: int = 0,
                                 queue_total: int = 0, file_size: int = 0):
