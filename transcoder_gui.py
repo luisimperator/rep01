@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.0.5"
+VERSION = "3.0.6"
 
 import socket
 import subprocess
@@ -2605,8 +2605,9 @@ class TranscoderGUI:
         Lista arquivos MP4 de uma pasta específica, em ordem alfabética.
         Retorna lista de dicts para arquivos elegíveis.
         NÃO faz probe - apenas lista.
+        Uses os.listdir (same as os.walk) for reliability.
         """
-        folder = Path(folder_path)
+        import os
         min_size_bytes = int(self.min_size_gb.get() * 1024**3)
         files = []
         skipped_processed = 0
@@ -2616,59 +2617,70 @@ class TranscoderGUI:
         total_mp4 = 0
 
         try:
-            for f in sorted(folder.iterdir(), key=lambda x: str(x).lower()):
-                if not f.is_file():
-                    continue
-                if not f.suffix.lower() == '.mp4':
-                    continue
-                if f.name.startswith('._') or f.name.upper().startswith('DJI_'):
-                    continue
-
-                total_mp4 += 1
-                path_str = str(f)
-
-                # Skip if already in queue
-                if path_str in self._queue_items_set:
-                    skipped_queue += 1
-                    continue
-
-                # Skip if already processed (local DB + cloud manifest)
-                if self.is_processed(f):
-                    skipped_processed += 1
-                    continue
-
-                # Skip if h265 output already exists
-                output_path = f.parent / 'h265' / f.name
-                if output_path.exists():
-                    try:
-                        size = f.stat().st_size
-                        self.mark_processed(f, str(output_path), "skipped_exists",
-                                          size, output_path.stat().st_size)
-                    except:
-                        pass
-                    skipped_exists += 1
-                    continue
-
-                # Check size
-                try:
-                    size = f.stat().st_size
-                    if size < min_size_bytes:
-                        skipped_size += 1
-                        continue
-                    is_local = size > 100000
-                except:
-                    continue
-
-                files.append({
-                    'path': f,
-                    'size': size,
-                    'folder': folder_path,
-                    'is_local': is_local,
-                    'status': 'READY_LOCAL' if is_local else 'QUEUED_REMOTE',
-                    'retry_at': 0
-                })
+            entries = sorted(os.listdir(folder_path), key=str.lower)
         except Exception as e:
-            pass
+            self.root.after(0, lambda fp=folder_path, err=e: self.log(
+                f"Cannot list folder {Path(fp).name}: {err}", "warning"))
+            return files
+
+        for name in entries:
+            if not name.lower().endswith('.mp4'):
+                continue
+            if name.startswith('._') or name.upper().startswith('DJI_'):
+                continue
+
+            full_path = os.path.join(folder_path, name)
+
+            try:
+                if not os.path.isfile(full_path):
+                    continue
+            except Exception:
+                continue
+
+            total_mp4 += 1
+            f = Path(full_path)
+            path_str = full_path
+
+            # Skip if already in queue
+            if path_str in self._queue_items_set:
+                skipped_queue += 1
+                continue
+
+            # Skip if already processed (local DB + cloud manifest)
+            if self.is_processed(f):
+                skipped_processed += 1
+                continue
+
+            # Skip if h265 output already exists
+            output_path = f.parent / 'h265' / f.name
+            if output_path.exists():
+                try:
+                    size = os.path.getsize(full_path)
+                    self.mark_processed(f, str(output_path), "skipped_exists",
+                                      size, output_path.stat().st_size)
+                except:
+                    pass
+                skipped_exists += 1
+                continue
+
+            # Check size
+            try:
+                size = os.path.getsize(full_path)
+                if size < min_size_bytes:
+                    skipped_size += 1
+                    continue
+                is_local = size > 100000
+            except Exception:
+                continue
+
+            files.append({
+                'path': f,
+                'size': size,
+                'folder': folder_path,
+                'is_local': is_local,
+                'status': 'READY_LOCAL' if is_local else 'QUEUED_REMOTE',
+                'retry_at': 0
+            })
 
         # Log diagnostics when folder has MP4s but none are eligible
         if total_mp4 > 0 and len(files) == 0:
