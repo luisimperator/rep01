@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.0.7"
+VERSION = "3.0.8"
 
 import socket
 import subprocess
@@ -2616,6 +2616,9 @@ class TranscoderGUI:
                 f"Cannot list folder {Path(fp).name}: {err}", "warning"))
             return files
 
+        # Batch cloud check: single attrib call for entire folder
+        cloud_files = self._get_cloud_files_in_folder(folder_path)
+
         for name in entries:
             if not name.lower().endswith('.mp4'):
                 continue
@@ -2662,9 +2665,8 @@ class TranscoderGUI:
                 if size < min_size_bytes:
                     skipped_size += 1
                     continue
-                # Use attrib to properly detect cloud-only files
-                # (Dropbox Smart Sync reports real size for cloud files)
-                is_local = not self._is_cloud_only_file(f)
+                # Use batch attrib result for cloud detection
+                is_local = name not in cloud_files
             except Exception:
                 continue
 
@@ -4564,6 +4566,41 @@ class TranscoderGUI:
                 remaining = len(self.pending_downloads)
                 self.root.after(0, lambda c=len(completed), r=len(removed), rem=remaining:
                     self.log(f"Download queue: {c} completed, {r} removed, {rem} pending", "info"))
+
+    def _get_cloud_files_in_folder(self, folder_path: str) -> set:
+        """
+        Batch check: get set of cloud-only filenames in a folder.
+        Single attrib call for the whole folder instead of per-file.
+        Returns set of filenames (not full paths) that are cloud-only.
+        """
+        cloud_files = set()
+        try:
+            result = subprocess.run(
+                ['attrib', folder_path + '\\*'],
+                capture_output=True, text=True, timeout=15
+            )
+            if result.returncode == 0:
+                for line in result.stdout.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    # attrib output: "A    O  U        C:\path\to\file.mp4"
+                    # Attributes are before the path, separated by spaces
+                    if ' O ' in line or (' U ' in line and ' P ' not in line):
+                        # Extract filename from end of line
+                        # The path starts after the attributes section
+                        parts = line.rsplit('\\', 1)
+                        if len(parts) == 2:
+                            cloud_files.add(parts[1])
+                        else:
+                            # Try extracting from full path
+                            for part in line.split():
+                                if '\\' in part or '/' in part:
+                                    cloud_files.add(Path(part).name)
+                                    break
+        except Exception:
+            pass
+        return cloud_files
 
     def _is_cloud_only_file(self, file_path: Path) -> bool:
         """
