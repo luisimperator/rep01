@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.0.9"
+VERSION = "3.1.0"
 
 import socket
 import subprocess
@@ -3847,35 +3847,10 @@ class TranscoderGUI:
                         except Exception as e:
                             self.root.after(0, lambda err=e: self.log(f"Could not create marker: {err}", "warning"))
                     else:
-                        # Normal mode: delete the folder (with retry for WinError 32)
-                        deleted = False
-                        for attempt in range(3):
-                            try:
-                                shutil.rmtree(h264_folder)
-                                deleted = True
-                                break
-                            except PermissionError:
-                                # WinError 32: file in use - wait and retry
-                                time.sleep(2 * (attempt + 1))
-                            except Exception as del_err:
-                                self.root.after(0, lambda err=del_err: self.log(
-                                    f"Could not delete h264 folder: {err}", "error"))
-                                break
-
-                        if deleted:
-                            self.root.after(0, lambda sz=folder_size: self.record_deletion(sz))
-                            self.root.after(0, lambda p=h264_folder, n=verified_count, s=folder_size_gb: self.log(
-                                f"✅ H264 FOLDER DELETED: {n} files, {s:.2f} GB freed - {p.name}", "success"))
-
-                            # Log deletion timestamp to h265 feito.txt
-                            h265_folder = parent_folder / 'h265'
-                            h265_folder.mkdir(parents=True, exist_ok=True)
-                            log_file = h265_folder / "h265 feito.txt"
-                            try:
-                                with open(log_file, 'a', encoding='utf-8') as f:
-                                    f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED\n")
-                            except:
-                                pass
+                        # Normal mode: delete the folder
+                        if not self._try_delete_h264(h264_folder, parent_folder, verified_count, folder_size, folder_size_gb):
+                            # Failed - schedule background retries at 1min, 10min, 30min
+                            self._schedule_h264_retry(h264_folder, parent_folder, verified_count, folder_size, folder_size_gb)
                 else:
                     self.root.after(0, lambda folder=h264_folder.name, v=verified_count, t=total_files: self.log(
                         f"H264 folder NOT deleted ({v}/{t} verified): {folder}", "warning"))
@@ -3891,6 +3866,59 @@ class TranscoderGUI:
         self.root.after(0, lambda: self.log(
             f"H264 folder deletion scheduled for 20 min: {h264_folder}", "info"))
         threading.Thread(target=delete_folder_after_delay, daemon=True).start()
+
+    def _try_delete_h264(self, h264_folder: Path, parent_folder: Path,
+                         file_count: int, folder_size: int, folder_size_gb: float) -> bool:
+        """Try to delete h264 folder. Returns True if deleted, False if failed."""
+        try:
+            shutil.rmtree(h264_folder)
+        except Exception as err:
+            self.root.after(0, lambda e=err, p=h264_folder.name: self.log(
+                f"Could not delete h264/{p}: {e} (will retry)", "warning"))
+            return False
+
+        self.root.after(0, lambda sz=folder_size: self.record_deletion(sz))
+        self.root.after(0, lambda p=h264_folder.name, n=file_count, s=folder_size_gb: self.log(
+            f"✅ H264 DELETED: {n} files, {s:.2f} GB freed - {p}", "success"))
+
+        # Log to h265 feito.txt
+        h265_folder = parent_folder / 'h265'
+        h265_folder.mkdir(parents=True, exist_ok=True)
+        try:
+            with open(h265_folder / "h265 feito.txt", 'a', encoding='utf-8') as f:
+                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED\n")
+        except:
+            pass
+        return True
+
+    def _schedule_h264_retry(self, h264_folder: Path, parent_folder: Path,
+                              file_count: int, folder_size: int, folder_size_gb: float):
+        """Schedule aggressive background retries: 1min, 10min, 30min."""
+        retry_delays = [60, 600, 1800]  # 1min, 10min, 30min
+
+        def _retry_loop():
+            for i, delay in enumerate(retry_delays, 1):
+                if not self.running:
+                    return
+                if not h264_folder.exists():
+                    return  # Already deleted (maybe manually)
+
+                self.root.after(0, lambda d=delay//60, n=h264_folder.name: self.log(
+                    f"🔄 Retry h264 delete in {d}min: {n}", "info"))
+                time.sleep(delay)
+
+                if not self.running or not h264_folder.exists():
+                    return
+
+                if self._try_delete_h264(h264_folder, parent_folder, file_count, folder_size, folder_size_gb):
+                    return  # Success
+
+            # All retries exhausted
+            if h264_folder.exists():
+                self.root.after(0, lambda p=h264_folder.name: self.log(
+                    f"❌ Could not delete h264/{p} after all retries. Delete manually.", "error"))
+
+        threading.Thread(target=_retry_loop, daemon=True).start()
 
     def run_all_cleanups(self):
         """Run all cleanup operations: h264, proxies, and Premiere previews."""
@@ -3982,36 +4010,13 @@ class TranscoderGUI:
                         folder_size_gb = folder_size / (1024**3)
                         file_count = len(h264_files)
 
-                        deleted = False
-                        for attempt in range(3):
-                            try:
-                                shutil.rmtree(h264_folder)
-                                deleted = True
-                                break
-                            except PermissionError:
-                                time.sleep(2 * (attempt + 1))
-                            except Exception as e:
-                                self.root.after(0, lambda err=e, p=h264_folder: self.log(
-                                    f"Could not delete {p.name}: {err}", "warning"))
-                                break
-
-                        if deleted:
-                            self.root.after(0, lambda sz=folder_size: self.record_deletion(sz))
+                        if self._try_delete_h264(h264_folder, parent_folder, file_count, folder_size, folder_size_gb):
                             deleted_count += 1
                             total_freed_gb += folder_size_gb
                             total_files_deleted += file_count
-
-                            self.root.after(0, lambda p=h264_folder.parent.name, n=file_count, s=folder_size_gb: self.log(
-                                f"Deleted h264: {n} files, {s:.2f} GB freed - {p}", "success"))
-
-                            h265_folder = parent_folder / 'h265'
-                            h265_folder.mkdir(parents=True, exist_ok=True)
-                            log_file = h265_folder / "h265 feito.txt"
-                            try:
-                                with open(log_file, 'a', encoding='utf-8') as f:
-                                    f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED (cleanup)\n")
-                            except:
-                                pass
+                        else:
+                            # Failed - schedule retries at 1m, 10m, 30m
+                            self._schedule_h264_retry(h264_folder, parent_folder, file_count, folder_size, folder_size_gb)
 
             # Summary
             self.root.after(0, lambda d=deleted_count, f=total_files_deleted, g=total_freed_gb: self.log(
