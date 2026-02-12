@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.1.0"
+VERSION = "3.1.1"
 
 import socket
 import subprocess
@@ -4015,8 +4015,10 @@ class TranscoderGUI:
                             total_freed_gb += folder_size_gb
                             total_files_deleted += file_count
                         else:
-                            # Failed - schedule retries at 1m, 10m, 30m
                             self._schedule_h264_retry(h264_folder, parent_folder, file_count, folder_size, folder_size_gb)
+                    except Exception as e:
+                        self.root.after(0, lambda err=e, p=h264_folder: self.log(
+                            f"Error checking {p.name}: {err}", "warning"))
 
             # Summary
             self.root.after(0, lambda d=deleted_count, f=total_files_deleted, g=total_freed_gb: self.log(
