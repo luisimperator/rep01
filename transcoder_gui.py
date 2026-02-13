@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.1.1"
+VERSION = "3.2"
 
 import socket
 import subprocess
