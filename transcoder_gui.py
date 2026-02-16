@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "3.2"
+VERSION = "3.3"
 
 import socket
 import subprocess
@@ -159,6 +159,7 @@ except ImportError:
                 'processed_files': {},
                 'skipped_files': {},
                 'failed_files': {},
+                'processing_files': {},  # {normalized_path: {'pc': str, 'started_at': str}}
                 'daily_history': {},
                 'active_pcs': {},
                 'imported_h265_logs': {},
@@ -178,9 +179,26 @@ except ImportError:
             data.setdefault('processed_files', {})
             data.setdefault('skipped_files', {})
             data.setdefault('failed_files', {})
+            data.setdefault('processing_files', {})
             data.setdefault('daily_history', {})
             data.setdefault('active_pcs', {})
             data.setdefault('imported_h265_logs', {})
+
+            # Clean stale locks (older than 2 hours)
+            if 'processing_files' in data:
+                from datetime import datetime, timedelta
+                cutoff = datetime.now() - timedelta(hours=2)
+                stale_files = []
+                for path, info in data['processing_files'].items():
+                    try:
+                        started = datetime.fromisoformat(info['started_at'])
+                        if started < cutoff:
+                            stale_files.append(path)
+                    except:
+                        stale_files.append(path)
+                for path in stale_files:
+                    del data['processing_files'][path]
+
             return data
 
         def _register_pc(self):
@@ -290,6 +308,65 @@ except ImportError:
             self.manifest['failed_files'].clear()
             self.save(force=True)
             return count
+
+        def try_lock_file(self, file_path):
+            """Try to acquire lock for processing a file. Returns True if successful."""
+            normalized = self._normalize_path(file_path)
+            with self._lock:
+                # Refresh from disk to get latest locks from other instances
+                self.refresh()
+
+                # Check if already locked by another PC
+                if normalized in self.manifest['processing_files']:
+                    lock_info = self.manifest['processing_files'][normalized]
+                    if lock_info['pc'] != self.pc_name:
+                        # Check if lock is stale (> 2 hours)
+                        try:
+                            from datetime import datetime, timedelta
+                            started = datetime.fromisoformat(lock_info['started_at'])
+                            if datetime.now() - started < timedelta(hours=2):
+                                return False  # Still locked by another PC
+                        except:
+                            pass
+                        # Lock is stale, remove it
+                        del self.manifest['processing_files'][normalized]
+
+                # Acquire lock
+                self.manifest['processing_files'][normalized] = {
+                    'pc': self.pc_name,
+                    'started_at': datetime.now().isoformat()
+                }
+                self.save(force=True)
+                return True
+
+        def unlock_file(self, file_path):
+            """Release lock on a file."""
+            normalized = self._normalize_path(file_path)
+            with self._lock:
+                if normalized in self.manifest['processing_files']:
+                    lock_info = self.manifest['processing_files'][normalized]
+                    # Only unlock if we own the lock
+                    if lock_info['pc'] == self.pc_name:
+                        del self.manifest['processing_files'][normalized]
+                        self.save(force=True)
+
+        def is_locked_by_other(self, file_path):
+            """Check if file is locked by another PC."""
+            normalized = self._normalize_path(file_path)
+            if normalized not in self.manifest['processing_files']:
+                return False
+            lock_info = self.manifest['processing_files'][normalized]
+            if lock_info['pc'] == self.pc_name:
+                return False  # We own the lock
+            # Check if lock is stale
+            try:
+                from datetime import datetime, timedelta
+                started = datetime.fromisoformat(lock_info['started_at'])
+                if datetime.now() - started >= timedelta(hours=2):
+                    return False  # Stale lock
+            except:
+                return False
+            return True
 
         def update_estimates(self, total_files, total_bytes):
             # Only UPDATE if new values are higher (totals should never decrease)
@@ -955,13 +1032,14 @@ class TranscoderGUI:
         Move file with retry logic and exponential backoff.
         Handles file locks from FFmpeg/Dropbox (can hold locks for 20-60s).
         Backoff: 2s → 5s → 10s → 20s → 30s
+        Returns True if successful, False if failed due to locks.
         """
         delays = [2, 5, 10, 20, 30]  # Exponential backoff
         last_error = None
         for attempt in range(max_retries):
             try:
                 shutil.move(str(src), str(dst))
-                return  # Success
+                return True  # Success
             except PermissionError as e:
                 last_error = e
                 if attempt < max_retries - 1:
@@ -972,8 +1050,10 @@ class TranscoderGUI:
             except Exception as e:
                 raise e  # Re-raise non-permission errors immediately
 
-        # All retries failed
-        raise last_error
+        # All retries failed - log and return False instead of raising
+        self.root.after(0, lambda e=str(last_error): self.log(
+            f"Failed to move file after {max_retries} attempts: {e}", "error"))
+        return False
 
     def set_dropbox_online_only(self, file_path: Path):
         """
@@ -4699,72 +4779,83 @@ class TranscoderGUI:
             self.process_file(input_path, queue_pos=queue_pos, queue_total=queue_total, file_size=file_size)
             return
 
-        queue_str = f"[{queue_pos}/{queue_total}] " if queue_pos else ""
-        self.root.after(0, lambda q=queue_str: self.current_file_label.config(
-            text=f"{q}Processing: {input_path.name}"))
-        self.root.after(0, lambda q=queue_str: self.log(f"{q}Processing: {input_path.name} (pre-probed)"))
-
-        size_gb = input_path.stat().st_size / (1024**3)
-        self.root.after(0, lambda s=size_gb: self.current_file_label.config(
-            text=f"Processing: {input_path.name} ({s:.2f} GB)"))
-
-        # Output path
-        output_folder = input_path.parent / 'h265'
-        output_path = output_folder / input_path.name
-
-        if output_path.exists():
-            self.root.after(0, lambda: self.log("Output already exists, skipping", "info"))
-            self.mark_processed(input_path, str(output_path), "skipped_exists",
-                              input_path.stat().st_size, output_path.stat().st_size)
+        # Try to acquire lock (prevent multiple instances from processing same file)
+        if self.cloud_manifest and not self.cloud_manifest.try_lock_file(input_path):
+            self.root.after(0, lambda: self.log(
+                f"Skipping {input_path.name} - being processed by another instance", "info"))
             return
 
-        # Transcode (same as process_file from here)
-        output_folder.mkdir(parents=True, exist_ok=True)
-        temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
+        try:
+            queue_str = f"[{queue_pos}/{queue_total}] " if queue_pos else ""
+            self.root.after(0, lambda q=queue_str: self.current_file_label.config(
+                text=f"{q}Processing: {input_path.name}"))
+            self.root.after(0, lambda q=queue_str: self.log(f"{q}Processing: {input_path.name} (pre-probed)"))
 
-        # Get video duration for progress calculation
-        duration = self.get_duration(probe_data)
+            size_gb = input_path.stat().st_size / (1024**3)
+            self.root.after(0, lambda s=size_gb: self.current_file_label.config(
+                text=f"Processing: {input_path.name} ({s:.2f} GB)"))
 
-        # Try encoding with current encoder, fallback to CPU if fails
-        encoder = self.encoder.get()
-        encoders_to_try = [encoder]
-        if encoder != 'cpu':
-            encoders_to_try.append('cpu')
+            # Output path
+            output_folder = input_path.parent / 'h265'
+            output_path = output_folder / input_path.name
 
-        encoding_success = False
-        transcode_start_time = time.time()
+            if output_path.exists():
+                self.root.after(0, lambda: self.log("Output already exists, skipping", "info"))
+                self.mark_processed(input_path, str(output_path), "skipped_exists",
+                                  input_path.stat().st_size, output_path.stat().st_size)
+                return
 
-        for try_encoder in encoders_to_try:
-            if not self.running:
-                break
+            # Transcode (same as process_file from here)
+            output_folder.mkdir(parents=True, exist_ok=True)
+            temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
 
-            self.root.after(0, lambda e=try_encoder: self.log(f"Encoding with {e}..."))
-            cmd = self.build_ffmpeg_command(input_path, temp_path, encoder=try_encoder, probe_data=probe_data)
+            # Get video duration for progress calculation
+            duration = self.get_duration(probe_data)
 
-            self.root.after(0, lambda: self.progress_var.set(0))
+            # Try encoding with current encoder, fallback to CPU if fails
+            encoder = self.encoder.get()
+            encoders_to_try = [encoder]
+            if encoder != 'cpu':
+                encoders_to_try.append('cpu')
 
-            success, error_msg = self._run_ffmpeg(cmd, duration)
+            encoding_success = False
+            transcode_start_time = time.time()
 
-            if success and temp_path.exists():
-                if self._verify_output(temp_path):
-                    encoding_success = True
+            for try_encoder in encoders_to_try:
+                if not self.running:
                     break
+
+                self.root.after(0, lambda e=try_encoder: self.log(f"Encoding with {e}..."))
+                cmd = self.build_ffmpeg_command(input_path, temp_path, encoder=try_encoder, probe_data=probe_data)
+
+                self.root.after(0, lambda: self.progress_var.set(0))
+
+                success, error_msg = self._run_ffmpeg(cmd, duration)
+
+                if success and temp_path.exists():
+                    if self._verify_output(temp_path):
+                        encoding_success = True
+                        break
+                    else:
+                        temp_path.unlink(missing_ok=True)
                 else:
+                    if try_encoder != 'cpu' and error_msg:
+                        self.root.after(0, lambda e=try_encoder, err=error_msg: self.log(
+                            f"{e} failed: {err}. Trying CPU...", "warning"))
                     temp_path.unlink(missing_ok=True)
-            else:
-                if try_encoder != 'cpu' and error_msg:
-                    self.root.after(0, lambda e=try_encoder, err=error_msg: self.log(
-                        f"{e} failed: {err}. Trying CPU...", "warning"))
-                temp_path.unlink(missing_ok=True)
 
-        if not encoding_success:
-            if self.running:
-                self.root.after(0, lambda: self.log("All encoders failed", "error"))
-                self.mark_processed(input_path, "", "error", 0, 0)
-            return
+            if not encoding_success:
+                if self.running:
+                    self.root.after(0, lambda: self.log("All encoders failed", "error"))
+                    self.mark_processed(input_path, "", "error", 0, 0)
+                return
 
-        # Success - finish up (same as process_file)
-        self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start_time)
+            # Success - finish up (same as process_file)
+            self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start_time)
+        finally:
+            # Always release lock when done (success or failure)
+            if self.cloud_manifest:
+                self.cloud_manifest.unlock_file(input_path)
 
     def process_file(self, input_path: Path, queue_pos: int = 0, queue_total: int = 0, file_size: int = 0):
         """Process a single file."""
@@ -4778,118 +4869,129 @@ class TranscoderGUI:
         if not self.wait_for_file_ready(input_path, estimated_size=file_size):
             return
 
-        wait_time = time.time() - process_start
-
-        size_gb = input_path.stat().st_size / (1024**3)
-        self.root.after(0, lambda: self.current_file_label.config(
-            text=f"Processing: {input_path.name} ({size_gb:.2f} GB)"))
-
-        # Probe video
-        probe_start = time.time()
-        probe_data = self.probe_video(input_path)
-        probe_time = time.time() - probe_start
-
-        if not probe_data:
-            self.root.after(0, lambda: self.log("Could not probe video", "error"))
-            self.mark_processed(input_path, "", "error", 0, 0)
+        # Try to acquire lock (prevent multiple instances from processing same file)
+        if self.cloud_manifest and not self.cloud_manifest.try_lock_file(input_path):
+            self.root.after(0, lambda: self.log(
+                f"Skipping {input_path.name} - being processed by another instance", "info"))
             return
 
-        # Log timing if significant delay
-        total_prep_time = time.time() - process_start
-        if total_prep_time > 5:
-            self.root.after(0, lambda w=wait_time, p=probe_time, t=total_prep_time: self.log(
-                f"Prep time: {t:.1f}s (wait:{w:.1f}s, probe:{p:.1f}s)", "info"))
+        try:
+            wait_time = time.time() - process_start
 
-        # Check if already HEVC
-        if self.is_hevc(probe_data):
-            self.root.after(0, lambda: self.log("Already HEVC, skipping", "info"))
-            self.mark_processed(input_path, "", "skipped_hevc", input_path.stat().st_size, 0)
-            return
+            size_gb = input_path.stat().st_size / (1024**3)
+            self.root.after(0, lambda: self.current_file_label.config(
+                text=f"Processing: {input_path.name} ({size_gb:.2f} GB)"))
 
-        # Check if already well-compressed (low bitrate)
-        # Files with bitrate < 8 Mbps are already efficiently compressed
-        file_size = input_path.stat().st_size
-        bitrate = self.get_bitrate(probe_data, file_size)
-        if bitrate > 0 and bitrate < 8:  # Less than 8 Mbps
-            self.root.after(0, lambda b=bitrate: self.log(
-                f"Already well-compressed ({b:.1f} Mbps), skipping", "info"))
-            self.mark_processed(input_path, "", "skipped_lowbitrate", file_size, 0)
-            return
+            # Probe video
+            probe_start = time.time()
+            probe_data = self.probe_video(input_path)
+            probe_time = time.time() - probe_start
 
-        # Output path
-        output_folder = input_path.parent / 'h265'
-        output_path = output_folder / input_path.name
+            if not probe_data:
+                self.root.after(0, lambda: self.log("Could not probe video", "error"))
+                self.mark_processed(input_path, "", "error", 0, 0)
+                return
 
-        if output_path.exists():
-            self.root.after(0, lambda: self.log("Output already exists, skipping", "info"))
-            self.mark_processed(input_path, str(output_path), "skipped_exists",
-                              input_path.stat().st_size, output_path.stat().st_size)
-            return
+            # Log timing if significant delay
+            total_prep_time = time.time() - process_start
+            if total_prep_time > 5:
+                self.root.after(0, lambda w=wait_time, p=probe_time, t=total_prep_time: self.log(
+                    f"Prep time: {t:.1f}s (wait:{w:.1f}s, probe:{p:.1f}s)", "info"))
 
-        # Transcode
-        output_folder.mkdir(parents=True, exist_ok=True)
-        temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
+            # Check if already HEVC
+            if self.is_hevc(probe_data):
+                self.root.after(0, lambda: self.log("Already HEVC, skipping", "info"))
+                self.mark_processed(input_path, "", "skipped_hevc", input_path.stat().st_size, 0)
+                return
 
-        # Get video duration for progress calculation
-        duration = self.get_duration(probe_data)
+            # Check if already well-compressed (low bitrate)
+            # Files with bitrate < 8 Mbps are already efficiently compressed
+            file_size = input_path.stat().st_size
+            bitrate = self.get_bitrate(probe_data, file_size)
+            if bitrate > 0 and bitrate < 8:  # Less than 8 Mbps
+                self.root.after(0, lambda b=bitrate: self.log(
+                    f"Already well-compressed ({b:.1f} Mbps), skipping", "info"))
+                self.mark_processed(input_path, "", "skipped_lowbitrate", file_size, 0)
+                return
 
-        # Try encoding with current encoder, fallback to CPU if fails
-        encoder = self.encoder.get()
-        encoders_to_try = [encoder]
-        if encoder != 'cpu':
-            encoders_to_try.append('cpu')  # Add CPU as fallback
+            # Output path
+            output_folder = input_path.parent / 'h265'
+            output_path = output_folder / input_path.name
 
-        encoding_success = False
-        transcode_start_time = time.time()  # Track transcode time for speed calculation
+            if output_path.exists():
+                self.root.after(0, lambda: self.log("Output already exists, skipping", "info"))
+                self.mark_processed(input_path, str(output_path), "skipped_exists",
+                                  input_path.stat().st_size, output_path.stat().st_size)
+                return
 
-        for try_encoder in encoders_to_try:
-            if not self.running:
-                break
+            # Transcode
+            output_folder.mkdir(parents=True, exist_ok=True)
+            temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
 
-            self.root.after(0, lambda e=try_encoder: self.log(f"Encoding with {e}..."))
-            cmd = self.build_ffmpeg_command(input_path, temp_path, encoder=try_encoder, probe_data=probe_data)
+            # Get video duration for progress calculation
+            duration = self.get_duration(probe_data)
 
-            # Reset progress bar
-            self.root.after(0, lambda: self.progress_var.set(0))
+            # Try encoding with current encoder, fallback to CPU if fails
+            encoder = self.encoder.get()
+            encoders_to_try = [encoder]
+            if encoder != 'cpu':
+                encoders_to_try.append('cpu')  # Add CPU as fallback
 
-            success, error_msg = self._run_ffmpeg(cmd, duration)
+            encoding_success = False
+            transcode_start_time = time.time()  # Track transcode time for speed calculation
 
-            if success and temp_path.exists():
-                # Verify output file is valid
-                if self._verify_output(temp_path):
-                    encoding_success = True
+            for try_encoder in encoders_to_try:
+                if not self.running:
                     break
+
+                self.root.after(0, lambda e=try_encoder: self.log(f"Encoding with {e}..."))
+                cmd = self.build_ffmpeg_command(input_path, temp_path, encoder=try_encoder, probe_data=probe_data)
+
+                # Reset progress bar
+                self.root.after(0, lambda: self.progress_var.set(0))
+
+                success, error_msg = self._run_ffmpeg(cmd, duration)
+
+                if success and temp_path.exists():
+                    # Verify output file is valid
+                    if self._verify_output(temp_path):
+                        encoding_success = True
+                        break
+                    else:
+                        self.root.after(0, lambda: self.log(
+                            f"Output verification failed with {try_encoder}", "warning"))
+                        if temp_path.exists():
+                            temp_path.unlink()
                 else:
-                    self.root.after(0, lambda: self.log(
-                        f"Output verification failed with {try_encoder}", "warning"))
+                    # Log actual FFmpeg error for debugging
+                    if error_msg:
+                        # Get last line of error (most relevant)
+                        last_err = error_msg.split('\n')[-1] if error_msg else "Unknown"
+                        self.root.after(0, lambda e=try_encoder, err=last_err: self.log(
+                            f"Encoding failed with {e}: {err[:100]}", "warning"))
+                    else:
+                        self.root.after(0, lambda e=try_encoder: self.log(
+                            f"Encoding failed with {e}", "warning"))
+                    if try_encoder != encoders_to_try[-1]:
+                        self.root.after(0, lambda: self.log("Trying fallback encoder...", "info"))
                     if temp_path.exists():
                         temp_path.unlink()
+
+            if encoding_success:
+                self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start_time, duration)
             else:
-                # Log actual FFmpeg error for debugging
-                if error_msg:
-                    # Get last line of error (most relevant)
-                    last_err = error_msg.split('\n')[-1] if error_msg else "Unknown"
-                    self.root.after(0, lambda e=try_encoder, err=last_err: self.log(
-                        f"Encoding failed with {e}: {err[:100]}", "warning"))
-                else:
-                    self.root.after(0, lambda e=try_encoder: self.log(
-                        f"Encoding failed with {e}", "warning"))
-                if try_encoder != encoders_to_try[-1]:
-                    self.root.after(0, lambda: self.log("Trying fallback encoder...", "info"))
-                if temp_path.exists():
-                    temp_path.unlink()
+                self.root.after(0, lambda: self.log("All encoders failed!", "error"))
+                self.mark_processed(input_path, "", "error", 0, 0)
 
-        if encoding_success:
-            self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start_time, duration)
-        else:
-            self.root.after(0, lambda: self.log("All encoders failed!", "error"))
-            self.mark_processed(input_path, "", "error", 0, 0)
-
-        # Cleanup
-        self.current_process = None
-        self.root.after(0, lambda: self.progress_var.set(0))
-        self.root.after(0, lambda: self.progress_label.config(text=""))
-        self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
+            # Cleanup
+            self.current_process = None
+            self.root.after(0, lambda: self.progress_var.set(0))
+            self.root.after(0, lambda: self.progress_label.config(text=""))
+            self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
+        finally:
+            # Always release lock when done (success or failure)
+            if self.cloud_manifest:
+                self.cloud_manifest.unlock_file(input_path)
 
     def _finish_successful_transcode(self, input_path: Path, output_path: Path, temp_path: Path,
                                      transcode_start_time: float, duration: float = 0):
@@ -4918,14 +5020,37 @@ class TranscoderGUI:
             h264_folder.mkdir(parents=True, exist_ok=True)
             h264_backup_path = h264_folder / input_path.name
 
-            self._move_with_retry(input_path, h264_backup_path)
+            # Try to move original to backup folder
+            if not self._move_with_retry(input_path, h264_backup_path):
+                # File is locked by another process, skip file reorganization
+                self.root.after(0, lambda: self.log(
+                    f"Could not move {input_path.name} - file locked by another process. "
+                    f"Transcode succeeded but files not reorganized.", "warning"))
+                # Mark as done but with partial success
+                self.mark_processed(input_path, str(output_path), "done", input_size, output_size,
+                                   duration=duration, transcode_time=transcode_time)
+                self.write_success_log(input_path, output_path, input_size, output_size)
+                self._mark_item_done(input_path)
+                return
+
             self.root.after(0, lambda: self.log(
                 f"Moved original to h264/{input_path.name}", "info"))
 
             self.set_dropbox_online_only(h264_backup_path)
 
             final_path = input_path
-            self._move_with_retry(output_path, final_path)
+            if not self._move_with_retry(output_path, final_path):
+                # Could not move h265 to final location, but original is already backed up
+                self.root.after(0, lambda: self.log(
+                    f"Could not move h265 to final location - file locked. "
+                    f"Output is in h265/{output_path.name}", "warning"))
+                # Mark as done - both files exist, just not in final locations
+                self.mark_processed(h264_backup_path, str(output_path), "done", input_size, output_size,
+                                   duration=duration, transcode_time=transcode_time)
+                self.write_success_log(h264_backup_path, output_path, input_size, output_size)
+                self._mark_item_done(input_path)
+                return
+
             self.root.after(0, lambda: self.log(
                 f"Moved H.265 to original location", "info"))
 
