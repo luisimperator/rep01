@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HeavyDrops Transcoder v3 — minimal, ruthless, reliable.
+HeavyDrops Transcoder v4.4 — minimal, ruthless, reliable.
 
 One file. One loop. H.264 in, H.265 out, original deleted.
 Designed to chew through 230TB on Dropbox unattended for months.
