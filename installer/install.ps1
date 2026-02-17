@@ -1,10 +1,11 @@
-# HeavyDrops Transcoder Installer
+# HeavyDrops Transcoder v4.3 Installer
 # Run as Administrator: Right-click -> Run with PowerShell
 
 $ErrorActionPreference = "Stop"
 
+Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  HeavyDrops Transcoder Installer" -ForegroundColor Cyan
+Write-Host "  HeavyDrops Transcoder v4.3 Installer" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -18,187 +19,184 @@ if (-not $isAdmin) {
 }
 
 # Configuration
-$InstallDir = "C:\Program Files\HeavyDrops Transcoder"
+$InstallDir = "C:\Program Files\HeavyDrops_Transcoder"
 $FFmpegDir = "C:\Program Files\FFmpeg"
 $FFmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
 $TempDir = "$env:TEMP\heavydrops_install"
 
 # Create temp directory
-Write-Host "[1/6] Preparing installation..." -ForegroundColor Green
+Write-Host "[1/7] Preparing installation..." -ForegroundColor Green
 New-Item -ItemType Directory -Force -Path $TempDir | Out-Null
 
-# Check if FFmpeg is already installed
+# ---- FFmpeg ----
 $ffmpegInstalled = $false
-$ffmpegExe = "$FFmpegDir\ffmpeg.exe"
 
-# Check in expected location
-if (Test-Path $ffmpegExe) {
-    Write-Host "[2/6] FFmpeg already installed at: $FFmpegDir" -ForegroundColor Green
-    Write-Host "   Skipping download" -ForegroundColor Gray
+if (Test-Path "$FFmpegDir\ffmpeg.exe") {
+    Write-Host "[2/7] FFmpeg already installed at: $FFmpegDir" -ForegroundColor Green
     $ffmpegInstalled = $true
-}
-# Check in PATH
-elseif (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
-    Write-Host "[2/6] FFmpeg already available in PATH" -ForegroundColor Green
-    Write-Host "   Skipping download" -ForegroundColor Gray
+} elseif (Get-Command ffmpeg -ErrorAction SilentlyContinue) {
+    Write-Host "[2/7] FFmpeg already available in PATH" -ForegroundColor Green
     $ffmpegInstalled = $true
 }
 
-# Download FFmpeg only if not installed
 if (-not $ffmpegInstalled) {
-    Write-Host "[2/6] Downloading FFmpeg (this may take a few minutes)..." -ForegroundColor Green
+    Write-Host "[2/7] Downloading FFmpeg (this may take a few minutes)..." -ForegroundColor Green
     $ffmpegZip = "$TempDir\ffmpeg.zip"
     try {
-        # Use TLS 1.2
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-
-        $ProgressPreference = 'SilentlyContinue'  # Faster download
+        $ProgressPreference = 'SilentlyContinue'
         Invoke-WebRequest -Uri $FFmpegUrl -OutFile $ffmpegZip -UseBasicParsing
         Write-Host "   Download complete!" -ForegroundColor Gray
     } catch {
-        Write-Host "   Failed to download FFmpeg. Trying alternative method..." -ForegroundColor Yellow
-
-        # Try using winget as fallback
+        Write-Host "   Failed to download FFmpeg. Trying winget..." -ForegroundColor Yellow
         try {
             winget install --id Gyan.FFmpeg -e --accept-source-agreements --accept-package-agreements
-            Write-Host "   FFmpeg installed via winget!" -ForegroundColor Gray
             $ffmpegInstalled = $true
         } catch {
-            Write-Host "ERROR: Could not download FFmpeg. Please install manually:" -ForegroundColor Red
-            Write-Host "   winget install ffmpeg" -ForegroundColor Yellow
+            Write-Host "ERROR: Could not install FFmpeg. Install manually: winget install ffmpeg" -ForegroundColor Red
             Read-Host "Press Enter to continue anyway"
         }
     }
 }
 
-# Extract and install FFmpeg (only if downloaded)
-if (-not $ffmpegInstalled -and (Test-Path -Path "$TempDir\ffmpeg.zip")) {
-    $ffmpegZip = "$TempDir\ffmpeg.zip"
-    Write-Host "[3/6] Installing FFmpeg..." -ForegroundColor Green
-
-    # Create FFmpeg directory
+if (-not $ffmpegInstalled -and (Test-Path "$TempDir\ffmpeg.zip")) {
+    Write-Host "[3/7] Installing FFmpeg..." -ForegroundColor Green
     New-Item -ItemType Directory -Force -Path $FFmpegDir | Out-Null
-
-    # Extract
-    Expand-Archive -Path $ffmpegZip -DestinationPath $TempDir -Force
-
-    # Find the bin folder and copy executables
+    Expand-Archive -Path "$TempDir\ffmpeg.zip" -DestinationPath $TempDir -Force
     $binFolder = Get-ChildItem -Path $TempDir -Recurse -Directory -Filter "bin" | Select-Object -First 1
     if ($binFolder) {
         Copy-Item -Path "$($binFolder.FullName)\*" -Destination $FFmpegDir -Force
         Write-Host "   FFmpeg installed to: $FFmpegDir" -ForegroundColor Gray
     }
-
-    # Add to PATH if not already there
     $currentPath = [Environment]::GetEnvironmentVariable("Path", "Machine")
     if ($currentPath -notlike "*$FFmpegDir*") {
         [Environment]::SetEnvironmentVariable("Path", "$currentPath;$FFmpegDir", "Machine")
         Write-Host "   Added FFmpeg to system PATH" -ForegroundColor Gray
     }
+} else {
+    Write-Host "[3/7] FFmpeg OK, skipping..." -ForegroundColor Green
 }
 
-# Check and install Python
+# ---- Python ----
 $pythonInstalled = $false
 if (Get-Command python -ErrorAction SilentlyContinue) {
     $pyVer = python --version 2>&1
-    Write-Host "[4/6] Python already installed: $pyVer" -ForegroundColor Green
-    Write-Host "   Skipping installation" -ForegroundColor Gray
+    Write-Host "[4/7] Python already installed: $pyVer" -ForegroundColor Green
     $pythonInstalled = $true
 } else {
-    Write-Host "[4/6] Installing Python via winget..." -ForegroundColor Green
+    Write-Host "[4/7] Installing Python via winget..." -ForegroundColor Green
     try {
         winget install --id Python.Python.3.12 -e --accept-source-agreements --accept-package-agreements --silent
-        Write-Host "   Python installed!" -ForegroundColor Gray
         $pythonInstalled = $true
-        # Refresh PATH
         $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
     } catch {
-        Write-Host "   Failed to install Python automatically" -ForegroundColor Yellow
-        Write-Host "   Please install manually: winget install Python.Python.3.12" -ForegroundColor Yellow
+        Write-Host "   Failed to install Python. Install manually: winget install Python.Python.3.12" -ForegroundColor Yellow
     }
 }
 
-# Install the transcoder application
-Write-Host "[5/6] Installing HeavyDrops Transcoder..." -ForegroundColor Green
-
-# Create install directory
-New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-
-# Copy the Python script (assuming it's in the same folder as this installer)
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$SourceScript = Join-Path $ScriptDir "..\transcode.py"
-$SourceConfig = Join-Path $ScriptDir "..\config.example.yaml"
-$SourceReqs = Join-Path $ScriptDir "..\requirements.txt"
-
-if (Test-Path $SourceScript) {
-    Copy-Item -Path $SourceScript -Destination "$InstallDir\transcode.py" -Force
-    Write-Host "   Application files copied" -ForegroundColor Gray
-} else {
-    Write-Host "   Warning: transcode.py not found in parent folder" -ForegroundColor Yellow
-}
-
-if (Test-Path $SourceConfig) {
-    Copy-Item -Path $SourceConfig -Destination "$InstallDir\config.example.yaml" -Force
-}
-if (Test-Path $SourceReqs) {
-    Copy-Item -Path $SourceReqs -Destination "$InstallDir\requirements.txt" -Force
-}
-
-# Install Python dependencies
-Write-Host "   Installing Python dependencies..." -ForegroundColor Gray
+# ---- Python dependencies ----
+Write-Host "[5/7] Installing Python dependencies (dropbox, pyyaml)..." -ForegroundColor Green
 try {
+    python -m pip install --quiet --upgrade pip 2>&1 | Out-Null
     python -m pip install --quiet dropbox pyyaml 2>&1 | Out-Null
     Write-Host "   Dependencies installed" -ForegroundColor Gray
 } catch {
-    Write-Host "   Warning: Could not install dependencies. Run: pip install dropbox pyyaml" -ForegroundColor Yellow
+    Write-Host "   Warning: pip install failed. Run manually: pip install dropbox pyyaml" -ForegroundColor Yellow
 }
 
-# Create a batch launcher
+# ---- Copy application files ----
+Write-Host "[6/7] Installing HeavyDrops Transcoder..." -ForegroundColor Green
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+
+# Copy transcode.py
+$SourceScript = Join-Path $ScriptDir "..\transcode.py"
+if (Test-Path $SourceScript) {
+    Copy-Item -Path $SourceScript -Destination "$InstallDir\transcode.py" -Force
+    Write-Host "   transcode.py copied" -ForegroundColor Gray
+} else {
+    Write-Host "   ERROR: transcode.py not found at $SourceScript" -ForegroundColor Red
+}
+
+# Copy config example and create config.yaml if needed
+$SourceConfig = Join-Path $ScriptDir "..\config.example.yaml"
+if (Test-Path $SourceConfig) {
+    Copy-Item -Path $SourceConfig -Destination "$InstallDir\config.example.yaml" -Force
+    $ConfigDest = "$InstallDir\config.yaml"
+    if (-not (Test-Path $ConfigDest)) {
+        Copy-Item -Path $SourceConfig -Destination $ConfigDest -Force
+        Write-Host "   config.yaml created (edit with your Dropbox token!)" -ForegroundColor Yellow
+    } else {
+        Write-Host "   config.yaml already exists, keeping your settings" -ForegroundColor Gray
+    }
+}
+
+# Create batch launcher (keeps console window open — this is a CLI app)
 $LauncherContent = @"
 @echo off
+title HeavyDrops Transcoder v4.3
 cd /d "%~dp0"
+echo ========================================
+echo   HeavyDrops Transcoder v4.3
+echo ========================================
+echo.
 python transcode.py
 if errorlevel 1 (
     echo.
-    echo Python not found! Please install Python from python.org
-    echo Or run: winget install Python.Python.3.12
-    pause
+    echo Something went wrong. Check the output above.
+    echo.
+    echo Common fixes:
+    echo   1. Set dropbox_token in config.yaml
+    echo   2. Run: pip install dropbox pyyaml
+    echo   3. Make sure FFmpeg is installed
 )
+echo.
+pause
 "@
 Set-Content -Path "$InstallDir\HeavyDrops Transcoder.bat" -Value $LauncherContent
 
-# Create a PowerShell launcher (more reliable)
+# PowerShell launcher (keeps window open — NOT hidden)
 $PSLauncherContent = @"
+`$Host.UI.RawUI.WindowTitle = "HeavyDrops Transcoder v4.3"
 Set-Location "`$PSScriptRoot"
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  HeavyDrops Transcoder v4.3" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
 python transcode.py
+Write-Host ""
+Read-Host "Press Enter to exit"
 "@
 Set-Content -Path "$InstallDir\Launch.ps1" -Value $PSLauncherContent
 
-# Create Desktop shortcut
-Write-Host "[6/6] Creating shortcuts..." -ForegroundColor Green
+# ---- Shortcuts (console VISIBLE, not hidden) ----
+Write-Host "[7/7] Creating shortcuts..." -ForegroundColor Green
 $WshShell = New-Object -ComObject WScript.Shell
+
+# Desktop shortcut
 $Shortcut = $WshShell.CreateShortcut("$env:PUBLIC\Desktop\HeavyDrops Transcoder.lnk")
 $Shortcut.TargetPath = "powershell.exe"
-$Shortcut.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$InstallDir\Launch.ps1`""
+$Shortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -File `"$InstallDir\Launch.ps1`""
 $Shortcut.WorkingDirectory = $InstallDir
-$Shortcut.Description = "HeavyDrops Transcoder v4.2 — H.264 to H.265"
+$Shortcut.Description = "HeavyDrops Transcoder v4.3"
 $Shortcut.Save()
 Write-Host "   Desktop shortcut created" -ForegroundColor Gray
 
-# Create Start Menu shortcut
+# Start Menu shortcut
 $StartMenuFolder = "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\HeavyDrops"
 New-Item -ItemType Directory -Force -Path $StartMenuFolder | Out-Null
 $StartShortcut = $WshShell.CreateShortcut("$StartMenuFolder\HeavyDrops Transcoder.lnk")
 $StartShortcut.TargetPath = "powershell.exe"
-$StartShortcut.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$InstallDir\Launch.ps1`""
+$StartShortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -File `"$InstallDir\Launch.ps1`""
 $StartShortcut.WorkingDirectory = $InstallDir
 $StartShortcut.Save()
 Write-Host "   Start Menu shortcut created" -ForegroundColor Gray
 
-# Cleanup
+# ---- Cleanup ----
 Remove-Item -Path $TempDir -Recurse -Force -ErrorAction SilentlyContinue
 
-# Verify installation
+# ---- Done ----
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Green
 Write-Host "  Installation Complete!" -ForegroundColor Green
@@ -207,29 +205,25 @@ Write-Host ""
 Write-Host "Installed to: $InstallDir" -ForegroundColor Cyan
 Write-Host ""
 
-# Check Python
+# Verify dependencies
 Write-Host "Checking dependencies..." -ForegroundColor Yellow
 try {
-    $pythonVersion = python --version 2>&1
-    Write-Host "  [OK] Python: $pythonVersion" -ForegroundColor Green
+    $pv = python --version 2>&1
+    Write-Host "  [OK] Python: $pv" -ForegroundColor Green
 } catch {
-    Write-Host "  [!] Python not found!" -ForegroundColor Red
-    Write-Host "      Install with: winget install Python.Python.3.12" -ForegroundColor Yellow
+    Write-Host "  [!] Python not found! Install: winget install Python.Python.3.12" -ForegroundColor Red
 }
-
-# Check FFmpeg
 try {
-    $ffmpegVersion = ffmpeg -version 2>&1 | Select-Object -First 1
-    Write-Host "  [OK] FFmpeg: $ffmpegVersion" -ForegroundColor Green
+    $fv = ffmpeg -version 2>&1 | Select-Object -First 1
+    Write-Host "  [OK] FFmpeg: $fv" -ForegroundColor Green
 } catch {
-    Write-Host "  [!] FFmpeg not in PATH yet (restart may be required)" -ForegroundColor Yellow
+    Write-Host "  [!] FFmpeg not in PATH (restart may be required)" -ForegroundColor Yellow
 }
 
 Write-Host ""
-Write-Host "You can now launch the application from:" -ForegroundColor Cyan
-Write-Host "  - Desktop shortcut: 'HeavyDrops Transcoder'" -ForegroundColor White
-Write-Host "  - Start Menu: 'HeavyDrops Transcoder'" -ForegroundColor White
+Write-Host "NEXT STEP: Edit your config with your Dropbox token:" -ForegroundColor Yellow
+Write-Host "  notepad `"$InstallDir\config.yaml`"" -ForegroundColor White
 Write-Host ""
-Write-Host "NOTE: You may need to restart your computer for PATH changes to take effect." -ForegroundColor Yellow
+Write-Host "Then launch from Desktop shortcut: 'HeavyDrops Transcoder'" -ForegroundColor Cyan
 Write-Host ""
 Read-Host "Press Enter to exit"
