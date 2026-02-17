@@ -96,12 +96,37 @@ if (Get-Command python -ErrorAction SilentlyContinue) {
 
 # ---- Python dependencies ----
 Write-Host "[5/7] Installing Python dependencies (dropbox, pyyaml)..." -ForegroundColor Green
+# Refresh PATH so we find the real python, not the Windows Store alias
+$env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+# Find the real python.exe (not the Windows Store alias)
+$PythonExe = $null
+$PythonPaths = @(
+    (Get-Command python -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source -ErrorAction SilentlyContinue),
+    "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe",
+    "$env:LOCALAPPDATA\Programs\Python\Python311\python.exe",
+    "$env:ProgramFiles\Python312\python.exe",
+    "$env:ProgramFiles\Python311\python.exe"
+)
+foreach ($p in $PythonPaths) {
+    if ($p -and (Test-Path $p) -and ($p -notlike "*WindowsApps*")) {
+        $PythonExe = $p
+        break
+    }
+}
+if (-not $PythonExe) { $PythonExe = "python" }
+Write-Host "   Using Python: $PythonExe" -ForegroundColor Gray
+
 try {
-    python -m pip install --quiet --upgrade pip 2>&1 | Out-Null
-    python -m pip install --quiet dropbox pyyaml 2>&1 | Out-Null
+    & $PythonExe -m pip install --upgrade pip 2>&1 | Out-Null
+    $pipResult = & $PythonExe -m pip install dropbox pyyaml 2>&1
     Write-Host "   Dependencies installed" -ForegroundColor Gray
+    # Verify
+    $check = & $PythonExe -c "import dropbox; print('dropbox OK')" 2>&1
+    Write-Host "   Verified: $check" -ForegroundColor Gray
 } catch {
-    Write-Host "   Warning: pip install failed. Run manually: pip install dropbox pyyaml" -ForegroundColor Yellow
+    Write-Host "   Warning: pip install may have failed" -ForegroundColor Yellow
+    Write-Host "   Run manually: $PythonExe -m pip install dropbox pyyaml" -ForegroundColor Yellow
 }
 
 # ---- Copy application files ----
@@ -132,7 +157,7 @@ if (Test-Path $SourceConfig) {
     }
 }
 
-# Create batch launcher (keeps console window open — this is a CLI app)
+# Create batch launcher (auto-installs deps if missing)
 $LauncherContent = @"
 @echo off
 title HeavyDrops Transcoder v4.3
@@ -141,6 +166,13 @@ echo ========================================
 echo   HeavyDrops Transcoder v4.3
 echo ========================================
 echo.
+REM Auto-install dependencies if missing
+python -c "import dropbox" >nul 2>&1
+if errorlevel 1 (
+    echo Installing dependencies...
+    python -m pip install dropbox pyyaml
+    echo.
+)
 python transcode.py
 if errorlevel 1 (
     echo.
@@ -156,7 +188,7 @@ pause
 "@
 Set-Content -Path "$InstallDir\HeavyDrops Transcoder.bat" -Value $LauncherContent
 
-# PowerShell launcher (keeps window open — NOT hidden)
+# PowerShell launcher (auto-installs deps if missing, keeps window open)
 $PSLauncherContent = @"
 `$Host.UI.RawUI.WindowTitle = "HeavyDrops Transcoder v4.3"
 Set-Location "`$PSScriptRoot"
@@ -164,6 +196,22 @@ Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  HeavyDrops Transcoder v4.3" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
+
+# Check and auto-install dependencies if missing
+try {
+    python -c "import dropbox" 2>`$null
+} catch {
+    Write-Host "Installing dependencies..." -ForegroundColor Yellow
+    python -m pip install dropbox pyyaml
+    Write-Host ""
+}
+`$depCheck = python -c "import dropbox" 2>&1
+if (`$LASTEXITCODE -ne 0) {
+    Write-Host "Installing dependencies..." -ForegroundColor Yellow
+    python -m pip install dropbox pyyaml
+    Write-Host ""
+}
+
 python transcode.py
 Write-Host ""
 Read-Host "Press Enter to exit"
