@@ -3776,9 +3776,6 @@ class TranscoderGUI:
             total_files_deleted = 0
 
             for h264_folder in h264_folders:
-                if not self.running:
-                    break
-
                 parent_folder = h264_folder.parent
 
                 # Get all video files in h264 folder
@@ -3893,9 +3890,6 @@ class TranscoderGUI:
             sixty_days_seconds = 60 * 24 * 60 * 60  # 60 days in seconds
 
             for proxy_folder in proxy_folders:
-                if not self.running:
-                    break
-
                 try:
                     # Check if folder contains _Proxy .mov files
                     proxy_files = [f for f in proxy_folder.glob('*.mov') if '_Proxy' in f.name]
