@@ -19,6 +19,21 @@ import time
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 
+# Auto-install dependencies if missing
+def _ensure_deps():
+    missing = []
+    for pkg in ["dropbox", "yaml"]:
+        try:
+            __import__(pkg)
+        except ImportError:
+            missing.append("pyyaml" if pkg == "yaml" else pkg)
+    if missing:
+        print(f"Installing missing dependencies: {', '.join(missing)}...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install"] + missing)
+        print("Done. Continuing...\n")
+
+_ensure_deps()
+
 import dropbox
 from dropbox.exceptions import ApiError, AuthError
 from dropbox.files import FileMetadata, WriteMode
