@@ -1,5 +1,5 @@
 ╔════════════════════════════════════════════════════════════════════════════╗
-║                    HeavyDrops Transcoder v4.4                              ║
+║                    HeavyDrops Transcoder v5.3.0                            ║
 ║                    Installation Instructions                                ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 
@@ -22,9 +22,9 @@ MANUAL SETUP
 1. Install Python 3.11+: winget install Python.Python.3.12
 2. Install FFmpeg: winget install ffmpeg
 3. Install dependencies: pip install dropbox pyyaml
-4. Copy transcode.py wherever you want
+4. Copy transcoder_gui.py and transcode.py wherever you want
 5. Copy config.example.yaml to config.yaml, set your token
-6. Run: python transcode.py
+6. Run: python transcoder_gui.py
 
 
 WHAT IT DOES

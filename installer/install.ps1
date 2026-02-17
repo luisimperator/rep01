@@ -1,11 +1,11 @@
-# HeavyDrops Transcoder v4.4 Installer
+# HeavyDrops Transcoder v5.3.0 Installer
 # Run as Administrator: Right-click -> Run with PowerShell
 
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  HeavyDrops Transcoder v4.4 Installer" -ForegroundColor Cyan
+Write-Host "  HeavyDrops Transcoder v5.3.0 Installer" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -135,13 +135,22 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
-# Copy transcode.py
+# Copy transcoder_gui.py (main GUI app)
+$SourceGUI = Join-Path $ScriptDir "..\transcoder_gui.py"
+if (Test-Path $SourceGUI) {
+    Copy-Item -Path $SourceGUI -Destination "$InstallDir\transcoder_gui.py" -Force
+    Write-Host "   transcoder_gui.py copied" -ForegroundColor Gray
+} else {
+    Write-Host "   ERROR: transcoder_gui.py not found at $SourceGUI" -ForegroundColor Red
+}
+
+# Copy transcode.py (CLI module)
 $SourceScript = Join-Path $ScriptDir "..\transcode.py"
 if (Test-Path $SourceScript) {
     Copy-Item -Path $SourceScript -Destination "$InstallDir\transcode.py" -Force
     Write-Host "   transcode.py copied" -ForegroundColor Gray
 } else {
-    Write-Host "   ERROR: transcode.py not found at $SourceScript" -ForegroundColor Red
+    Write-Host "   WARNING: transcode.py not found at $SourceScript" -ForegroundColor Yellow
 }
 
 # Copy config example and create config.yaml if needed
@@ -160,10 +169,10 @@ if (Test-Path $SourceConfig) {
 # Create batch launcher (auto-installs deps if missing)
 $LauncherContent = @"
 @echo off
-title HeavyDrops Transcoder v4.4
+title HeavyDrops Transcoder v5.3.0
 cd /d "%~dp0"
 echo ========================================
-echo   HeavyDrops Transcoder v4.4
+echo   HeavyDrops Transcoder v5.3.0
 echo ========================================
 echo.
 REM Auto-install dependencies if missing
@@ -173,7 +182,7 @@ if errorlevel 1 (
     python -m pip install dropbox pyyaml
     echo.
 )
-python transcode.py
+python transcoder_gui.py
 if errorlevel 1 (
     echo.
     echo Something went wrong. Check the output above.
@@ -190,10 +199,10 @@ Set-Content -Path "$InstallDir\HeavyDrops Transcoder.bat" -Value $LauncherConten
 
 # PowerShell launcher (auto-installs deps if missing, keeps window open)
 $PSLauncherContent = @"
-`$Host.UI.RawUI.WindowTitle = "HeavyDrops Transcoder v4.4"
+`$Host.UI.RawUI.WindowTitle = "HeavyDrops Transcoder v5.3.0"
 Set-Location "`$PSScriptRoot"
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  HeavyDrops Transcoder v4.4" -ForegroundColor Cyan
+Write-Host "  HeavyDrops Transcoder v5.3.0" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -212,7 +221,7 @@ if (`$LASTEXITCODE -ne 0) {
     Write-Host ""
 }
 
-python transcode.py
+python transcoder_gui.py
 Write-Host ""
 Read-Host "Press Enter to exit"
 "@
@@ -227,7 +236,7 @@ $Shortcut = $WshShell.CreateShortcut("$env:PUBLIC\Desktop\HeavyDrops Transcoder.
 $Shortcut.TargetPath = "powershell.exe"
 $Shortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -File `"$InstallDir\Launch.ps1`""
 $Shortcut.WorkingDirectory = $InstallDir
-$Shortcut.Description = "HeavyDrops Transcoder v4.4"
+$Shortcut.Description = "HeavyDrops Transcoder v5.3.0"
 $Shortcut.Save()
 Write-Host "   Desktop shortcut created" -ForegroundColor Gray
 
