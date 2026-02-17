@@ -126,20 +126,38 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 # Copy the Python script (assuming it's in the same folder as this installer)
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$SourceScript = Join-Path $ScriptDir "..\transcoder_gui.py"
+$SourceScript = Join-Path $ScriptDir "..\transcode.py"
+$SourceConfig = Join-Path $ScriptDir "..\config.example.yaml"
+$SourceReqs = Join-Path $ScriptDir "..\requirements.txt"
 
 if (Test-Path $SourceScript) {
-    Copy-Item -Path $SourceScript -Destination "$InstallDir\transcoder_gui.py" -Force
+    Copy-Item -Path $SourceScript -Destination "$InstallDir\transcode.py" -Force
     Write-Host "   Application files copied" -ForegroundColor Gray
 } else {
-    Write-Host "   Warning: transcoder_gui.py not found in parent folder" -ForegroundColor Yellow
+    Write-Host "   Warning: transcode.py not found in parent folder" -ForegroundColor Yellow
+}
+
+if (Test-Path $SourceConfig) {
+    Copy-Item -Path $SourceConfig -Destination "$InstallDir\config.example.yaml" -Force
+}
+if (Test-Path $SourceReqs) {
+    Copy-Item -Path $SourceReqs -Destination "$InstallDir\requirements.txt" -Force
+}
+
+# Install Python dependencies
+Write-Host "   Installing Python dependencies..." -ForegroundColor Gray
+try {
+    python -m pip install --quiet dropbox pyyaml 2>&1 | Out-Null
+    Write-Host "   Dependencies installed" -ForegroundColor Gray
+} catch {
+    Write-Host "   Warning: Could not install dependencies. Run: pip install dropbox pyyaml" -ForegroundColor Yellow
 }
 
 # Create a batch launcher
 $LauncherContent = @"
 @echo off
 cd /d "%~dp0"
-python transcoder_gui.py
+python transcode.py
 if errorlevel 1 (
     echo.
     echo Python not found! Please install Python from python.org
@@ -152,7 +170,7 @@ Set-Content -Path "$InstallDir\HeavyDrops Transcoder.bat" -Value $LauncherConten
 # Create a PowerShell launcher (more reliable)
 $PSLauncherContent = @"
 Set-Location "`$PSScriptRoot"
-python transcoder_gui.py
+python transcode.py
 "@
 Set-Content -Path "$InstallDir\Launch.ps1" -Value $PSLauncherContent
 
@@ -163,7 +181,7 @@ $Shortcut = $WshShell.CreateShortcut("$env:PUBLIC\Desktop\HeavyDrops Transcoder.
 $Shortcut.TargetPath = "powershell.exe"
 $Shortcut.Arguments = "-ExecutionPolicy Bypass -WindowStyle Hidden -File `"$InstallDir\Launch.ps1`""
 $Shortcut.WorkingDirectory = $InstallDir
-$Shortcut.Description = "HeavyDrops Dropbox Video Transcoder H.264 to H.265"
+$Shortcut.Description = "HeavyDrops Transcoder v4.2 — H.264 to H.265"
 $Shortcut.Save()
 Write-Host "   Desktop shortcut created" -ForegroundColor Gray
 
