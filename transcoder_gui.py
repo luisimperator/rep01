@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HeavyDrops Transcoder v1.0
+HeavyDrops Transcoder v5.3.0
 
 Dropbox Video Transcoder - GUI Version
 Simple graphical interface for local folder transcoding.
@@ -17,7 +17,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "2.2.0"
+VERSION = "5.3.0"
 
 import socket
 import subprocess
@@ -2129,19 +2129,18 @@ class TranscoderGUI:
             self.log("Paused encoding (FFmpeg suspended)", "warning")
 
     def stop_all(self):
-        """Stop all encoding immediately."""
+        """Stop all encoding and clear all queues immediately."""
         self.running = False
         self.paused = False
         self.ready_queue_worker_running = False  # Stop the ready queue worker
         self.probed_queue_worker_running = False  # Stop the probed queue worker
 
-        # Clear the ready queue and tracking set
+        # Clear the ready queue
         while not self.ready_queue.empty():
             try:
                 self.ready_queue.get_nowait()
             except:
                 break
-        self._queue_items_set.clear()
 
         # Clear the probed queue
         while not self.probed_queue.empty():
@@ -2149,6 +2148,22 @@ class TranscoderGUI:
                 self.probed_queue.get_nowait()
             except:
                 break
+
+        # Clear the active queue (v5.3: full queue clear on STOP)
+        with self.active_queue_lock:
+            self.active_queue.clear()
+        self._queue_items_set.clear()
+
+        # Clear pending downloads
+        with self.pending_downloads_lock:
+            self.pending_downloads.clear()
+
+        # Delete queue snapshot so it doesn't reload on next start
+        try:
+            if self.QUEUE_SNAPSHOT_FILE.exists():
+                self.QUEUE_SNAPSHOT_FILE.unlink()
+        except Exception:
+            pass
 
         # Kill FFmpeg process if running
         if self.current_process:
@@ -2164,7 +2179,7 @@ class TranscoderGUI:
         self.progress_var.set(0)
         self.current_file_label.config(text="Idle")
         self.progress_label.config(text="")
-        self.log("Stopped all encoding", "warning")
+        self.log("Stopped all encoding and cleared queue", "warning")
 
     def pause_ffmpeg(self):
         """Suspend the FFmpeg process (Windows)."""
