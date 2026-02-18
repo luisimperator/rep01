@@ -3302,7 +3302,7 @@ class TranscoderGUI:
                 return False
 
             # Verify MP3 is valid
-            if not self._verify_mp3(temp_mp3):
+            if not self._verify_codec(temp_mp3, ('mp3',), stream_type='a:0'):
                 self.root.after(0, lambda: self.log(
                     f"MP3 verification failed: {wav_path.name}", "error"))
                 if temp_mp3.exists():
@@ -3385,7 +3385,7 @@ class TranscoderGUI:
                         break
 
                     # Verify MP3 is valid
-                    if not self._verify_mp3(mp3_file):
+                    if not self._verify_codec(mp3_file, ('mp3',), stream_type='a:0'):
                         self.root.after(0, lambda f=wav_file.name: self.log(
                             f"MP3 verification failed for {f}, keeping wav folder", "warning"))
                         all_verified = False
@@ -3494,7 +3494,7 @@ class TranscoderGUI:
                         continue
 
                     # Verify with ffprobe (will download cloud file if needed)
-                    if not self._verify_output(h265_file):
+                    if not self._verify_codec(h265_file, ('hevc', 'h265'), log=True):
                         failed_files.append(f"{h264_file.name}: ffprobe verification failed")
                         continue
 
@@ -3512,7 +3512,6 @@ class TranscoderGUI:
 
                 # Only delete if ALL files verified
                 if verified_count == total_files and verified_count > 0:
-                    import shutil
                     folder_size = sum(f.stat().st_size for f in h264_folder.rglob('*') if f.is_file())
                     folder_size_gb = folder_size / (1024**3)
 
@@ -3715,25 +3714,43 @@ class TranscoderGUI:
         else:
             self.root.after(0, lambda: self.log(f"No old {label} folders to delete (all < {max_age_days} days)", "info"))
 
-    def _verify_mp3(self, mp3_path: Path) -> bool:
-        """Verify MP3 file is valid using ffprobe."""
+    def _verify_codec(self, file_path: Path, expected_codecs: tuple,
+                       stream_type: str = 'v:0', log: bool = False) -> bool:
+        """Verify a media file's codec using ffprobe.
+
+        Args:
+            file_path: Path to the media file.
+            expected_codecs: Tuple of acceptable codec names (lowercase).
+            stream_type: 'v:0' for video, 'a:0' for audio.
+            log: If True, log success/failure to the GUI.
+        """
         try:
-            if not mp3_path.exists():
+            if not file_path.exists():
                 return False
-            if mp3_path.stat().st_size < 1000:  # Less than 1KB
+            if file_path.stat().st_size < 1000:
                 return False
 
             result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-select_streams', 'a:0',
+                ['ffprobe', '-v', 'error', '-select_streams', stream_type,
                  '-show_entries', 'stream=codec_name', '-of', 'csv=p=0',
-                 str(mp3_path)],
+                 str(file_path)],
                 capture_output=True, text=True, timeout=30
             )
 
             codec = result.stdout.strip().lower()
-            return codec == 'mp3'
+            matched = codec in expected_codecs
+            if log:
+                if matched:
+                    self.root.after(0, lambda: self.log(f"Output verified: {codec}", "info"))
+                else:
+                    self.root.after(0, lambda c=codec: self.log(
+                        f"Verification failed: codec={c}", "warning"))
+            return matched
 
-        except Exception:
+        except Exception as e:
+            if log:
+                self.root.after(0, lambda err=e: self.log(
+                    f"Verification error: {err}", "warning"))
             return False
 
     def _record_transcode_speed(self, bytes_processed: int, seconds_taken: float):
@@ -4275,7 +4292,7 @@ class TranscoderGUI:
             success, error_msg = self._run_ffmpeg(cmd, duration)
 
             if success and temp_path.exists():
-                if self._verify_output(temp_path):
+                if self._verify_codec(temp_path, ('hevc', 'h265'), log=True):
                     return (True, transcode_start)
                 self.root.after(0, lambda e=try_encoder: self.log(
                     f"Output verification failed with {e}", "warning"))
@@ -4507,40 +4524,6 @@ class TranscoderGUI:
         finally:
             self.current_process = None
 
-    def _verify_output(self, output_path: Path) -> bool:
-        """
-        Verify output file is a valid video using ffprobe.
-        Returns True if file is valid and playable.
-        """
-        try:
-            # Check file exists and has reasonable size
-            if not output_path.exists():
-                return False
-            if output_path.stat().st_size < 1000:  # Less than 1KB
-                return False
-
-            # Use ffprobe to check if file is valid
-            result = subprocess.run(
-                ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
-                 '-show_entries', 'stream=codec_name', '-of', 'csv=p=0',
-                 str(output_path)],
-                capture_output=True, text=True, timeout=30
-            )
-
-            # Should return 'hevc' or 'h265' for valid output
-            codec = result.stdout.strip().lower()
-            if codec in ('hevc', 'h265'):
-                self.root.after(0, lambda: self.log("Output verified: valid HEVC", "info"))
-                return True
-            else:
-                self.root.after(0, lambda c=codec: self.log(
-                    f"Verification failed: codec={c}", "warning"))
-                return False
-
-        except Exception as e:
-            self.root.after(0, lambda err=e: self.log(
-                f"Verification error: {err}", "warning"))
-            return False
 
     def is_10bit(self, probe_data: dict) -> bool:
         """Check if video is 10-bit."""
