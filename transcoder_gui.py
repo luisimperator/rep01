@@ -3741,273 +3741,153 @@ class TranscoderGUI:
         threading.Thread(target=delete_folder_after_delay, daemon=True).start()
 
     def run_all_cleanups(self):
-        """Run all cleanup operations: h264, proxies, and Premiere previews."""
-        self.cleanup_orphaned_h264_folders()
-        # Small delay then run other cleanups
-        self.root.after(2000, self.cleanup_old_proxy_folders)
-        self.root.after(4000, self.cleanup_old_premiere_previews)
+        """Run all cleanup operations sequentially in one thread."""
+        if getattr(self, '_cleanup_running', False):
+            self.log("Cleanup already in progress, please wait...", "warning")
+            return
 
-    def cleanup_orphaned_h264_folders(self):
-        """
-        Find and delete h264 folders where all files have valid h265 counterparts.
-        This cleans up backups that should have been deleted but weren't.
-        """
         folder = Path(self.watch_folder.get())
         if not folder.exists():
             self.log(f"Folder not found: {folder}", "error")
             return
 
-        def cleanup_thread():
-            self.root.after(0, lambda: self.log("Scanning for orphaned h264 folders...", "info"))
+        self._cleanup_running = True
 
-            # Find all h264 folders
-            h264_folders = list(folder.rglob('h264'))
-            h264_folders = [f for f in h264_folders if f.is_dir()]
+        def all_cleanups_thread():
+            try:
+                self._cleanup_h264(folder)
+                self._cleanup_old_folders(folder, 'Proxies', 60, "Proxy",
+                                          file_filter=lambda f: f.suffix.lower() == '.mov' and '_Proxy' in f.name)
+                self._cleanup_old_folders(folder, 'Adobe Premiere Pro Video Previews', 30, "Premiere Preview")
+            finally:
+                self._cleanup_running = False
 
-            if not h264_folders:
-                self.root.after(0, lambda: self.log("No h264 folders found", "info"))
-                return
+        threading.Thread(target=all_cleanups_thread, daemon=True).start()
 
-            self.root.after(0, lambda n=len(h264_folders): self.log(
-                f"Found {n} h264 folders to check", "info"))
+    def _cleanup_h264(self, folder: Path):
+        """Delete h264 folders older than 60 days where all files have valid h265 counterparts."""
+        self.root.after(0, lambda: self.log("Scanning for orphaned h264 folders...", "info"))
 
-            deleted_count = 0
-            total_freed_gb = 0
-            total_files_deleted = 0
+        h264_folders = [f for f in folder.rglob('h264') if f.is_dir()]
+        if not h264_folders:
+            self.root.after(0, lambda: self.log("No h264 folders found", "info"))
+            return
 
-            for h264_folder in h264_folders:
-                parent_folder = h264_folder.parent
+        self.root.after(0, lambda n=len(h264_folders): self.log(f"Found {n} h264 folders to check", "info"))
 
-                # Get all video files in h264 folder
+        deleted_count = 0
+        total_freed_gb = 0
+        total_files_deleted = 0
+        now = time.time()
+        sixty_days = 60 * 24 * 60 * 60
+
+        for h264_folder in h264_folders:
+            try:
+                parent = h264_folder.parent
                 h264_files = list(h264_folder.glob('*.mp4')) + list(h264_folder.glob('*.MP4'))
-
                 if not h264_files:
                     continue
 
-                # Skip folders with files younger than 60 days (always enforced)
-                import time
-                now = time.time()
-                has_young_files = False
-                for h264_file in h264_files:
-                    try:
-                        file_age_days = (now - h264_file.stat().st_ctime) / (24 * 60 * 60)
-                        if file_age_days < 60:
-                            has_young_files = True
-                            break
-                    except:
-                        pass
-                if has_young_files:
-                    continue  # Don't delete folders with files < 60 days old
+                # Use st_mtime — st_ctime resets when files are copied/synced via Dropbox
+                if (now - max(f.stat().st_mtime for f in h264_files)) < sixty_days:
+                    continue
 
-                # Verify ALL h264 files have valid h265 counterparts
-                all_verified = True
-                for h264_file in h264_files:
-                    h265_file = parent_folder / h264_file.name
+                # Verify ALL h264 files have valid h265 counterparts (exist and > 10KB)
+                if not all(
+                    (parent / f.name).exists() and (parent / f.name).stat().st_size >= 10000
+                    for f in h264_files
+                ):
+                    continue
 
-                    # Check h265 exists
-                    if not h265_file.exists():
-                        all_verified = False
-                        break
+                folder_size = sum(f.stat().st_size for f in h264_folder.rglob('*') if f.is_file())
+                file_count = len(h264_files)
 
-                    # Verify h265 is playable (quick check - just verify it's > 10KB)
-                    try:
-                        if h265_file.stat().st_size < 10000:
-                            all_verified = False
-                            break
-                    except:
-                        all_verified = False
-                        break
+                shutil.rmtree(h264_folder)
+                self.root.after(0, lambda sz=folder_size: self.record_deletion(sz))
 
-                # All checks passed - delete entire h264 folder
-                if all_verified:
-                    try:
-                        import shutil
-                        # Calculate folder size before deletion
-                        folder_size = sum(f.stat().st_size for f in h264_folder.rglob('*') if f.is_file())
-                        folder_size_gb = folder_size / (1024**3)
-                        file_count = len(h264_files)
+                deleted_count += 1
+                total_freed_gb += folder_size / (1024**3)
+                total_files_deleted += file_count
 
-                        shutil.rmtree(h264_folder)
-                        self.root.after(0, lambda sz=folder_size: self.record_deletion(sz))  # Track for dashboard (main thread)
+                self.root.after(0, lambda p=parent.name, n=file_count, s=folder_size / (1024**3): self.log(
+                    f"Deleted h264: {n} files, {s:.2f} GB freed - {p}", "success"))
 
-                        deleted_count += 1
-                        total_freed_gb += folder_size_gb
-                        total_files_deleted += file_count
+                # Log to h265 feito.txt
+                log_file = parent / 'h265' / "h265 feito.txt"
+                log_file.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    with open(log_file, 'a', encoding='utf-8') as f:
+                        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED (cleanup)\n")
+                except Exception:
+                    pass
 
-                        self.root.after(0, lambda p=h264_folder.parent.name, n=file_count, s=folder_size_gb: self.log(
-                            f"Deleted h264: {n} files, {s:.2f} GB freed - {p}", "success"))
+            except Exception as e:
+                self.root.after(0, lambda err=e, p=h264_folder: self.log(
+                    f"Could not delete {p.name}: {err}", "warning"))
 
-                        # Log to h265 feito.txt
-                        h265_folder = parent_folder / 'h265'
-                        h265_folder.mkdir(parents=True, exist_ok=True)
-                        log_file = h265_folder / "h265 feito.txt"
-                        try:
-                            with open(log_file, 'a', encoding='utf-8') as f:
-                                f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED (cleanup)\n")
-                        except:
-                            pass
-
-                    except Exception as e:
-                        self.root.after(0, lambda err=e, p=h264_folder: self.log(
-                            f"Could not delete {p.name}: {err}", "warning"))
-
-            # Summary
+        if deleted_count > 0:
             self.root.after(0, lambda d=deleted_count, f=total_files_deleted, g=total_freed_gb: self.log(
-                f"Cleanup complete: {d} folders, {f} files, {g:.2f} GB freed", "success"))
+                f"H264 cleanup: {d} folders, {f} files, {g:.2f} GB freed", "success"))
+        else:
+            self.root.after(0, lambda: self.log("No orphaned h264 folders to delete (all < 60 days or missing h265)", "info"))
 
-        # Run in background
-        threading.Thread(target=cleanup_thread, daemon=True).start()
+    def _cleanup_old_folders(self, root_folder: Path, folder_name: str, max_age_days: int,
+                             label: str, file_filter=None):
+        """
+        Generic cleanup: find folders by name, delete if oldest file > max_age_days.
+        file_filter: optional callable(Path) -> bool to select which files determine age.
+                     If None, all files in the folder are used.
+        """
+        self.root.after(0, lambda: self.log(f"Scanning for old {label} folders...", "info"))
 
-    def cleanup_old_proxy_folders(self):
-        """
-        Find and delete Proxies folders that are older than 60 days
-        and contain .mov files with _Proxy in the name.
-        """
-        folder = Path(self.watch_folder.get())
-        if not folder.exists():
-            self.log(f"Folder not found: {folder}", "error")
+        folders = [f for f in root_folder.rglob(folder_name) if f.is_dir()]
+        if not folders:
+            self.root.after(0, lambda: self.log(f"No {label} folders found", "info"))
             return
 
-        def cleanup_thread():
-            import time
-            self.root.after(0, lambda: self.log("Scanning for old Proxy folders...", "info"))
+        self.root.after(0, lambda n=len(folders): self.log(f"Found {n} {label} folders to check", "info"))
 
-            # Find all Proxies folders
-            proxy_folders = list(folder.rglob('Proxies'))
-            proxy_folders = [f for f in proxy_folders if f.is_dir()]
+        deleted_count = 0
+        total_freed_gb = 0
+        total_files_deleted = 0
+        now = time.time()
+        max_age_seconds = max_age_days * 24 * 60 * 60
 
-            if not proxy_folders:
-                self.root.after(0, lambda: self.log("No Proxy folders found", "info"))
-                return
+        for target_folder in folders:
+            try:
+                all_files = [f for f in target_folder.rglob('*') if f.is_file()]
+                age_files = [f for f in all_files if file_filter(f)] if file_filter else all_files
 
-            self.root.after(0, lambda n=len(proxy_folders): self.log(
-                f"Found {n} Proxy folders to check", "info"))
+                if not age_files:
+                    continue
 
-            deleted_count = 0
-            total_freed_gb = 0
-            total_files_deleted = 0
-            now = time.time()
-            sixty_days_seconds = 60 * 24 * 60 * 60  # 60 days in seconds
+                newest_mtime = max(f.stat().st_mtime for f in age_files)
+                age_days = (now - newest_mtime) / (24 * 60 * 60)
+                if (now - newest_mtime) < max_age_seconds:
+                    continue
 
-            for proxy_folder in proxy_folders:
-                try:
-                    # Check if folder contains _Proxy .mov files
-                    proxy_files = [f for f in proxy_folder.glob('*.mov') if '_Proxy' in f.name]
-                    proxy_files += [f for f in proxy_folder.glob('*.MOV') if '_Proxy' in f.name]
+                folder_size = sum(f.stat().st_size for f in all_files)
+                file_count = len(all_files)
 
-                    if not proxy_files:
-                        continue  # No proxy files found
+                shutil.rmtree(target_folder)
+                self.root.after(0, lambda sz=folder_size: self.record_deletion(sz))
 
-                    # Check age based on NEWEST file modification time (st_mtime is more reliable than st_ctime)
-                    newest_mtime = max(f.stat().st_mtime for f in proxy_files)
-                    age_days = (now - newest_mtime) / (24 * 60 * 60)
+                deleted_count += 1
+                total_freed_gb += folder_size / (1024**3)
+                total_files_deleted += file_count
 
-                    if age_days < 60:
-                        continue  # Skip if any file is less than 60 days old
+                self.root.after(0, lambda p=target_folder.parent.name, n=file_count, s=folder_size / (1024**3), d=int(age_days): self.log(
+                    f"Deleted {label} ({d} days old): {n} files, {s:.2f} GB freed - {p}", "success"))
 
-                    # Calculate folder size
-                    folder_size = sum(f.stat().st_size for f in proxy_folder.rglob('*') if f.is_file())
-                    folder_size_gb = folder_size / (1024**3)
-                    file_count = len(list(proxy_folder.rglob('*')))
+            except Exception as e:
+                self.root.after(0, lambda err=e, p=target_folder: self.log(
+                    f"Could not delete {p}: {err}", "warning"))
 
-                    # Delete the folder
-                    import shutil
-                    shutil.rmtree(proxy_folder)
-
-                    deleted_count += 1
-                    total_freed_gb += folder_size_gb
-                    total_files_deleted += file_count
-
-                    self.root.after(0, lambda p=proxy_folder.parent.name, n=file_count, s=folder_size_gb, d=int(age_days): self.log(
-                        f"Deleted Proxies ({d} days old): {n} files, {s:.2f} GB freed - {p}", "success"))
-
-                except Exception as e:
-                    self.root.after(0, lambda err=e, p=proxy_folder: self.log(
-                        f"Could not delete {p}: {err}", "warning"))
-
-            # Summary
-            if deleted_count > 0:
-                self.root.after(0, lambda d=deleted_count, f=total_files_deleted, g=total_freed_gb: self.log(
-                    f"Proxy cleanup complete: {d} folders, {f} files, {g:.2f} GB freed", "success"))
-            else:
-                self.root.after(0, lambda: self.log("No old Proxy folders to delete (all < 60 days)", "info"))
-
-        # Run in background
-        threading.Thread(target=cleanup_thread, daemon=True).start()
-
-    def cleanup_old_premiere_previews(self):
-        """
-        Find and delete 'Adobe Premiere Pro Video Previews' folders older than 30 days.
-        """
-        folder = Path(self.watch_folder.get())
-        if not folder.exists():
-            self.log(f"Folder not found: {folder}", "error")
-            return
-
-        def cleanup_thread():
-            import time
-            self.root.after(0, lambda: self.log("Scanning for old Premiere Preview folders...", "info"))
-
-            # Find all Adobe Premiere Pro Video Previews folders
-            preview_folders = list(folder.rglob('Adobe Premiere Pro Video Previews'))
-            preview_folders = [f for f in preview_folders if f.is_dir()]
-
-            if not preview_folders:
-                self.root.after(0, lambda: self.log("No Premiere Preview folders found", "info"))
-                return
-
-            self.root.after(0, lambda n=len(preview_folders): self.log(
-                f"Found {n} Premiere Preview folders to check", "info"))
-
-            deleted_count = 0
-            total_freed_gb = 0
-            total_files_deleted = 0
-            now = time.time()
-
-            for preview_folder in preview_folders:
-                try:
-                    # Get all files in this preview folder
-                    preview_files = [f for f in preview_folder.rglob('*') if f.is_file()]
-                    if not preview_files:
-                        continue  # Skip empty folders
-
-                    # Check age based on NEWEST file modification time (st_mtime is more reliable than st_ctime)
-                    # st_ctime on Windows gets reset when files are copied/synced via Dropbox
-                    newest_mtime = max(f.stat().st_mtime for f in preview_files)
-                    age_days = (now - newest_mtime) / (24 * 60 * 60)
-
-                    if age_days < 30:
-                        continue  # Skip folders less than 30 days old
-
-                    # Calculate folder size (reuse the files list we already have)
-                    folder_size = sum(f.stat().st_size for f in preview_files)
-                    folder_size_gb = folder_size / (1024**3)
-                    file_count = len(preview_files)
-
-                    # Delete the folder
-                    import shutil
-                    shutil.rmtree(preview_folder)
-
-                    deleted_count += 1
-                    total_freed_gb += folder_size_gb
-                    total_files_deleted += file_count
-
-                    self.root.after(0, lambda p=preview_folder.parent.name, n=file_count, s=folder_size_gb, d=int(age_days): self.log(
-                        f"Deleted Premiere Previews ({d} days old): {n} files, {s:.2f} GB freed - {p}", "success"))
-
-                except Exception as e:
-                    self.root.after(0, lambda err=e, p=preview_folder: self.log(
-                        f"Could not delete {p}: {err}", "warning"))
-
-            # Summary
-            if deleted_count > 0:
-                self.root.after(0, lambda d=deleted_count, f=total_files_deleted, g=total_freed_gb: self.log(
-                    f"Premiere Preview cleanup: {d} folders, {f} files, {g:.2f} GB freed", "success"))
-            else:
-                self.root.after(0, lambda: self.log("No old Premiere Preview folders to delete (all < 30 days)", "info"))
-
-        # Run in background
-        threading.Thread(target=cleanup_thread, daemon=True).start()
+        if deleted_count > 0:
+            self.root.after(0, lambda d=deleted_count, f=total_files_deleted, g=total_freed_gb: self.log(
+                f"{label} cleanup: {d} folders, {f} files, {g:.2f} GB freed", "success"))
+        else:
+            self.root.after(0, lambda: self.log(f"No old {label} folders to delete (all < {max_age_days} days)", "info"))
 
     def _verify_mp3(self, mp3_path: Path) -> bool:
         """Verify MP3 file is valid using ffprobe."""
