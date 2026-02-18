@@ -34,359 +34,353 @@ from datetime import datetime
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, scrolledtext
 
-# Cloud manifest for persistent state in Dropbox
-try:
-    from src.transcoder.manifest import ManifestManager, get_pc_name, find_dropbox_path
-    HAS_MANIFEST = True
-except ImportError:
-    # Embedded manifest implementation for standalone use
-    HAS_MANIFEST = True  # We have our own implementation
-    import string as _string
+# Embedded manifest implementation (standalone GUI — no external module dependency)
+import string as _string
 
-    def find_dropbox_path():
-        """Auto-detect HeavyDrops Dropbox path by searching available drives."""
-        import os
-        dropbox_folder = "HeavyDrops Dropbox"
-        app_subfolder = Path("HeavyDrops") / "App h265 Converter"
+def find_dropbox_path():
+    """Auto-detect HeavyDrops Dropbox path by searching available drives."""
+    import os
+    dropbox_folder = "HeavyDrops Dropbox"
+    app_subfolder = Path("HeavyDrops") / "App h265 Converter"
 
-        # Check common drives
-        drives_to_check = ['D', 'C', 'E', 'F', 'G', 'H']
-        if os.name == 'nt':
-            for letter in _string.ascii_uppercase:
-                if Path(f"{letter}:\\").exists() and letter not in drives_to_check:
-                    drives_to_check.append(letter)
+    # Check common drives
+    drives_to_check = ['D', 'C', 'E', 'F', 'G', 'H']
+    if os.name == 'nt':
+        for letter in _string.ascii_uppercase:
+            if Path(f"{letter}:\\").exists() and letter not in drives_to_check:
+                drives_to_check.append(letter)
 
-        for drive in drives_to_check:
-            dropbox_root = Path(f"{drive}:\\{dropbox_folder}")
-            if dropbox_root.exists():
-                return dropbox_root / app_subfolder
-        return None
+    for drive in drives_to_check:
+        dropbox_root = Path(f"{drive}:\\{dropbox_folder}")
+        if dropbox_root.exists():
+            return dropbox_root / app_subfolder
+    return None
 
-    def get_pc_name():
-        hostname = socket.gethostname()
-        if '.' in hostname:
-            hostname = hostname.split('.')[0]
-        return hostname
+def get_pc_name():
+    hostname = socket.gethostname()
+    if '.' in hostname:
+        hostname = hostname.split('.')[0]
+    return hostname
 
-    # Embedded ManifestManager class
-    class ManifestManager:
-        """Embedded manifest manager for standalone GUI use."""
+# Embedded ManifestManager class
+class ManifestManager:
+    """Embedded manifest manager for standalone GUI use."""
 
-        MANIFEST_FILENAME = "global_manifest.json"
+    MANIFEST_FILENAME = "global_manifest.json"
 
-        def __init__(self, base_dropbox_path=None):
-            if base_dropbox_path:
-                self.base_path = Path(base_dropbox_path)
-            else:
-                detected = find_dropbox_path()
-                self.base_path = detected if detected else Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
+    def __init__(self, base_dropbox_path=None):
+        if base_dropbox_path:
+            self.base_path = Path(base_dropbox_path)
+        else:
+            detected = find_dropbox_path()
+            self.base_path = detected if detected else Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
 
-            self.manifest_path = self.base_path / self.MANIFEST_FILENAME
-            self.pc_name = get_pc_name()
-            self._lock = threading.Lock()
-            self._unsaved_changes = 0
+        self.manifest_path = self.base_path / self.MANIFEST_FILENAME
+        self.pc_name = get_pc_name()
+        self._lock = threading.Lock()
+        self._unsaved_changes = 0
 
-            # Initialize manifest structure
-            self.manifest = self._load_or_create()
-            self._register_pc()
+        # Initialize manifest structure
+        self.manifest = self._load_or_create()
+        self._register_pc()
 
-        def _load_or_create(self):
-            """Load existing manifest or create new one."""
+    def _load_or_create(self):
+        """Load existing manifest or create new one."""
+        if self.manifest_path.exists():
+            try:
+                with open(self.manifest_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                print(f"[Manifest] Loaded: {data.get('stats', {}).get('total_files_processed', 0)} files")
+                return self._dict_to_manifest(data)
+            except Exception as e:
+                print(f"[Manifest] Error loading: {e}")
+
+        # Create new manifest
+        self.base_path.mkdir(parents=True, exist_ok=True)
+        now = datetime.now().isoformat()
+        return {
+            'created_at': now,
+            'last_updated': now,
+            'last_updated_by': self.pc_name,
+            'stats': {
+                'total_files_processed': 0,
+                'total_input_bytes': 0,
+                'total_output_bytes': 0,
+                'total_saved_bytes': 0,
+                'total_transcode_seconds': 0,
+                'total_files_to_process': 0,
+                'total_bytes_to_process': 0,
+            },
+            'processed_files': {},
+            'skipped_files': {},
+            'failed_files': {},
+            'daily_history': {},
+            'active_pcs': {},
+            'imported_h265_logs': {},
+        }
+
+    def _dict_to_manifest(self, data):
+        """Convert loaded dict to manifest format."""
+        # Ensure all required fields exist
+        data.setdefault('stats', {})
+        data['stats'].setdefault('total_files_processed', 0)
+        data['stats'].setdefault('total_input_bytes', 0)
+        data['stats'].setdefault('total_output_bytes', 0)
+        data['stats'].setdefault('total_saved_bytes', 0)
+        data['stats'].setdefault('total_transcode_seconds', 0)
+        data['stats'].setdefault('total_files_to_process', 0)
+        data['stats'].setdefault('total_bytes_to_process', 0)
+        data.setdefault('processed_files', {})
+        data.setdefault('skipped_files', {})
+        data.setdefault('failed_files', {})
+        data.setdefault('daily_history', {})
+        data.setdefault('active_pcs', {})
+        data.setdefault('imported_h265_logs', {})
+        return data
+
+    def _register_pc(self):
+        self.manifest['active_pcs'][self.pc_name] = datetime.now().isoformat()
+
+    def _normalize_path(self, path):
+        return str(path).lower().replace('\\', '/')
+
+    def refresh(self):
+        """Reload manifest from disk."""
+        with self._lock:
             if self.manifest_path.exists():
                 try:
                     with open(self.manifest_path, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                    print(f"[Manifest] Loaded: {data.get('stats', {}).get('total_files_processed', 0)} files")
-                    return self._dict_to_manifest(data)
+                    self.manifest = self._dict_to_manifest(data)
+                    self._register_pc()
                 except Exception as e:
-                    print(f"[Manifest] Error loading: {e}")
+                    print(f"[Manifest] Refresh error: {e}")
+        return self.manifest
 
-            # Create new manifest
-            self.base_path.mkdir(parents=True, exist_ok=True)
-            now = datetime.now().isoformat()
-            return {
-                'created_at': now,
-                'last_updated': now,
-                'last_updated_by': self.pc_name,
-                'stats': {
-                    'total_files_processed': 0,
-                    'total_input_bytes': 0,
-                    'total_output_bytes': 0,
-                    'total_saved_bytes': 0,
-                    'total_transcode_seconds': 0,
-                    'total_files_to_process': 0,
-                    'total_bytes_to_process': 0,
-                },
-                'processed_files': {},
-                'skipped_files': {},
-                'failed_files': {},
-                'daily_history': {},
-                'active_pcs': {},
-                'imported_h265_logs': {},
-            }
+    def save(self, force=False):
+        """Save manifest to disk."""
+        with self._lock:
+            self._unsaved_changes += 1
+            if not force and self._unsaved_changes < 3:
+                return
+            try:
+                self.base_path.mkdir(parents=True, exist_ok=True)
+                temp_path = self.manifest_path.with_suffix('.tmp')
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    json.dump(self.manifest, f, indent=2, ensure_ascii=False)
+                temp_path.replace(self.manifest_path)
+                self._unsaved_changes = 0
+            except Exception as e:
+                print(f"[Manifest] Save error: {e}")
 
-        def _dict_to_manifest(self, data):
-            """Convert loaded dict to manifest format."""
-            # Ensure all required fields exist
-            data.setdefault('stats', {})
-            data['stats'].setdefault('total_files_processed', 0)
-            data['stats'].setdefault('total_input_bytes', 0)
-            data['stats'].setdefault('total_output_bytes', 0)
-            data['stats'].setdefault('total_saved_bytes', 0)
-            data['stats'].setdefault('total_transcode_seconds', 0)
-            data['stats'].setdefault('total_files_to_process', 0)
-            data['stats'].setdefault('total_bytes_to_process', 0)
-            data.setdefault('processed_files', {})
-            data.setdefault('skipped_files', {})
-            data.setdefault('failed_files', {})
-            data.setdefault('daily_history', {})
-            data.setdefault('active_pcs', {})
-            data.setdefault('imported_h265_logs', {})
-            return data
+    def is_processed(self, file_path):
+        normalized = self._normalize_path(file_path)
+        return normalized in self.manifest['processed_files']
 
-        def _register_pc(self):
-            self.manifest['active_pcs'][self.pc_name] = datetime.now().isoformat()
+    def is_skipped(self, file_path):
+        normalized = self._normalize_path(file_path)
+        return normalized in self.manifest['skipped_files']
 
-        def _normalize_path(self, path):
-            return str(path).lower().replace('\\', '/')
+    def is_failed(self, file_path):
+        normalized = self._normalize_path(file_path)
+        return normalized in self.manifest['failed_files']
 
-        def refresh(self):
-            """Reload manifest from disk."""
-            with self._lock:
-                if self.manifest_path.exists():
-                    try:
-                        with open(self.manifest_path, 'r', encoding='utf-8') as f:
-                            data = json.load(f)
-                        self.manifest = self._dict_to_manifest(data)
-                        self._register_pc()
-                    except Exception as e:
-                        print(f"[Manifest] Refresh error: {e}")
-            return self.manifest
+    def record_success(self, original_path, output_path, input_size, output_size, encoder, cq_value, duration=0, transcode_time=0):
+        normalized = self._normalize_path(original_path)
+        self.manifest['processed_files'][normalized] = {
+            'original_path': original_path,
+            'output_path': output_path,
+            'input_size_bytes': input_size,
+            'output_size_bytes': output_size,
+            'compression_ratio': output_size / input_size if input_size > 0 else 0,
+            'processed_at': datetime.now().isoformat(),
+            'processed_by_pc': self.pc_name,
+            'encoder_used': encoder,
+            'cq_value': cq_value,
+        }
+        # Update stats
+        self.manifest['stats']['total_files_processed'] += 1
+        self.manifest['stats']['total_input_bytes'] += input_size
+        self.manifest['stats']['total_output_bytes'] += output_size
+        self.manifest['stats']['total_saved_bytes'] += (input_size - output_size)
+        self.manifest['stats']['total_transcode_seconds'] += transcode_time
+        self.manifest['last_updated'] = datetime.now().isoformat()
+        self.manifest['last_updated_by'] = self.pc_name
 
-        def save(self, force=False):
-            """Save manifest to disk."""
-            with self._lock:
-                self._unsaved_changes += 1
-                if not force and self._unsaved_changes < 3:
-                    return
+        # Update daily
+        today = datetime.now().strftime('%Y-%m-%d')
+        if today not in self.manifest['daily_history']:
+            self.manifest['daily_history'][today] = {'date': today, 'files_processed': 0, 'bytes_processed': 0, 'bytes_saved': 0, 'by_pc': {}}
+        self.manifest['daily_history'][today]['files_processed'] += 1
+        self.manifest['daily_history'][today]['bytes_processed'] += input_size
+        self.manifest['daily_history'][today]['bytes_saved'] += (input_size - output_size)
+        self.manifest['daily_history'][today]['by_pc'][self.pc_name] = self.manifest['daily_history'][today]['by_pc'].get(self.pc_name, 0) + 1
+        self.save()
+
+    def record_failure(self, file_path, error):
+        normalized = self._normalize_path(file_path)
+        self.manifest['failed_files'][normalized] = f"{error} (by {self.pc_name})"
+        self.save(force=True)
+
+    def record_skipped(self, file_path, reason, size_bytes=0):
+        normalized = self._normalize_path(file_path)
+        self.manifest['skipped_files'][normalized] = {
+            'path': file_path,
+            'reason': reason,
+            'size_bytes': size_bytes,
+            'checked_at': datetime.now().isoformat(),
+            'checked_by_pc': self.pc_name,
+        }
+        self.save()
+
+    def reset_failed(self, file_path=None):
+        if file_path:
+            normalized = self._normalize_path(file_path)
+            if normalized in self.manifest['failed_files']:
+                del self.manifest['failed_files'][normalized]
+                self.save(force=True)
+                return 1
+            return 0
+        count = len(self.manifest['failed_files'])
+        self.manifest['failed_files'].clear()
+        self.save(force=True)
+        return count
+
+    def update_estimates(self, total_files, total_bytes):
+        # Only UPDATE if new values are higher (totals should never decrease)
+        # This prevents local scans from overwriting global totals with partial data
+        current_files = self.manifest['stats'].get('total_files_to_process', 0)
+        current_bytes = self.manifest['stats'].get('total_bytes_to_process', 0)
+
+        if total_files > current_files:
+            self.manifest['stats']['total_files_to_process'] = total_files
+        if total_bytes > current_bytes:
+            self.manifest['stats']['total_bytes_to_process'] = total_bytes
+
+        self.save(force=True)
+
+    def import_h265_feitos_txt(self, log_path, content):
+        """
+        Import entries from h265 feito.txt log files.
+        Format: "2024-01-01 12:00:00 | filename.mp4 | 100.0MB -> 50.0MB (50.0% menor)"
+        """
+        if log_path in self.manifest['imported_h265_logs']:
+            return 0
+        imported = 0
+        for line in content.splitlines():
+            line = line.strip()
+            if not line or 'H264 FOLDER DELETED' in line:
+                continue
+            parts = line.split('|')
+            if len(parts) >= 3:
                 try:
-                    self.base_path.mkdir(parents=True, exist_ok=True)
-                    temp_path = self.manifest_path.with_suffix('.tmp')
-                    with open(temp_path, 'w', encoding='utf-8') as f:
-                        json.dump(self.manifest, f, indent=2, ensure_ascii=False)
-                    temp_path.replace(self.manifest_path)
-                    self._unsaved_changes = 0
-                except Exception as e:
-                    print(f"[Manifest] Save error: {e}")
+                    timestamp = parts[0].strip()
+                    filename = parts[1].strip()
+                    size_part = parts[2].strip() if len(parts) > 2 else ""
 
-        def is_processed(self, file_path):
-            normalized = self._normalize_path(file_path)
-            return normalized in self.manifest['processed_files']
+                    # Parse size format: "100.0MB -> 50.0MB (50.0% menor)"
+                    input_size = 0
+                    output_size = 0
+                    if '->' in size_part:
+                        size_match = re.match(r'([\d.]+)MB\s*->\s*([\d.]+)MB', size_part)
+                        if size_match:
+                            input_size = int(float(size_match.group(1)) * 1024 * 1024)
+                            output_size = int(float(size_match.group(2)) * 1024 * 1024)
 
-        def is_skipped(self, file_path):
-            normalized = self._normalize_path(file_path)
-            return normalized in self.manifest['skipped_files']
+                    # Use full path from log_path directory + filename for normalization
+                    log_dir = str(Path(log_path).parent.parent)  # Go up from h265/ folder
+                    full_path = f"{log_dir}/{filename}"
+                    normalized = self._normalize_path(full_path)
 
-        def is_failed(self, file_path):
-            normalized = self._normalize_path(file_path)
-            return normalized in self.manifest['failed_files']
-
-        def record_success(self, original_path, output_path, input_size, output_size, encoder, cq_value, duration=0, transcode_time=0):
-            normalized = self._normalize_path(original_path)
-            self.manifest['processed_files'][normalized] = {
-                'original_path': original_path,
-                'output_path': output_path,
-                'input_size_bytes': input_size,
-                'output_size_bytes': output_size,
-                'compression_ratio': output_size / input_size if input_size > 0 else 0,
-                'processed_at': datetime.now().isoformat(),
-                'processed_by_pc': self.pc_name,
-                'encoder_used': encoder,
-                'cq_value': cq_value,
-            }
-            # Update stats
-            self.manifest['stats']['total_files_processed'] += 1
-            self.manifest['stats']['total_input_bytes'] += input_size
-            self.manifest['stats']['total_output_bytes'] += output_size
-            self.manifest['stats']['total_saved_bytes'] += (input_size - output_size)
-            self.manifest['stats']['total_transcode_seconds'] += transcode_time
-            self.manifest['last_updated'] = datetime.now().isoformat()
-            self.manifest['last_updated_by'] = self.pc_name
-
-            # Update daily
-            today = datetime.now().strftime('%Y-%m-%d')
-            if today not in self.manifest['daily_history']:
-                self.manifest['daily_history'][today] = {'date': today, 'files_processed': 0, 'bytes_processed': 0, 'bytes_saved': 0, 'by_pc': {}}
-            self.manifest['daily_history'][today]['files_processed'] += 1
-            self.manifest['daily_history'][today]['bytes_processed'] += input_size
-            self.manifest['daily_history'][today]['bytes_saved'] += (input_size - output_size)
-            self.manifest['daily_history'][today]['by_pc'][self.pc_name] = self.manifest['daily_history'][today]['by_pc'].get(self.pc_name, 0) + 1
-            self.save()
-
-        def record_failure(self, file_path, error):
-            normalized = self._normalize_path(file_path)
-            self.manifest['failed_files'][normalized] = f"{error} (by {self.pc_name})"
-            self.save(force=True)
-
-        def record_skipped(self, file_path, reason, size_bytes=0):
-            normalized = self._normalize_path(file_path)
-            self.manifest['skipped_files'][normalized] = {
-                'path': file_path,
-                'reason': reason,
-                'size_bytes': size_bytes,
-                'checked_at': datetime.now().isoformat(),
-                'checked_by_pc': self.pc_name,
-            }
-            self.save()
-
-        def reset_failed(self, file_path=None):
-            if file_path:
-                normalized = self._normalize_path(file_path)
-                if normalized in self.manifest['failed_files']:
-                    del self.manifest['failed_files'][normalized]
-                    self.save(force=True)
-                    return 1
-                return 0
-            count = len(self.manifest['failed_files'])
-            self.manifest['failed_files'].clear()
-            self.save(force=True)
-            return count
-
-        def update_estimates(self, total_files, total_bytes):
-            # Only UPDATE if new values are higher (totals should never decrease)
-            # This prevents local scans from overwriting global totals with partial data
-            current_files = self.manifest['stats'].get('total_files_to_process', 0)
-            current_bytes = self.manifest['stats'].get('total_bytes_to_process', 0)
-
-            if total_files > current_files:
-                self.manifest['stats']['total_files_to_process'] = total_files
-            if total_bytes > current_bytes:
-                self.manifest['stats']['total_bytes_to_process'] = total_bytes
-
-            self.save(force=True)
-
-        def import_h265_feitos_txt(self, log_path, content):
-            """
-            Import entries from h265 feito.txt log files.
-            Format: "2024-01-01 12:00:00 | filename.mp4 | 100.0MB -> 50.0MB (50.0% menor)"
-            """
-            if log_path in self.manifest['imported_h265_logs']:
-                return 0
-            imported = 0
-            for line in content.splitlines():
-                line = line.strip()
-                if not line or 'H264 FOLDER DELETED' in line:
+                    if normalized not in self.manifest['processed_files']:
+                        self.manifest['processed_files'][normalized] = {
+                            'original_path': full_path,
+                            'output_path': '',
+                            'input_size_bytes': input_size,
+                            'output_size_bytes': output_size,
+                            'compression_ratio': output_size / input_size if input_size > 0 else 0.25,
+                            'processed_at': timestamp if timestamp else datetime.now().isoformat(),
+                            'processed_by_pc': 'imported',
+                            'encoder_used': 'unknown',
+                            'cq_value': 0,
+                        }
+                        self.manifest['stats']['total_files_processed'] += 1
+                        self.manifest['stats']['total_input_bytes'] += input_size
+                        self.manifest['stats']['total_output_bytes'] += output_size
+                        self.manifest['stats']['total_saved_bytes'] += (input_size - output_size)
+                        imported += 1
+                except Exception:
                     continue
-                parts = line.split('|')
-                if len(parts) >= 3:
-                    try:
-                        timestamp = parts[0].strip()
-                        filename = parts[1].strip()
-                        size_part = parts[2].strip() if len(parts) > 2 else ""
+        self.manifest['imported_h265_logs'][log_path] = datetime.now().isoformat()
+        self.save(force=True)
+        print(f"[Manifest] Imported {imported} entries from {log_path}")
+        return imported
 
-                        # Parse size format: "100.0MB -> 50.0MB (50.0% menor)"
-                        input_size = 0
-                        output_size = 0
-                        if '->' in size_part:
-                            size_match = re.match(r'([\d.]+)MB\s*->\s*([\d.]+)MB', size_part)
-                            if size_match:
-                                input_size = int(float(size_match.group(1)) * 1024 * 1024)
-                                output_size = int(float(size_match.group(2)) * 1024 * 1024)
+    def get_stats_summary(self):
+        return {
+            'processed': len(self.manifest['processed_files']),
+            'skipped': len(self.manifest['skipped_files']),
+            'failed': len(self.manifest['failed_files']),
+            'total_tb': self.manifest['stats']['total_input_bytes'] / (1024**4),
+            'saved_tb': self.manifest['stats']['total_saved_bytes'] / (1024**4),
+        }
 
-                        # Use full path from log_path directory + filename for normalization
-                        log_dir = str(Path(log_path).parent.parent)  # Go up from h265/ folder
-                        full_path = f"{log_dir}/{filename}"
-                        normalized = self._normalize_path(full_path)
+    def get_dashboard_data(self):
+        s = self.manifest['stats']
+        # Use ACTUAL counts from manifest dictionaries (more accurate than stats)
+        actual_processed = len(self.manifest['processed_files'])
+        actual_skipped = len(self.manifest['skipped_files'])
 
-                        if normalized not in self.manifest['processed_files']:
-                            self.manifest['processed_files'][normalized] = {
-                                'original_path': full_path,
-                                'output_path': '',
-                                'input_size_bytes': input_size,
-                                'output_size_bytes': output_size,
-                                'compression_ratio': output_size / input_size if input_size > 0 else 0.25,
-                                'processed_at': timestamp if timestamp else datetime.now().isoformat(),
-                                'processed_by_pc': 'imported',
-                                'encoder_used': 'unknown',
-                                'cq_value': 0,
-                            }
-                            self.manifest['stats']['total_files_processed'] += 1
-                            self.manifest['stats']['total_input_bytes'] += input_size
-                            self.manifest['stats']['total_output_bytes'] += output_size
-                            self.manifest['stats']['total_saved_bytes'] += (input_size - output_size)
-                            imported += 1
-                    except:
-                        continue
-            self.manifest['imported_h265_logs'][log_path] = datetime.now().isoformat()
-            self.save(force=True)
-            print(f"[Manifest] Imported {imported} entries from {log_path}")
-            return imported
+        total_input = s['total_input_bytes']
+        total_to_proc = s['total_bytes_to_process']
+        total = total_input + total_to_proc
 
-        def get_stats_summary(self):
-            return {
-                'processed': len(self.manifest['processed_files']),
-                'skipped': len(self.manifest['skipped_files']),
-                'failed': len(self.manifest['failed_files']),
-                'total_tb': self.manifest['stats']['total_input_bytes'] / (1024**4),
-                'saved_tb': self.manifest['stats']['total_saved_bytes'] / (1024**4),
-            }
+        # Calculate progress based on actual file counts
+        total_files = actual_processed + s.get('total_files_to_process', 0)
+        progress = (actual_processed / total_files * 100) if total_files > 0 else 0
 
-        def get_dashboard_data(self):
-            s = self.manifest['stats']
-            # Use ACTUAL counts from manifest dictionaries (more accurate than stats)
-            actual_processed = len(self.manifest['processed_files'])
-            actual_skipped = len(self.manifest['skipped_files'])
+        avg_ratio = s['total_output_bytes'] / total_input if total_input > 0 else 0.25
+        trans_sec = s['total_transcode_seconds']
+        speed = (total_input / (1024**3)) / (trans_sec / 3600) if trans_sec > 0 else 50
+        remaining_gb = total_to_proc / (1024**3)
+        days = (remaining_gb / speed / 24) if speed > 0 else 0
 
-            total_input = s['total_input_bytes']
-            total_to_proc = s['total_bytes_to_process']
-            total = total_input + total_to_proc
+        daily = []
+        for date_key in sorted(self.manifest['daily_history'].keys(), reverse=True)[:14]:
+            d = self.manifest['daily_history'][date_key]
+            daily.append({
+                'date': d['date'],
+                'files': d['files_processed'],
+                'gb_processed': d['bytes_processed'] / (1024**3),
+                'gb_saved': d['bytes_saved'] / (1024**3),
+                'by_pc': d.get('by_pc', {}),
+            })
 
-            # Calculate progress based on actual file counts
-            total_files = actual_processed + s.get('total_files_to_process', 0)
-            progress = (actual_processed / total_files * 100) if total_files > 0 else 0
+        return {
+            'pc_name': self.pc_name,
+            'last_updated': self.manifest['last_updated'],
+            'last_updated_by': self.manifest['last_updated_by'],
+            'active_pcs': list(self.manifest['active_pcs'].keys()),
+            'total_processed': actual_processed,  # Use actual count from dict
+            'total_to_process': s.get('total_files_to_process', 0),
+            'progress_percent': progress,
+            'processed_tb': total_input / (1024**4),
+            'to_process_tb': total_to_proc / (1024**4),
+            'saved_tb': s['total_saved_bytes'] / (1024**4),
+            'estimated_total_savings_tb': (s['total_saved_bytes'] + total_to_proc * (1 - avg_ratio)) / (1024**4),
+            'avg_compression': (1 - avg_ratio) * 100,
+            'avg_speed_gbh': speed,
+            'days_remaining': days,
+            'daily_progress': daily,
+            'failed_count': len(self.manifest['failed_files']),
+            'skipped_count': len(self.manifest['skipped_files']),
+        }
 
-            avg_ratio = s['total_output_bytes'] / total_input if total_input > 0 else 0.25
-            trans_sec = s['total_transcode_seconds']
-            speed = (total_input / (1024**3)) / (trans_sec / 3600) if trans_sec > 0 else 50
-            remaining_gb = total_to_proc / (1024**3)
-            days = (remaining_gb / speed / 24) if speed > 0 else 0
+    def get_manifest_path(self):
+        return self.manifest_path
 
-            daily = []
-            for date_key in sorted(self.manifest['daily_history'].keys(), reverse=True)[:14]:
-                d = self.manifest['daily_history'][date_key]
-                daily.append({
-                    'date': d['date'],
-                    'files': d['files_processed'],
-                    'gb_processed': d['bytes_processed'] / (1024**3),
-                    'gb_saved': d['bytes_saved'] / (1024**3),
-                    'by_pc': d.get('by_pc', {}),
-                })
-
-            return {
-                'pc_name': self.pc_name,
-                'last_updated': self.manifest['last_updated'],
-                'last_updated_by': self.manifest['last_updated_by'],
-                'active_pcs': list(self.manifest['active_pcs'].keys()),
-                'total_processed': actual_processed,  # Use actual count from dict
-                'total_to_process': s.get('total_files_to_process', 0),
-                'progress_percent': progress,
-                'processed_tb': total_input / (1024**4),
-                'to_process_tb': total_to_proc / (1024**4),
-                'saved_tb': s['total_saved_bytes'] / (1024**4),
-                'estimated_total_savings_tb': (s['total_saved_bytes'] + total_to_proc * (1 - avg_ratio)) / (1024**4),
-                'avg_compression': (1 - avg_ratio) * 100,
-                'avg_speed_gbh': speed,
-                'days_remaining': days,
-                'daily_progress': daily,
-                'failed_count': len(self.manifest['failed_files']),
-                'skipped_count': len(self.manifest['skipped_files']),
-            }
-
-        def get_manifest_path(self):
-            return self.manifest_path
-
-        def close(self):
-            self.save(force=True)
+    def close(self):
+        self.save(force=True)
 
 
 def get_dropbox_base_path() -> Path:
@@ -928,7 +922,7 @@ class TranscoderGUI:
         if self.cloud_manifest:
             try:
                 self.cloud_manifest.close()
-            except:
+            except Exception:
                 pass
         self.root.destroy()
 
@@ -995,7 +989,7 @@ class TranscoderGUI:
                 winsound.Beep(1000, 200)
                 time.sleep(0.1)
                 winsound.Beep(1200, 300)
-            except:
+            except Exception:
                 pass
 
         # Unminimize and bring to front
@@ -1011,7 +1005,7 @@ class TranscoderGUI:
         """Get machine name for log files."""
         try:
             return socket.gethostname()
-        except:
+        except Exception:
             return "unknown"
 
     def write_success_log(self, input_path: Path, output_path: Path, input_size: int, output_size: int):
@@ -1086,15 +1080,12 @@ class TranscoderGUI:
 
         try:
             # Collect data
-            video_extensions = ['.mp4', '.MP4']
-
             all_videos = []
             h264_backups = []
             h265_outputs = []
 
-            # Scan all video files (skip ._ metadata files from macOS/ATEM)
-            for ext in video_extensions:
-                for f in folder.rglob(f'*{ext}'):
+            # Scan all .mp4 video files (skip ._ metadata files from macOS/ATEM)
+            for f in folder.rglob('*.mp4'):
                     # Skip macOS/ATEM metadata files
                     if f.name.startswith('._'):
                         continue
@@ -1110,7 +1101,7 @@ class TranscoderGUI:
                             h265_outputs.append((f, size))
                         else:
                             all_videos.append((f, size))
-                    except:
+                    except Exception:
                         pass
 
             # Get database stats
@@ -1140,7 +1131,6 @@ class TranscoderGUI:
             # Use file attributes instead (attrib command on Windows)
             local_pending = []
             cloud_pending = []
-            confirmed_h264 = []  # We can't confirm codec without triggering download
 
             for f, size in pending_videos:
                 try:
@@ -1164,17 +1154,16 @@ class TranscoderGUI:
                             cloud_pending.append((f, size))
                         else:
                             local_pending.append((f, size))
-                    except:
+                    except Exception:
                         # If attrib fails, assume local based on size
                         local_pending.append((f, size))
-                except:
+                except Exception:
                     cloud_pending.append((f, size))
 
             # Calculate sizes
             total_pending_size = sum(s for _, s in pending_videos)
             local_pending_size = sum(s for _, s in local_pending)
             cloud_pending_size = sum(s for _, s in cloud_pending)
-            confirmed_h264_size = sum(s for _, s in confirmed_h264)
             h264_backup_size = sum(s for _, s in h264_backups)
             h265_output_size = sum(s for _, s in h265_outputs)
 
@@ -1437,10 +1426,6 @@ class TranscoderGUI:
 
     def setup_cloud_manifest(self):
         """Initialize cloud manifest for persistent state in Dropbox."""
-        if not HAS_MANIFEST:
-            self.log("Cloud manifest not available (module not found)", "warning")
-            return
-
         try:
             self.log(f"Dropbox base detectado: {self.dropbox_base}", "info")
 
@@ -1538,7 +1523,7 @@ class TranscoderGUI:
             try:
                 item = self.ready_queue.get_nowait()
                 temp_items.append(item)
-            except:
+            except Exception:
                 break
 
         # Put items back and build display list
@@ -1674,7 +1659,7 @@ class TranscoderGUI:
                 file_path = os.path.join(root, f)
                 try:
                     size = os.path.getsize(file_path)
-                except:
+                except Exception:
                     continue
 
                 total_files += 1
@@ -1854,11 +1839,11 @@ class TranscoderGUI:
                         content = f.read()
                         if filename in content:
                             return True
-                except:
+                except Exception:
                     pass
 
             return False
-        except:
+        except Exception:
             return False
 
     def mark_processed(self, input_path: Path, output_path: str, status: str,
@@ -1929,9 +1914,9 @@ class TranscoderGUI:
             self.log("History cleared", "warning")
 
     def start_wav_conversion(self):
-        """Start WAV→MP3 conversion for files in 'Audio Source Files' folders."""
+        """Start standalone WAV→MP3 conversion (when video transcoding is not running)."""
         if self.running:
-            messagebox.showwarning("Em execução", "Pare o processo atual antes de iniciar conversão WAV.")
+            self.log("WAV conversion already running in parallel with video transcoding.", "info")
             return
 
         folder = Path(self.watch_folder.get())
@@ -1939,10 +1924,8 @@ class TranscoderGUI:
             messagebox.showerror("Error", "Watch folder not found!")
             return
 
-        self.log("Starting WAV→MP3 conversion...", "info")
-        self.running = True
+        self.log("Starting standalone WAV→MP3 conversion...", "info")
         self.wav_running = True
-        self.start_btn.config(state=tk.DISABLED)
         self.stop_wav_btn.config(state=tk.NORMAL)
 
         def wav_worker():
@@ -1954,32 +1937,16 @@ class TranscoderGUI:
                 self.root.after(0, lambda err=e: self.log(
                     f"WAV conversion error: {err}", "error"))
             finally:
-                self.running = False
                 self.wav_running = False
-                self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
                 self.root.after(0, lambda: self.stop_wav_btn.config(state=tk.DISABLED))
-                self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
                 self.notify_queue_finished()
 
         threading.Thread(target=wav_worker, daemon=True).start()
 
     def stop_wav_conversion(self):
-        """Stop WAV→MP3 conversion immediately."""
-        self.running = False
+        """Stop standalone WAV→MP3 conversion."""
         self.wav_running = False
-
-        # Kill FFmpeg process if running
-        if self.current_process:
-            try:
-                self.current_process.terminate()
-                self.log("FFmpeg process terminated", "warning")
-            except:
-                pass
-
-        # Reset UI
-        self.start_btn.config(state=tk.NORMAL)
         self.stop_wav_btn.config(state=tk.DISABLED)
-        self.current_file_label.config(text="Idle")
         self.log("WAV conversion stopped", "warning")
 
     def scan_audio_files(self):
@@ -2008,7 +1975,6 @@ class TranscoderGUI:
         wav_files = []
         for audio_folder in folder.rglob('Audio Source Files'):
             if audio_folder.is_dir():
-                # Skip wav backup folder
                 for ext in ['.wav', '.WAV']:
                     for f in audio_folder.glob(f'*{ext}'):
                         if not f.name.startswith('._') and f.parent.name != 'wav':
@@ -2026,12 +1992,10 @@ class TranscoderGUI:
             try:
                 size = wav_path.stat().st_size
 
-                # If file is very small, it's probably online-only
                 if size < 1000:
                     cloud_files += 1
                     continue
 
-                # Try to read 1 byte from the file
                 try:
                     with open(wav_path, 'rb') as f:
                         f.read(1)
@@ -2039,7 +2003,6 @@ class TranscoderGUI:
                 except OSError as e:
                     if e.errno == 22:  # Invalid argument - cloud file
                         cloud_files += 1
-                        # Only trigger download if not in offline mode
                         if not self.offline_mode.get() and triggered_size + size <= available_for_download:
                             self._trigger_dropbox_download(wav_path)
                             triggered += 1
@@ -2054,7 +2017,6 @@ class TranscoderGUI:
             except Exception:
                 cloud_files += 1
 
-        # Report results
         triggered_gb = triggered_size / (1024**3)
         msg = f"WAV Scan: {already_local} local, {triggered} downloading ({triggered_gb:.1f}GB)"
         if skipped_space > 0:
@@ -2104,12 +2066,16 @@ class TranscoderGUI:
         self.probed_queue_thread = threading.Thread(target=self.probed_queue_worker, daemon=True)
         self.probed_queue_thread.start()
 
-        # Start the main processing loop (transcodes from probed queue)
+        # Start the main processing loop (transcodes from probed queue — uses GPU/QSV)
         self.worker_thread = threading.Thread(target=self.process_loop, daemon=True)
         self.worker_thread.start()
 
+        # Start WAV→MP3 processing loop in parallel (uses CPU only, doesn't compete with QSV)
+        self.wav_worker_thread = threading.Thread(target=self._wav_processing_loop, daemon=True)
+        self.wav_worker_thread.start()
+
         if queue_size > 0:
-            self.root.after(0, lambda: self.log("Starting transcoding immediately!", "success"))
+            self.root.after(0, lambda: self.log("Starting transcoding + WAV conversion!", "success"))
         else:
             self.root.after(0, lambda: self.log("Queue empty - scanning for files...", "info"))
 
@@ -2139,14 +2105,14 @@ class TranscoderGUI:
         while not self.ready_queue.empty():
             try:
                 self.ready_queue.get_nowait()
-            except:
+            except Exception:
                 break
 
         # Clear the probed queue
         while not self.probed_queue.empty():
             try:
                 self.probed_queue.get_nowait()
-            except:
+            except Exception:
                 break
 
         # Clear the active queue (v5.3: full queue clear on STOP)
@@ -2170,7 +2136,7 @@ class TranscoderGUI:
             try:
                 self.current_process.terminate()
                 self.log("FFmpeg process terminated", "warning")
-            except:
+            except Exception:
                 pass
 
         self.start_btn.config(state=tk.NORMAL)
@@ -2313,7 +2279,7 @@ class TranscoderGUI:
             try:
                 size = video_path.stat().st_size
                 result["size"] = size
-            except:
+            except Exception:
                 result["status"] = "stat_error"
                 return result
 
@@ -2515,7 +2481,7 @@ class TranscoderGUI:
             # Cloud placeholders are tiny (< 1KB typically)
             # Real video files are much larger
             return size > 100000  # > 100KB = likely local
-        except:
+        except Exception:
             return False
 
     # =========================================================================
@@ -2564,7 +2530,7 @@ class TranscoderGUI:
                     if any(h264_path.iterdir()):
                         priority_folders.append((folder_path, 1))  # Priority 1 = has h264
                         continue
-                except:
+                except Exception:
                     pass
             normal_folders.append((folder_path, 0))  # Priority 0 = normal
 
@@ -2612,7 +2578,7 @@ class TranscoderGUI:
                         continue
                     # Cloud placeholder check (< 100KB = likely cloud)
                     is_local = size > 100000
-                except:
+                except Exception:
                     continue
 
                 files.append({
@@ -2853,7 +2819,7 @@ class TranscoderGUI:
             try:
                 self.ready_queue.get_nowait()
                 cleared += 1
-            except:
+            except Exception:
                 break
         if cleared > 0:
             self.root.after(0, lambda n=cleared: self.log(f"Cleared {n} items from old queue", "info"))
@@ -2904,7 +2870,7 @@ class TranscoderGUI:
                 item = self.ready_queue.get_nowait()
                 temp_items.append(item)
                 ready_paths.add(str(item[0]))
-            except:
+            except Exception:
                 break
 
         # Recolocar os itens
@@ -3023,7 +2989,7 @@ class TranscoderGUI:
                         video_path = item[0]
                         file_size = item[1]
                         self._queue_items_set.discard(str(video_path))
-                    except:
+                    except Exception:
                         time.sleep(0.5)
                         continue
 
@@ -3067,24 +3033,6 @@ class TranscoderGUI:
 
             except Exception as e:
                 time.sleep(1)
-
-    def _quick_scan_new_local_files(self) -> int:
-        """
-        DEPRECATED in v2.1 - replaced by _refill_queue_incremental()
-        Kept for compatibility but does nothing.
-        """
-        # v2.1: Este método fazia rglob de todos os arquivos (70k+)
-        # Agora usamos _refill_queue_incremental() que é incremental por pasta
-        return 0
-
-    def _probe_and_download_cloud_files(self, max_downloads: int) -> int:
-        """
-        DEPRECATED in v2.1 - replaced by _trigger_downloads_incremental()
-        Kept for compatibility but does nothing.
-        """
-        # v2.1: Este método fazia rglob de todos os arquivos (70k+)
-        # Agora usamos _trigger_downloads_incremental() que trabalha só com a fila ativa
-        return 0
 
     def process_loop(self):
         """Main processing loop with auto-recovery for daemon mode."""
@@ -3130,6 +3078,35 @@ class TranscoderGUI:
         self.root.after(0, lambda: self.start_btn.config(state=tk.NORMAL))
         self.root.after(0, lambda: self.pause_btn.config(state=tk.DISABLED, text="⏸ PAUSE"))
         self.root.after(0, lambda: self.stop_btn.config(state=tk.DISABLED))
+
+    def _wav_processing_loop(self):
+        """Parallel WAV→MP3 loop. Runs alongside video transcoding using CPU only."""
+        while self.running:
+            try:
+                # Wait while paused
+                while self.paused and self.running:
+                    time.sleep(0.5)
+
+                if not self.running:
+                    break
+
+                folders = self.get_watch_folders()
+                if folders:
+                    processed = self.process_audio_files(folders[0])
+                    if processed > 0:
+                        self.root.after(0, lambda n=processed: self.log(
+                            f"WAV batch done: {n} files converted", "success"))
+
+                # Wait 60 seconds between WAV scans (lighter duty than video)
+                for _ in range(60):
+                    if not self.running:
+                        break
+                    time.sleep(1)
+
+            except Exception as e:
+                self.root.after(0, lambda err=e: self.log(
+                    f"WAV loop error: {err}", "error"))
+                time.sleep(30)
 
     def _quick_check_file(self, file_path: Path):
         """
@@ -3286,7 +3263,7 @@ class TranscoderGUI:
                 video_path = item[0]
                 file_size = item[1]
                 probe_data = item[2]  # Already probed!
-            except:
+            except Exception:
                 # probed_queue empty, try ready_queue
                 if not self.ready_queue.empty():
                     try:
@@ -3294,7 +3271,7 @@ class TranscoderGUI:
                         video_path = item[0]
                         file_size = item[1]
                         self._queue_items_set.discard(str(video_path))
-                    except:
+                    except Exception:
                         break
                 else:
                     break
@@ -3321,10 +3298,6 @@ class TranscoderGUI:
 
             files_processed_this_scan += 1
 
-        # Process WAV files in "Audio Source Files" folders
-        audio_processed = self.process_audio_files(folders[0])
-        files_processed_this_scan += audio_processed
-
         # Notify user if we finished processing files and queue is empty
         if files_processed_this_scan > 0:
             self.notify_queue_finished()
@@ -3335,34 +3308,22 @@ class TranscoderGUI:
         Converts WAV to MP3 192kbps, verifies, then deletes original.
         Returns number of files processed.
         """
-        if not self.running:
+        if not self.running and not self.wav_running:
             return 0
 
         # Find WAV files ONLY in "Audio Source Files" folders
         wav_files = []
-        for wav_path in base_folder.rglob('*.wav'):
-            # Skip macOS metadata files
-            if wav_path.name.startswith('._'):
+        for audio_folder in base_folder.rglob('Audio Source Files'):
+            if not audio_folder.is_dir():
                 continue
-            # Check if it's in an "Audio Source Files" folder
-            if 'Audio Source Files' in str(wav_path):
+            for wav_path in list(audio_folder.glob('*.wav')) + list(audio_folder.glob('*.WAV')):
+                if wav_path.name.startswith('._'):
+                    continue
                 if not self.is_processed(wav_path):
                     try:
                         size = wav_path.stat().st_size
                         wav_files.append((wav_path, size))
-                    except:
-                        pass
-
-        # Also check .WAV extension
-        for wav_path in base_folder.rglob('*.WAV'):
-            if wav_path.name.startswith('._'):
-                continue
-            if 'Audio Source Files' in str(wav_path):
-                if not self.is_processed(wav_path):
-                    try:
-                        size = wav_path.stat().st_size
-                        wav_files.append((wav_path, size))
-                    except:
+                    except Exception:
                         pass
 
         if not wav_files:
@@ -3376,7 +3337,7 @@ class TranscoderGUI:
 
         processed = 0
         for wav_path, size in wav_files:
-            if not self.running:
+            if not self.running and not self.wav_running:
                 break
 
             # Check disk space
@@ -3454,10 +3415,7 @@ class TranscoderGUI:
                 str(temp_mp3)
             ]
 
-            self.root.after(0, lambda: self.current_file_label.config(
-                text=f"Converting: {wav_path.name}"))
-
-            # Run FFmpeg
+            # Run FFmpeg (CPU only — doesn't compete with QSV video encoding)
             result = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=300  # 5 min timeout
             )
@@ -3501,9 +3459,6 @@ class TranscoderGUI:
 
             # Mark as processed
             self.mark_processed(wav_path, str(mp3_path), "done", input_size, output_size)
-
-            # Reset UI
-            self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
 
             return True
 
@@ -3590,7 +3545,7 @@ class TranscoderGUI:
                     try:
                         with open(log_file, 'a', encoding='utf-8') as f:
                             f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | WAV FOLDER DELETED | {num_files} files | {total_gb:.2f}GB freed\n")
-                    except:
+                    except Exception:
                         pass
 
                 self._scheduled_wav_folders.discard(folder_key)
@@ -3719,7 +3674,7 @@ class TranscoderGUI:
                             try:
                                 with open(log_file, 'a', encoding='utf-8') as f:
                                     f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | H264 FOLDER DELETED\n")
-                            except:
+                            except Exception:
                                 pass
                         except Exception as del_err:
                             self.root.after(0, lambda err=del_err: self.log(
@@ -3999,7 +3954,7 @@ class TranscoderGUI:
                 str(path), None, None, ctypes.pointer(free_bytes)
             )
             return free_bytes.value / (1024**3)
-        except:
+        except Exception:
             return 999  # Assume enough space if can't check
 
     def _sort_by_folder_completion(self, pending_files: list) -> list:
@@ -4216,7 +4171,7 @@ class TranscoderGUI:
                                     downloading_files.append(f"{file_path.name} (waiting)")
                             else:
                                 downloading_files.append(f"{Path(path_str).name} (queued)")
-                        except:
+                        except Exception:
                             downloading_files.append(f"{Path(path_str).name} (queued)")
 
                     # Calculate ETA based on average Dropbox speed (~5-20 MB/s typical)
@@ -4321,7 +4276,7 @@ class TranscoderGUI:
                     size = file_path.stat().st_size
                     if size < 1000:  # Less than 1KB is definitely a placeholder
                         return True
-                except:
+                except Exception:
                     pass
             return False
         except Exception:
@@ -4329,7 +4284,7 @@ class TranscoderGUI:
             try:
                 size = file_path.stat().st_size
                 return size < 1000  # Placeholder files are tiny
-            except:
+            except Exception:
                 return True  # Assume cloud if we can't check
 
     def _trigger_dropbox_download(self, file_path: Path):
@@ -4343,7 +4298,7 @@ class TranscoderGUI:
                 ['attrib', '-U', '+P', str(file_path)],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
             )
-        except:
+        except Exception:
             pass
 
     def process_file_preprobed(self, input_path: Path, probe_data: dict, queue_pos: int = 0,
@@ -4610,7 +4565,7 @@ class TranscoderGUI:
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
             if result.returncode == 0:
                 return json.loads(result.stdout)
-        except:
+        except Exception:
             pass
         return None
 
@@ -4677,7 +4632,7 @@ class TranscoderGUI:
             if match:
                 s, ms = match.groups()
                 return int(s) + int(ms) / 100
-        except:
+        except Exception:
             pass
         return -1
 
@@ -4813,7 +4768,7 @@ class TranscoderGUI:
                                 return True
                         except ValueError:
                             pass
-        except:
+        except Exception:
             pass
         return False
 
@@ -4861,7 +4816,7 @@ def main():
     try:
         root.tk.call("source", "azure.tcl")
         root.tk.call("set_theme", "light")
-    except:
+    except Exception:
         pass
 
     app = TranscoderGUI(root)
