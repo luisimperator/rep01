@@ -62,11 +62,12 @@ def get_pc_name():
         hostname = hostname.split('.')[0]
     return hostname
 
-# Embedded ManifestManager class
+# Embedded ManifestManager class — per-PC manifests (v5.5: zero race conditions)
 class ManifestManager:
-    """Embedded manifest manager for standalone GUI use."""
+    """Per-PC manifest manager. Each PC writes its own file, reads all for merged view."""
 
-    MANIFEST_FILENAME = "global_manifest.json"
+    MANIFESTS_DIR = "manifests"
+    LEGACY_MANIFEST = "global_manifest.json"
 
     def __init__(self, base_dropbox_path=None):
         if base_dropbox_path:
@@ -75,61 +76,136 @@ class ManifestManager:
             detected = find_dropbox_path()
             self.base_path = detected if detected else Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
 
-        self.manifest_path = self.base_path / self.MANIFEST_FILENAME
+        self.manifests_dir = self.base_path / self.MANIFESTS_DIR
         self.pc_name = get_pc_name()
+        self.my_manifest_path = self.manifests_dir / f"{self.pc_name}.json"
         self._lock = threading.Lock()
         self._unsaved_changes = 0
 
-        # Initialize manifest structure
+        # Initialize per-PC manifest
+        self.manifests_dir.mkdir(parents=True, exist_ok=True)
+        self._migrate_legacy_manifest()
         self.manifest = self._load_or_create()
         self._register_pc()
 
-    def _load_or_create(self):
-        """Load existing manifest or create new one."""
-        if self.manifest_path.exists():
-            try:
-                with open(self.manifest_path, 'r', encoding='utf-8') as f:
-                    data = json.load(f)
-                print(f"[Manifest] Loaded: {data.get('stats', {}).get('total_files_processed', 0)} files")
-                return self._dict_to_manifest(data)
-            except Exception as e:
-                print(f"[Manifest] Error loading: {e}")
+        # Merged cache for fast cross-PC lookups (refreshed periodically)
+        self._merged_processed = set()
+        self._merged_skipped = set()
+        self._merged_failed = set()
+        self._all_manifests_cache = []
+        self._last_merge_time = 0
+        self._merge_interval = 60  # seconds
+        self._refresh_merged_cache()
 
-        # Create new manifest
-        self.base_path.mkdir(parents=True, exist_ok=True)
+    def _migrate_legacy_manifest(self):
+        """Migrate from single global_manifest.json to per-PC manifests."""
+        legacy_path = self.base_path / self.LEGACY_MANIFEST
+        if not legacy_path.exists() or self.my_manifest_path.exists():
+            return
+        try:
+            with open(legacy_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            my_data = self._extract_pc_data(data)
+            with open(self.my_manifest_path, 'w', encoding='utf-8') as f:
+                json.dump(my_data, f, indent=2, ensure_ascii=False)
+            print(f"[Manifest] Migrated {self.pc_name} data from legacy manifest")
+        except Exception as e:
+            print(f"[Manifest] Migration error: {e}")
+
+    def _extract_pc_data(self, global_data):
+        """Extract this PC's entries from the legacy global manifest."""
         now = datetime.now().isoformat()
+        my_processed = {}
+        for path, record in global_data.get('processed_files', {}).items():
+            pc = record.get('processed_by_pc', '') if isinstance(record, dict) else ''
+            if pc == self.pc_name or pc == 'imported':
+                my_processed[path] = record
+        my_skipped = {}
+        for path, record in global_data.get('skipped_files', {}).items():
+            pc = record.get('checked_by_pc', '') if isinstance(record, dict) else ''
+            if pc == self.pc_name:
+                my_skipped[path] = record
+        my_failed = {}
+        for path, error in global_data.get('failed_files', {}).items():
+            if f'(by {self.pc_name})' in str(error):
+                my_failed[path] = error
+        my_daily = {}
+        for date_key, day_data in global_data.get('daily_history', {}).items():
+            by_pc = day_data.get('by_pc', {})
+            if self.pc_name in by_pc:
+                my_count = by_pc[self.pc_name]
+                total_files = day_data.get('files_processed', 0)
+                ratio = my_count / total_files if total_files > 0 else 0
+                my_daily[date_key] = {
+                    'date': date_key,
+                    'files_processed': my_count,
+                    'bytes_processed': int(day_data.get('bytes_processed', 0) * ratio),
+                    'bytes_saved': int(day_data.get('bytes_saved', 0) * ratio),
+                    'by_pc': {self.pc_name: my_count},
+                }
+        stats = {
+            'total_files_processed': len(my_processed),
+            'total_input_bytes': sum(
+                r.get('input_size_bytes', 0) if isinstance(r, dict) else 0
+                for r in my_processed.values()
+            ),
+            'total_output_bytes': sum(
+                r.get('output_size_bytes', 0) if isinstance(r, dict) else 0
+                for r in my_processed.values()
+            ),
+            'total_saved_bytes': sum(
+                (r.get('input_size_bytes', 0) - r.get('output_size_bytes', 0)) if isinstance(r, dict) else 0
+                for r in my_processed.values()
+            ),
+            'total_transcode_seconds': sum(
+                r.get('transcode_seconds', 0) if isinstance(r, dict) else 0
+                for r in my_processed.values()
+            ),
+            'total_files_to_process': global_data.get('stats', {}).get('total_files_to_process', 0),
+            'total_bytes_to_process': global_data.get('stats', {}).get('total_bytes_to_process', 0),
+        }
         return {
-            'created_at': now,
-            'last_updated': now,
-            'last_updated_by': self.pc_name,
-            'stats': {
-                'total_files_processed': 0,
-                'total_input_bytes': 0,
-                'total_output_bytes': 0,
-                'total_saved_bytes': 0,
-                'total_transcode_seconds': 0,
-                'total_files_to_process': 0,
-                'total_bytes_to_process': 0,
-            },
-            'processed_files': {},
-            'skipped_files': {},
-            'failed_files': {},
-            'daily_history': {},
-            'active_pcs': {},
-            'imported_h265_logs': {},
+            'pc_name': self.pc_name,
+            'created_at': now, 'last_updated': now, 'last_updated_by': self.pc_name,
+            'stats': stats,
+            'processed_files': my_processed, 'skipped_files': my_skipped,
+            'failed_files': my_failed, 'daily_history': my_daily,
+            'active_pcs': {self.pc_name: now},
+            'imported_h265_logs': global_data.get('imported_h265_logs', {}),
         }
 
-    def _dict_to_manifest(self, data):
-        """Convert loaded dict to manifest format."""
-        # Ensure all required fields exist
+    def _load_or_create(self):
+        """Load this PC's manifest or create a new one."""
+        if self.my_manifest_path.exists():
+            try:
+                with open(self.my_manifest_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                print(f"[Manifest] Loaded {self.pc_name}: {data.get('stats', {}).get('total_files_processed', 0)} files")
+                return self._ensure_fields(data)
+            except Exception as e:
+                print(f"[Manifest] Error loading: {e}")
+        now = datetime.now().isoformat()
+        return {
+            'pc_name': self.pc_name,
+            'created_at': now, 'last_updated': now, 'last_updated_by': self.pc_name,
+            'stats': {
+                'total_files_processed': 0, 'total_input_bytes': 0,
+                'total_output_bytes': 0, 'total_saved_bytes': 0,
+                'total_transcode_seconds': 0, 'total_files_to_process': 0,
+                'total_bytes_to_process': 0,
+            },
+            'processed_files': {}, 'skipped_files': {}, 'failed_files': {},
+            'daily_history': {}, 'active_pcs': {}, 'imported_h265_logs': {},
+        }
+
+    def _ensure_fields(self, data):
+        """Ensure all required fields exist in manifest dict."""
+        data.setdefault('pc_name', self.pc_name)
         data.setdefault('stats', {})
-        data['stats'].setdefault('total_files_processed', 0)
-        data['stats'].setdefault('total_input_bytes', 0)
-        data['stats'].setdefault('total_output_bytes', 0)
-        data['stats'].setdefault('total_saved_bytes', 0)
-        data['stats'].setdefault('total_transcode_seconds', 0)
-        data['stats'].setdefault('total_files_to_process', 0)
-        data['stats'].setdefault('total_bytes_to_process', 0)
+        for key in ['total_files_processed', 'total_input_bytes', 'total_output_bytes',
+                     'total_saved_bytes', 'total_transcode_seconds',
+                     'total_files_to_process', 'total_bytes_to_process']:
+            data['stats'].setdefault(key, 0)
         data.setdefault('processed_files', {})
         data.setdefault('skipped_files', {})
         data.setdefault('failed_files', {})
@@ -138,6 +214,56 @@ class ManifestManager:
         data.setdefault('imported_h265_logs', {})
         return data
 
+    def _load_all_manifests(self):
+        """Load all per-PC manifests from the manifests directory."""
+        manifests = []
+        try:
+            for f in self.manifests_dir.glob('*.json'):
+                if f == self.my_manifest_path:
+                    manifests.append(self.manifest)  # Use in-memory (most up-to-date)
+                    continue
+                try:
+                    with open(f, 'r', encoding='utf-8') as fp:
+                        data = json.load(fp)
+                    manifests.append(self._ensure_fields(data))
+                except Exception:
+                    continue
+            # Also check legacy manifest as fallback during migration
+            legacy_path = self.base_path / self.LEGACY_MANIFEST
+            if legacy_path.exists():
+                try:
+                    with open(legacy_path, 'r', encoding='utf-8') as fp:
+                        data = json.load(fp)
+                    manifests.append(self._ensure_fields(data))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        if not manifests:
+            manifests.append(self.manifest)
+        return manifests
+
+    def _refresh_merged_cache(self):
+        """Reload all manifests and build merged lookup sets."""
+        all_manifests = self._load_all_manifests()
+        merged_processed = set()
+        merged_skipped = set()
+        merged_failed = set()
+        for m in all_manifests:
+            merged_processed.update(m.get('processed_files', {}).keys())
+            merged_skipped.update(m.get('skipped_files', {}).keys())
+            merged_failed.update(m.get('failed_files', {}).keys())
+        self._merged_processed = merged_processed
+        self._merged_skipped = merged_skipped
+        self._merged_failed = merged_failed
+        self._all_manifests_cache = all_manifests
+        self._last_merge_time = time.time()
+
+    def _ensure_merged_fresh(self):
+        """Refresh merged cache if stale."""
+        if time.time() - self._last_merge_time > self._merge_interval:
+            self._refresh_merged_cache()
+
     def _register_pc(self):
         self.manifest['active_pcs'][self.pc_name] = datetime.now().isoformat()
 
@@ -145,45 +271,55 @@ class ManifestManager:
         return str(path).lower().replace('\\', '/')
 
     def refresh(self):
-        """Reload manifest from disk."""
+        """Reload own manifest from disk and refresh merged cache."""
         with self._lock:
-            if self.manifest_path.exists():
+            if self.my_manifest_path.exists():
                 try:
-                    with open(self.manifest_path, 'r', encoding='utf-8') as f:
+                    with open(self.my_manifest_path, 'r', encoding='utf-8') as f:
                         data = json.load(f)
-                    self.manifest = self._dict_to_manifest(data)
+                    self.manifest = self._ensure_fields(data)
                     self._register_pc()
                 except Exception as e:
                     print(f"[Manifest] Refresh error: {e}")
+            self._refresh_merged_cache()
         return self.manifest
 
     def save(self, force=False):
-        """Save manifest to disk."""
+        """Save this PC's manifest to disk."""
         with self._lock:
             self._unsaved_changes += 1
             if not force and self._unsaved_changes < 3:
                 return
             try:
-                self.base_path.mkdir(parents=True, exist_ok=True)
-                temp_path = self.manifest_path.with_suffix('.tmp')
+                self.manifests_dir.mkdir(parents=True, exist_ok=True)
+                temp_path = self.my_manifest_path.with_suffix('.tmp')
                 with open(temp_path, 'w', encoding='utf-8') as f:
                     json.dump(self.manifest, f, indent=2, ensure_ascii=False)
-                temp_path.replace(self.manifest_path)
+                temp_path.replace(self.my_manifest_path)
                 self._unsaved_changes = 0
             except Exception as e:
                 print(f"[Manifest] Save error: {e}")
 
     def is_processed(self, file_path):
         normalized = self._normalize_path(file_path)
-        return normalized in self.manifest['processed_files']
+        if normalized in self.manifest['processed_files']:
+            return True
+        self._ensure_merged_fresh()
+        return normalized in self._merged_processed
 
     def is_skipped(self, file_path):
         normalized = self._normalize_path(file_path)
-        return normalized in self.manifest['skipped_files']
+        if normalized in self.manifest['skipped_files']:
+            return True
+        self._ensure_merged_fresh()
+        return normalized in self._merged_skipped
 
     def is_failed(self, file_path):
         normalized = self._normalize_path(file_path)
-        return normalized in self.manifest['failed_files']
+        if normalized in self.manifest['failed_files']:
+            return True
+        self._ensure_merged_fresh()
+        return normalized in self._merged_failed
 
     def record_success(self, original_path, output_path, input_size, output_size, encoder, cq_value, duration=0, transcode_time=0):
         normalized = self._normalize_path(original_path)
@@ -198,7 +334,6 @@ class ManifestManager:
             'encoder_used': encoder,
             'cq_value': cq_value,
         }
-        # Update stats
         self.manifest['stats']['total_files_processed'] += 1
         self.manifest['stats']['total_input_bytes'] += input_size
         self.manifest['stats']['total_output_bytes'] += output_size
@@ -207,7 +342,6 @@ class ManifestManager:
         self.manifest['last_updated'] = datetime.now().isoformat()
         self.manifest['last_updated_by'] = self.pc_name
 
-        # Update daily
         today = datetime.now().strftime('%Y-%m-%d')
         if today not in self.manifest['daily_history']:
             self.manifest['daily_history'][today] = {'date': today, 'files_processed': 0, 'bytes_processed': 0, 'bytes_saved': 0, 'by_pc': {}}
@@ -215,11 +349,13 @@ class ManifestManager:
         self.manifest['daily_history'][today]['bytes_processed'] += input_size
         self.manifest['daily_history'][today]['bytes_saved'] += (input_size - output_size)
         self.manifest['daily_history'][today]['by_pc'][self.pc_name] = self.manifest['daily_history'][today]['by_pc'].get(self.pc_name, 0) + 1
+        self._merged_processed.add(normalized)
         self.save()
 
     def record_failure(self, file_path, error):
         normalized = self._normalize_path(file_path)
         self.manifest['failed_files'][normalized] = f"{error} (by {self.pc_name})"
+        self._merged_failed.add(normalized)
         self.save(force=True)
 
     def record_skipped(self, file_path, reason, size_bytes=0):
@@ -231,6 +367,7 @@ class ManifestManager:
             'checked_at': datetime.now().isoformat(),
             'checked_by_pc': self.pc_name,
         }
+        self._merged_skipped.add(normalized)
         self.save()
 
     def reset_failed(self, file_path=None):
@@ -238,34 +375,30 @@ class ManifestManager:
             normalized = self._normalize_path(file_path)
             if normalized in self.manifest['failed_files']:
                 del self.manifest['failed_files'][normalized]
+                self._merged_failed.discard(normalized)
                 self.save(force=True)
                 return 1
             return 0
         count = len(self.manifest['failed_files'])
         self.manifest['failed_files'].clear()
+        self._refresh_merged_cache()
         self.save(force=True)
         return count
 
     def update_estimates(self, total_files, total_bytes):
-        # Only UPDATE if new values are higher (totals should never decrease)
-        # This prevents local scans from overwriting global totals with partial data
         current_files = self.manifest['stats'].get('total_files_to_process', 0)
         current_bytes = self.manifest['stats'].get('total_bytes_to_process', 0)
-
         if total_files > current_files:
             self.manifest['stats']['total_files_to_process'] = total_files
         if total_bytes > current_bytes:
             self.manifest['stats']['total_bytes_to_process'] = total_bytes
-
         self.save(force=True)
 
     def import_h265_feitos_txt(self, log_path, content):
-        """
-        Import entries from h265 feito.txt log files.
-        Format: "2024-01-01 12:00:00 | filename.mp4 | 100.0MB -> 50.0MB (50.0% menor)"
-        """
+        """Import entries from h265 feito.txt log files."""
         if log_path in self.manifest['imported_h265_logs']:
             return 0
+        self._ensure_merged_fresh()
         imported = 0
         for line in content.splitlines():
             line = line.strip()
@@ -277,8 +410,6 @@ class ManifestManager:
                     timestamp = parts[0].strip()
                     filename = parts[1].strip()
                     size_part = parts[2].strip() if len(parts) > 2 else ""
-
-                    # Parse size format: "100.0MB -> 50.0MB (50.0% menor)"
                     input_size = 0
                     output_size = 0
                     if '->' in size_part:
@@ -286,28 +417,25 @@ class ManifestManager:
                         if size_match:
                             input_size = int(float(size_match.group(1)) * 1024 * 1024)
                             output_size = int(float(size_match.group(2)) * 1024 * 1024)
-
-                    # Use full path from log_path directory + filename for normalization
-                    log_dir = str(Path(log_path).parent.parent)  # Go up from h265/ folder
+                    log_dir = str(Path(log_path).parent.parent)
                     full_path = f"{log_dir}/{filename}"
                     normalized = self._normalize_path(full_path)
-
+                    # Skip if already known by any PC (avoids duplicate imports)
+                    if normalized in self._merged_processed:
+                        continue
                     if normalized not in self.manifest['processed_files']:
                         self.manifest['processed_files'][normalized] = {
-                            'original_path': full_path,
-                            'output_path': '',
-                            'input_size_bytes': input_size,
-                            'output_size_bytes': output_size,
+                            'original_path': full_path, 'output_path': '',
+                            'input_size_bytes': input_size, 'output_size_bytes': output_size,
                             'compression_ratio': output_size / input_size if input_size > 0 else 0.25,
                             'processed_at': timestamp if timestamp else datetime.now().isoformat(),
-                            'processed_by_pc': 'imported',
-                            'encoder_used': 'unknown',
-                            'cq_value': 0,
+                            'processed_by_pc': 'imported', 'encoder_used': 'unknown', 'cq_value': 0,
                         }
                         self.manifest['stats']['total_files_processed'] += 1
                         self.manifest['stats']['total_input_bytes'] += input_size
                         self.manifest['stats']['total_output_bytes'] += output_size
                         self.manifest['stats']['total_saved_bytes'] += (input_size - output_size)
+                        self._merged_processed.add(normalized)
                         imported += 1
                 except Exception:
                     continue
@@ -317,40 +445,78 @@ class ManifestManager:
         return imported
 
     def get_stats_summary(self):
+        """Get merged stats across all PCs."""
+        self._ensure_merged_fresh()
+        total_processed = set()
+        total_input = 0
+        total_saved = 0
+        for m in self._all_manifests_cache:
+            for path, record in m.get('processed_files', {}).items():
+                if path not in total_processed:
+                    total_processed.add(path)
+                    if isinstance(record, dict):
+                        total_input += record.get('input_size_bytes', 0)
+                        total_saved += record.get('input_size_bytes', 0) - record.get('output_size_bytes', 0)
         return {
-            'processed': len(self.manifest['processed_files']),
-            'skipped': len(self.manifest['skipped_files']),
-            'failed': len(self.manifest['failed_files']),
-            'total_tb': self.manifest['stats']['total_input_bytes'] / (1024**4),
-            'saved_tb': self.manifest['stats']['total_saved_bytes'] / (1024**4),
+            'processed': len(total_processed),
+            'skipped': len(self._merged_skipped),
+            'failed': len(self._merged_failed),
+            'total_tb': total_input / (1024**4),
+            'saved_tb': total_saved / (1024**4),
         }
 
     def get_dashboard_data(self):
-        s = self.manifest['stats']
-        # Use ACTUAL counts from manifest dictionaries (more accurate than stats)
-        actual_processed = len(self.manifest['processed_files'])
-        actual_skipped = len(self.manifest['skipped_files'])
+        """Get merged dashboard data from all PC manifests."""
+        self._ensure_merged_fresh()
+        all_processed = {}
+        all_failed = {}
+        all_daily = {}
+        all_active_pcs = {}
+        total_input = 0
+        total_output = 0
+        total_saved = 0
+        total_transcode_sec = 0
+        total_to_process = 0
+        total_bytes_to_process = 0
 
-        total_input = s['total_input_bytes']
-        total_to_proc = s['total_bytes_to_process']
-        total = total_input + total_to_proc
+        for m in self._all_manifests_cache:
+            for path, record in m.get('processed_files', {}).items():
+                if path not in all_processed:
+                    all_processed[path] = record
+                    if isinstance(record, dict):
+                        total_input += record.get('input_size_bytes', 0)
+                        total_output += record.get('output_size_bytes', 0)
+                        total_saved += record.get('input_size_bytes', 0) - record.get('output_size_bytes', 0)
+                        total_transcode_sec += record.get('transcode_seconds', 0)
+            for path, error in m.get('failed_files', {}).items():
+                if path not in all_failed:
+                    all_failed[path] = error
+            for date_key, day_data in m.get('daily_history', {}).items():
+                if date_key not in all_daily:
+                    all_daily[date_key] = {'date': date_key, 'files_processed': 0, 'bytes_processed': 0, 'bytes_saved': 0, 'by_pc': {}}
+                all_daily[date_key]['files_processed'] += day_data.get('files_processed', 0)
+                all_daily[date_key]['bytes_processed'] += day_data.get('bytes_processed', 0)
+                all_daily[date_key]['bytes_saved'] += day_data.get('bytes_saved', 0)
+                for pc, count in day_data.get('by_pc', {}).items():
+                    all_daily[date_key]['by_pc'][pc] = all_daily[date_key]['by_pc'].get(pc, 0) + count
+            all_active_pcs.update(m.get('active_pcs', {}))
+            m_stats = m.get('stats', {})
+            total_to_process = max(total_to_process, m_stats.get('total_files_to_process', 0))
+            total_bytes_to_process = max(total_bytes_to_process, m_stats.get('total_bytes_to_process', 0))
 
-        # Calculate progress based on actual file counts
-        total_files = actual_processed + s.get('total_files_to_process', 0)
+        actual_processed = len(all_processed)
+        total_files = actual_processed + total_to_process
         progress = (actual_processed / total_files * 100) if total_files > 0 else 0
-
-        avg_ratio = s['total_output_bytes'] / total_input if total_input > 0 else 0.25
-        trans_sec = s['total_transcode_seconds']
-        speed = (total_input / (1024**3)) / (trans_sec / 3600) if trans_sec > 0 else 50
-        remaining_gb = total_to_proc / (1024**3)
+        avg_ratio = total_output / total_input if total_input > 0 else 0.25
+        speed = (total_input / (1024**3)) / (total_transcode_sec / 3600) if total_transcode_sec > 0 else 50
+        remaining_gb = total_bytes_to_process / (1024**3)
         days = (remaining_gb / speed / 24) if speed > 0 else 0
 
         daily = []
-        for date_key in sorted(self.manifest['daily_history'].keys(), reverse=True)[:14]:
-            d = self.manifest['daily_history'][date_key]
+        for date_key in sorted(all_daily.keys(), reverse=True)[:14]:
+            d = all_daily[date_key]
             daily.append({
-                'date': d['date'],
-                'files': d['files_processed'],
+                'date': d['date'], 'files': d['files_processed'],
                 'gb_processed': d['bytes_processed'] / (1024**3),
                 'gb_saved': d['bytes_saved'] / (1024**3),
                 'by_pc': d.get('by_pc', {}),
@@ -360,26 +526,38 @@ class ManifestManager:
             'pc_name': self.pc_name,
             'last_updated': self.manifest['last_updated'],
             'last_updated_by': self.manifest['last_updated_by'],
-            'active_pcs': list(self.manifest['active_pcs'].keys()),
-            'total_processed': actual_processed,  # Use actual count from dict
-            'total_to_process': s.get('total_files_to_process', 0),
+            'active_pcs': list(all_active_pcs.keys()),
+            'total_processed': actual_processed,
+            'total_to_process': total_to_process,
             'progress_percent': progress,
             'processed_tb': total_input / (1024**4),
-            'to_process_tb': total_to_proc / (1024**4),
-            'saved_tb': s['total_saved_bytes'] / (1024**4),
-            'estimated_total_savings_tb': (s['total_saved_bytes'] + total_to_proc * (1 - avg_ratio)) / (1024**4),
+            'to_process_tb': total_bytes_to_process / (1024**4),
+            'saved_tb': total_saved / (1024**4),
+            'estimated_total_savings_tb': (total_saved + total_bytes_to_process * (1 - avg_ratio)) / (1024**4),
             'avg_compression': (1 - avg_ratio) * 100,
             'avg_speed_gbh': speed,
             'days_remaining': days,
             'daily_progress': daily,
-            'failed_count': len(self.manifest['failed_files']),
-            'skipped_count': len(self.manifest['skipped_files']),
+            'failed_count': len(all_failed),
+            'skipped_count': len(self._merged_skipped),
         }
 
+    def cleanup_old_history(self, max_days=90):
+        """Remove daily history entries older than max_days."""
+        from datetime import timedelta
+        cutoff = (datetime.now() - timedelta(days=max_days)).strftime('%Y-%m-%d')
+        old_dates = [d for d in self.manifest['daily_history'] if d < cutoff]
+        for d in old_dates:
+            del self.manifest['daily_history'][d]
+        if old_dates:
+            self.save(force=True)
+        return len(old_dates)
+
     def get_manifest_path(self):
-        return self.manifest_path
+        return self.my_manifest_path
 
     def close(self):
+        self.cleanup_old_history()
         self.save(force=True)
 
 
@@ -1314,15 +1492,22 @@ class TranscoderGUI:
             report.append(f"║{'CLOUD MANIFEST (persistente no Dropbox)':^78}║")
             report.append("╠" + "═" * 78 + "╣")
             if self.cloud_manifest:
-                cm_stats = self.cloud_manifest.manifest.stats
+                cm_stats = self.cloud_manifest.manifest['stats']
                 cm_path = str(self.cloud_manifest.get_manifest_path())
                 cm_path_display = cm_path[:70] if len(cm_path) <= 70 else "..." + cm_path[-67:]
+                saved_gb = cm_stats['total_saved_bytes'] / (1024**3)
+                total_in = cm_stats['total_input_bytes']
+                total_out = cm_stats['total_output_bytes']
+                avg_ratio = total_out / total_in if total_in > 0 else 0.25
+                trans_sec = cm_stats['total_transcode_seconds']
+                speed_gbh = (total_in / (1024**3)) / (trans_sec / 3600) if trans_sec > 0 else 0
+                failed_count = len(self.cloud_manifest.manifest['failed_files'])
                 report.append(f"║  PC: {self.pc_name:<25} Caminho: {cm_path_display:<40}  ║")
-                report.append(f"║  Total processados (histórico):              {cm_stats.total_files_processed:>8}                         ║")
-                report.append(f"║  Total economizado (histórico):              {cm_stats.total_saved_gb:>8.1f} GB                      ║")
-                report.append(f"║  Taxa média de compressão:                   {(1 - cm_stats.avg_compression_ratio) * 100:>8.1f}%                       ║")
-                report.append(f"║  Velocidade média:                           {cm_stats.avg_transcode_speed_gbh:>8.1f} GB/h                     ║")
-                report.append(f"║  Arquivos com falha:                         {len(self.cloud_manifest.manifest.failed_files):>8}  {'✓' if len(self.cloud_manifest.manifest.failed_files) == 0 else '⚠'}                        ║")
+                report.append(f"║  Total processados (histórico):              {cm_stats['total_files_processed']:>8}                         ║")
+                report.append(f"║  Total economizado (histórico):              {saved_gb:>8.1f} GB                      ║")
+                report.append(f"║  Taxa média de compressão:                   {(1 - avg_ratio) * 100:>8.1f}%                       ║")
+                report.append(f"║  Velocidade média:                           {speed_gbh:>8.1f} GB/h                     ║")
+                report.append(f"║  Arquivos com falha:                         {failed_count:>8}  {'✓' if failed_count == 0 else '⚠'}                        ║")
             else:
                 report.append(f"║  {'Cloud manifest não disponível':^74}  ║")
 
@@ -1890,7 +2075,7 @@ class TranscoderGUI:
         # Also count cloud manifest failures
         cloud_count = 0
         if self.cloud_manifest:
-            cloud_count = len(self.cloud_manifest.manifest.failed_files)
+            cloud_count = len(self.cloud_manifest.manifest['failed_files'])
 
         total = max(count, cloud_count)
         if total == 0:
@@ -4179,12 +4364,17 @@ class TranscoderGUI:
         temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
         duration = self.get_duration(probe_data)
 
-        success, transcode_start = self._encode_with_fallback(input_path, temp_path, probe_data, duration)
+        success, transcode_start, last_error = self._encode_with_fallback(input_path, temp_path, probe_data, duration)
 
         if not success:
             if self.running:
-                self.root.after(0, lambda: self.log("All encoders failed", "error"))
-                self.mark_processed(input_path, "", "error", 0, 0)
+                if self._is_permanent_error(last_error):
+                    self.root.after(0, lambda e=last_error[:80]: self.log(
+                        f"Permanent error, skipping: {e}", "warning"))
+                    self.mark_processed(input_path, "", "skipped_permanent_error", 0, 0)
+                else:
+                    self.root.after(0, lambda: self.log("All encoders failed", "error"))
+                    self.mark_processed(input_path, "", "error", 0, 0)
             return
 
         self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start)
@@ -4254,13 +4444,18 @@ class TranscoderGUI:
         temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
         duration = self.get_duration(probe_data)
 
-        success, transcode_start = self._encode_with_fallback(input_path, temp_path, probe_data, duration)
+        success, transcode_start, last_error = self._encode_with_fallback(input_path, temp_path, probe_data, duration)
 
         if success:
             self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start, duration)
         else:
-            self.root.after(0, lambda: self.log("All encoders failed!", "error"))
-            self.mark_processed(input_path, "", "error", 0, 0)
+            if self._is_permanent_error(last_error):
+                self.root.after(0, lambda e=last_error[:80]: self.log(
+                    f"Permanent error, skipping: {e}", "warning"))
+                self.mark_processed(input_path, "", "skipped_permanent_error", 0, 0)
+            else:
+                self.root.after(0, lambda: self.log("All encoders failed!", "error"))
+                self.mark_processed(input_path, "", "error", 0, 0)
 
         # Cleanup
         self.current_process = None
@@ -4268,11 +4463,31 @@ class TranscoderGUI:
         self.root.after(0, lambda: self.progress_label.config(text=""))
         self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
 
+    # Error patterns that indicate permanent failures (retrying won't help)
+    PERMANENT_ERROR_PATTERNS = [
+        'invalid data found',
+        'corrupt',
+        'moov atom not found',
+        'invalid nal',
+        'no decoder',
+        'could not find codec',
+        'not a video',
+        'invalid argument',
+        'unrecognized option',
+        'protocol not found',
+        'no such file or directory',
+    ]
+
+    def _is_permanent_error(self, error_msg: str) -> bool:
+        """Check if an FFmpeg error indicates a permanent failure."""
+        error_lower = error_msg.lower()
+        return any(pattern in error_lower for pattern in self.PERMANENT_ERROR_PATTERNS)
+
     def _encode_with_fallback(self, input_path: Path, temp_path: Path,
                               probe_data: dict, duration: float) -> tuple:
         """
         Try encoding with current encoder, fallback to CPU if it fails.
-        Returns (success: bool, transcode_start_time: float).
+        Returns (success: bool, transcode_start_time: float, last_error: str).
         """
         encoder = self.encoder.get()
         encoders_to_try = [encoder]
@@ -4280,6 +4495,7 @@ class TranscoderGUI:
             encoders_to_try.append('cpu')
 
         transcode_start = time.time()
+        last_error = ""
 
         for try_encoder in encoders_to_try:
             if not self.running:
@@ -4293,20 +4509,27 @@ class TranscoderGUI:
 
             if success and temp_path.exists():
                 if self._verify_codec(temp_path, ('hevc', 'h265'), log=True):
-                    return (True, transcode_start)
+                    return (True, transcode_start, "")
                 self.root.after(0, lambda e=try_encoder: self.log(
                     f"Output verification failed with {e}", "warning"))
                 temp_path.unlink(missing_ok=True)
             else:
+                last_error = error_msg or "Unknown error"
                 if error_msg:
                     last_err = error_msg.split('\n')[-1] if error_msg else "Unknown"
                     self.root.after(0, lambda e=try_encoder, err=last_err: self.log(
                         f"{e} failed: {err[:100]}", "warning"))
+                # If permanent error, skip remaining encoders (they'll fail too)
+                if self._is_permanent_error(last_error):
+                    self.root.after(0, lambda: self.log(
+                        "Permanent error detected — skipping file", "warning"))
+                    temp_path.unlink(missing_ok=True)
+                    break
                 if try_encoder != encoders_to_try[-1]:
                     self.root.after(0, lambda: self.log("Trying fallback encoder...", "info"))
                 temp_path.unlink(missing_ok=True)
 
-        return (False, transcode_start)
+        return (False, transcode_start, last_error)
 
     def _finish_successful_transcode(self, input_path: Path, output_path: Path, temp_path: Path,
                                      transcode_start_time: float, duration: float = 0):
