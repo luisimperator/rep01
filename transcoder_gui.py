@@ -2695,35 +2695,6 @@ class TranscoderGUI:
 
         return added
 
-    def _get_next_transcode_item(self) -> dict:
-        """
-        Retorna próximo item pronto para transcodificar.
-        Prioridade:
-        1. READY_LOCAL de pastas COMPLETING
-        2. READY_LOCAL de pastas ACTIVE
-        3. Nada (espera downloads)
-        """
-        with self.active_queue_lock:
-            # Primeiro: itens de pastas que estão quase prontas
-            for i, item in enumerate(self.active_queue):
-                if item['status'] == 'READY_LOCAL':
-                    # Verificar se pasta está em COMPLETING
-                    with self.folder_tracker_lock:
-                        folder_info = self.folder_tracker.get(item['folder'], {})
-                        if folder_info.get('status') == 'COMPLETING':
-                            item = self.active_queue.pop(i)
-                            self._queue_items_set.discard(str(item['path']))
-                            return item
-
-            # Segundo: qualquer READY_LOCAL
-            for i, item in enumerate(self.active_queue):
-                if item['status'] == 'READY_LOCAL':
-                    item = self.active_queue.pop(i)
-                    self._queue_items_set.discard(str(item['path']))
-                    return item
-
-        return None
-
     def _mark_item_done(self, file_path: Path):
         """Marca item como concluído e atualiza folder tracker."""
         folder_path = str(file_path.parent)
@@ -3107,106 +3078,6 @@ class TranscoderGUI:
                 self.root.after(0, lambda err=e: self.log(
                     f"WAV loop error: {err}", "error"))
                 time.sleep(30)
-
-    def _quick_check_file(self, file_path: Path):
-        """
-        Quick parallel check of a file to determine if it needs transcoding.
-        Returns: (file_path, status, reason, size) where status is 'transcode', 'skip', or 'cloud'
-        """
-        try:
-            # Check if file is local (not cloud-only)
-            try:
-                with open(file_path, 'rb') as f:
-                    f.read(1024)  # Read 1KB to check access
-            except OSError as e:
-                if e.errno == 22:  # Cloud-only file
-                    return (file_path, 'cloud', 'cloud-only', 0)
-                raise
-
-            file_size = file_path.stat().st_size
-
-            # Check if output already exists
-            output_path = file_path.parent / 'h265' / file_path.name
-            if output_path.exists():
-                return (file_path, 'skip', 'output_exists', file_size)
-
-            # Quick probe using FFprobe
-            probe_data = self.probe_video(file_path)
-            if not probe_data:
-                return (file_path, 'skip', 'probe_failed', file_size)
-
-            # Check if already HEVC
-            if self.is_hevc(probe_data):
-                # Save to manifest
-                if self.cloud_manifest:
-                    self.cloud_manifest.record_skipped(str(file_path), 'already_hevc', file_size)
-                return (file_path, 'skip', 'already_hevc', file_size)
-
-            # Check bitrate
-            bitrate = self.get_bitrate(probe_data, file_size)
-            if bitrate > 0 and bitrate < 8:  # Less than 8 Mbps
-                # Save to manifest
-                if self.cloud_manifest:
-                    self.cloud_manifest.record_skipped(str(file_path), f'low_bitrate_{bitrate:.1f}', file_size)
-                return (file_path, 'skip', f'low_bitrate_{bitrate:.1f}', file_size)
-
-            # File needs transcoding
-            return (file_path, 'transcode', 'needs_work', file_size)
-
-        except Exception as e:
-            return (file_path, 'skip', f'error: {e}', 0)
-
-    def _parallel_precheck(self, pending_files, max_workers=16):
-        """
-        Check multiple files in parallel to quickly filter out files that don't need transcoding.
-        Returns list of files that actually need transcoding.
-        """
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        files_to_transcode = []
-        skipped = {'hevc': 0, 'low_bitrate': 0, 'exists': 0, 'cloud': 0, 'error': 0}
-        total = len(pending_files)
-
-        self.root.after(0, lambda: self.log(f"Pre-checking {total} files with {max_workers} threads...", "info"))
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all files for checking
-            futures = {executor.submit(self._quick_check_file, f): f for f, _ in pending_files}
-
-            checked = 0
-            for future in as_completed(futures):
-                if not self.running:
-                    executor.shutdown(wait=False, cancel_futures=True)
-                    break
-
-                checked += 1
-                file_path, status, reason, size = future.result()
-
-                if status == 'transcode':
-                    files_to_transcode.append((file_path, size))
-                elif status == 'skip':
-                    if 'hevc' in reason:
-                        skipped['hevc'] += 1
-                    elif 'bitrate' in reason:
-                        skipped['low_bitrate'] += 1
-                    elif 'exists' in reason:
-                        skipped['exists'] += 1
-                    else:
-                        skipped['error'] += 1
-                elif status == 'cloud':
-                    skipped['cloud'] += 1
-
-                # Progress update every 100 files
-                if checked % 100 == 0 or checked == total:
-                    self.root.after(0, lambda c=checked, t=total, n=len(files_to_transcode):
-                        self.log(f"Pre-check: {c}/{t} ({n} need transcoding)", "info"))
-
-        # Summary
-        self.root.after(0, lambda s=skipped: self.log(
-            f"Pre-check complete: {s['hevc']} HEVC, {s['low_bitrate']} low-bitrate, "
-            f"{s['exists']} exist, {s['cloud']} cloud, {s['error']} errors", "success"))
-
-        return files_to_transcode
 
     def scan_and_process(self):
         """Process files from the ready queue. No scanning - ready_queue_worker handles that."""
@@ -3957,46 +3828,6 @@ class TranscoderGUI:
         except Exception:
             return 999  # Assume enough space if can't check
 
-    def _sort_by_folder_completion(self, pending_files: list) -> list:
-        """
-        Sort files prioritizing folders that are closer to completion.
-        This helps free up h264 backup folders faster (they're deleted when all files are done).
-
-        Strategy:
-        1. Count pending files per folder
-        2. Sort by (folder_pending_count, file_size)
-        3. Folders with fewer pending files are processed first
-        """
-        if not pending_files:
-            return pending_files
-
-        from collections import defaultdict
-
-        # Group by parent folder and count pending
-        folder_pending_count = defaultdict(int)
-        for f, size in pending_files:
-            folder = f.parent
-            folder_pending_count[folder] += 1
-
-        # Log folder analysis
-        folders_info = [(folder, count) for folder, count in folder_pending_count.items()]
-        folders_info.sort(key=lambda x: x[1])  # Sort by count for logging
-
-        if len(folders_info) > 1:
-            almost_done = [f"{f.name}({c})" for f, c in folders_info[:3] if c <= 5]
-            if almost_done:
-                self.root.after(0, lambda a=almost_done: self.log(
-                    f"Priority folders (almost done): {', '.join(a)}", "info"))
-
-        # Sort files by (folder_pending_count, file_size)
-        # Folders with fewer pending files come first, then smaller files
-        sorted_files = sorted(
-            pending_files,
-            key=lambda x: (folder_pending_count[x[0].parent], x[1])
-        )
-
-        return sorted_files
-
     def wait_for_file_ready(self, file_path: Path, timeout_minutes: int = 60, estimated_size: int = 0) -> bool:
         """
         Check if a file is ready (fully downloaded from Dropbox).
@@ -4326,53 +4157,20 @@ class TranscoderGUI:
                               input_path.stat().st_size, output_path.stat().st_size)
             return
 
-        # Transcode (same as process_file from here)
+        # Transcode with encoder fallback (QSV/NVENC → CPU)
         output_folder.mkdir(parents=True, exist_ok=True)
         temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
-
-        # Get video duration for progress calculation
         duration = self.get_duration(probe_data)
 
-        # Try encoding with current encoder, fallback to CPU if fails
-        encoder = self.encoder.get()
-        encoders_to_try = [encoder]
-        if encoder != 'cpu':
-            encoders_to_try.append('cpu')
+        success, transcode_start = self._encode_with_fallback(input_path, temp_path, probe_data, duration)
 
-        encoding_success = False
-        transcode_start_time = time.time()
-
-        for try_encoder in encoders_to_try:
-            if not self.running:
-                break
-
-            self.root.after(0, lambda e=try_encoder: self.log(f"Encoding with {e}..."))
-            cmd = self.build_ffmpeg_command(input_path, temp_path, encoder=try_encoder, probe_data=probe_data)
-
-            self.root.after(0, lambda: self.progress_var.set(0))
-
-            success, error_msg = self._run_ffmpeg(cmd, duration)
-
-            if success and temp_path.exists():
-                if self._verify_output(temp_path):
-                    encoding_success = True
-                    break
-                else:
-                    temp_path.unlink(missing_ok=True)
-            else:
-                if try_encoder != 'cpu' and error_msg:
-                    self.root.after(0, lambda e=try_encoder, err=error_msg: self.log(
-                        f"{e} failed: {err}. Trying CPU...", "warning"))
-                temp_path.unlink(missing_ok=True)
-
-        if not encoding_success:
+        if not success:
             if self.running:
                 self.root.after(0, lambda: self.log("All encoders failed", "error"))
                 self.mark_processed(input_path, "", "error", 0, 0)
             return
 
-        # Success - finish up (same as process_file)
-        self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start_time)
+        self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start)
 
     def process_file(self, input_path: Path, queue_pos: int = 0, queue_total: int = 0, file_size: int = 0):
         """Process a single file."""
@@ -4434,61 +4232,15 @@ class TranscoderGUI:
                               input_path.stat().st_size, output_path.stat().st_size)
             return
 
-        # Transcode
+        # Transcode with encoder fallback (QSV/NVENC → CPU)
         output_folder.mkdir(parents=True, exist_ok=True)
         temp_path = output_path.with_suffix(output_path.suffix + '.tmp')
-
-        # Get video duration for progress calculation
         duration = self.get_duration(probe_data)
 
-        # Try encoding with current encoder, fallback to CPU if fails
-        encoder = self.encoder.get()
-        encoders_to_try = [encoder]
-        if encoder != 'cpu':
-            encoders_to_try.append('cpu')  # Add CPU as fallback
+        success, transcode_start = self._encode_with_fallback(input_path, temp_path, probe_data, duration)
 
-        encoding_success = False
-        transcode_start_time = time.time()  # Track transcode time for speed calculation
-
-        for try_encoder in encoders_to_try:
-            if not self.running:
-                break
-
-            self.root.after(0, lambda e=try_encoder: self.log(f"Encoding with {e}..."))
-            cmd = self.build_ffmpeg_command(input_path, temp_path, encoder=try_encoder, probe_data=probe_data)
-
-            # Reset progress bar
-            self.root.after(0, lambda: self.progress_var.set(0))
-
-            success, error_msg = self._run_ffmpeg(cmd, duration)
-
-            if success and temp_path.exists():
-                # Verify output file is valid
-                if self._verify_output(temp_path):
-                    encoding_success = True
-                    break
-                else:
-                    self.root.after(0, lambda: self.log(
-                        f"Output verification failed with {try_encoder}", "warning"))
-                    if temp_path.exists():
-                        temp_path.unlink()
-            else:
-                # Log actual FFmpeg error for debugging
-                if error_msg:
-                    # Get last line of error (most relevant)
-                    last_err = error_msg.split('\n')[-1] if error_msg else "Unknown"
-                    self.root.after(0, lambda e=try_encoder, err=last_err: self.log(
-                        f"Encoding failed with {e}: {err[:100]}", "warning"))
-                else:
-                    self.root.after(0, lambda e=try_encoder: self.log(
-                        f"Encoding failed with {e}", "warning"))
-                if try_encoder != encoders_to_try[-1]:
-                    self.root.after(0, lambda: self.log("Trying fallback encoder...", "info"))
-                if temp_path.exists():
-                    temp_path.unlink()
-
-        if encoding_success:
-            self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start_time, duration)
+        if success:
+            self._finish_successful_transcode(input_path, output_path, temp_path, transcode_start, duration)
         else:
             self.root.after(0, lambda: self.log("All encoders failed!", "error"))
             self.mark_processed(input_path, "", "error", 0, 0)
@@ -4498,6 +4250,46 @@ class TranscoderGUI:
         self.root.after(0, lambda: self.progress_var.set(0))
         self.root.after(0, lambda: self.progress_label.config(text=""))
         self.root.after(0, lambda: self.current_file_label.config(text="Idle"))
+
+    def _encode_with_fallback(self, input_path: Path, temp_path: Path,
+                              probe_data: dict, duration: float) -> tuple:
+        """
+        Try encoding with current encoder, fallback to CPU if it fails.
+        Returns (success: bool, transcode_start_time: float).
+        """
+        encoder = self.encoder.get()
+        encoders_to_try = [encoder]
+        if encoder != 'cpu':
+            encoders_to_try.append('cpu')
+
+        transcode_start = time.time()
+
+        for try_encoder in encoders_to_try:
+            if not self.running:
+                break
+
+            self.root.after(0, lambda e=try_encoder: self.log(f"Encoding with {e}..."))
+            cmd = self.build_ffmpeg_command(input_path, temp_path, encoder=try_encoder, probe_data=probe_data)
+            self.root.after(0, lambda: self.progress_var.set(0))
+
+            success, error_msg = self._run_ffmpeg(cmd, duration)
+
+            if success and temp_path.exists():
+                if self._verify_output(temp_path):
+                    return (True, transcode_start)
+                self.root.after(0, lambda e=try_encoder: self.log(
+                    f"Output verification failed with {e}", "warning"))
+                temp_path.unlink(missing_ok=True)
+            else:
+                if error_msg:
+                    last_err = error_msg.split('\n')[-1] if error_msg else "Unknown"
+                    self.root.after(0, lambda e=try_encoder, err=last_err: self.log(
+                        f"{e} failed: {err[:100]}", "warning"))
+                if try_encoder != encoders_to_try[-1]:
+                    self.root.after(0, lambda: self.log("Trying fallback encoder...", "info"))
+                temp_path.unlink(missing_ok=True)
+
+        return (False, transcode_start)
 
     def _finish_successful_transcode(self, input_path: Path, output_path: Path, temp_path: Path,
                                      transcode_start_time: float, duration: float = 0):
