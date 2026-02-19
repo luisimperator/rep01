@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HeavyDrops Transcoder v5.6.0
+HeavyDrops Transcoder v5.6.1
 
 Dropbox Video Transcoder - GUI Version
 Simple graphical interface for local folder transcoding.
@@ -16,7 +16,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "5.6.0"
+VERSION = "5.6.1"
 
 import socket
 import subprocess
@@ -976,7 +976,8 @@ class TranscoderGUI:
     def check_ffmpeg(self):
         """Check if FFmpeg is installed and accessible."""
         try:
-            result = subprocess.run(['ffmpeg', '-version'], capture_output=True, text=True, timeout=10)
+            result = subprocess.run(['ffmpeg', '-version'], capture_output=True,
+                                       text=True, encoding='utf-8', errors='replace', timeout=10)
             if result.returncode == 0:
                 # Extract version info
                 version_line = result.stdout.split('\n')[0] if result.stdout else 'unknown'
@@ -1106,7 +1107,7 @@ class TranscoderGUI:
     def _move_with_retry(self, src: Path, dst: Path, max_retries: int = 5):
         """
         Move file with retry logic and exponential backoff.
-        Handles file locks from FFmpeg/Dropbox (can hold locks for 20-60s).
+        Handles file locks from FFmpeg/Dropbox — WinError 32 (OSError) and PermissionError.
         Backoff: 2s → 5s → 10s → 20s → 30s
         """
         delays = [2, 5, 10, 20, 30]  # Exponential backoff
@@ -1115,15 +1116,13 @@ class TranscoderGUI:
             try:
                 shutil.move(str(src), str(dst))
                 return  # Success
-            except PermissionError as e:
+            except (PermissionError, OSError) as e:
                 last_error = e
                 if attempt < max_retries - 1:
                     delay = delays[min(attempt, len(delays)-1)]
-                    self.root.after(0, lambda a=attempt+1, d=delay: self.log(
-                        f"File locked, retry {a}/{max_retries-1} in {d}s...", "info"))
+                    self.root.after(0, lambda a=attempt+1, d=delay, err=e: self.log(
+                        f"File locked ({err}), retry {a}/{max_retries-1} in {d}s...", "info"))
                     time.sleep(delay)
-            except Exception as e:
-                raise e  # Re-raise non-permission errors immediately
 
         # All retries failed
         raise last_error
@@ -1295,7 +1294,8 @@ class TranscoderGUI:
                     try:
                         result = subprocess.run(
                             ['attrib', str(f)],
-                            capture_output=True, text=True, timeout=5,
+                            capture_output=True, text=True,
+                            encoding='utf-8', errors='replace', timeout=5,
                             creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
                         )
                         # attrib output format: "A  U        C:\path\file.mp4"
@@ -3556,7 +3556,8 @@ class TranscoderGUI:
 
             # Run FFmpeg (CPU only — doesn't compete with QSV video encoding)
             result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=300  # 5 min timeout
+                cmd, capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=300  # 5 min timeout
             )
 
             if result.returncode != 0:
@@ -3976,7 +3977,8 @@ class TranscoderGUI:
                 ['ffprobe', '-v', 'error', '-select_streams', stream_type,
                  '-show_entries', 'stream=codec_name', '-of', 'csv=p=0',
                  str(file_path)],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=30
             )
 
             codec = result.stdout.strip().lower()
@@ -4351,7 +4353,8 @@ class TranscoderGUI:
             # Use attrib to check file attributes - this doesn't trigger download
             result = subprocess.run(
                 ['attrib', str(file_path)],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True,
+                encoding='utf-8', errors='replace', timeout=5
             )
             if result.returncode == 0:
                 # Output format: "     O          P    path" or similar
@@ -4596,7 +4599,7 @@ class TranscoderGUI:
         """
         output_folder = output_path.parent
 
-        temp_path.rename(output_path)
+        self._move_with_retry(temp_path, output_path)
         input_size = input_path.stat().st_size
         output_size = output_path.stat().st_size
         reduction = (1 - output_size/input_size) * 100
@@ -4649,7 +4652,8 @@ class TranscoderGUI:
         try:
             cmd = ['ffprobe', '-v', 'quiet', '-print_format', 'json',
                    '-show_format', '-show_streams', str(path)]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+            result = subprocess.run(cmd, capture_output=True, text=True,
+                                       encoding='utf-8', errors='replace', timeout=30)
             if result.returncode == 0:
                 return json.loads(result.stdout)
         except Exception:
@@ -4746,7 +4750,8 @@ class TranscoderGUI:
             self.root.after(0, lambda: self.log(f"CMD: {' '.join(cmd[:6])}...", "info"))
 
             self.current_process = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, encoding='utf-8', errors='replace'
             )
             process = self.current_process
 
