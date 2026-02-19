@@ -2232,15 +2232,34 @@ class TranscoderGUI:
         # === PHASE 0: Load queue (instant if snapshot exists) ===
         self.root.after(0, lambda: self.log("Initializing...", "info"))
 
-        # Try to load queue from snapshot (instant restart)
-        if not self.load_queue_snapshot():
-            # No snapshot - run warm start (fast local scan, no probe)
+        # Try to load queue from snapshot (instant restart — no os.walk!)
+        snapshot_ok = self.load_queue_snapshot()
+        if snapshot_ok:
+            queue_size = self.ready_queue.qsize()
+            self.root.after(0, lambda q=queue_size: self.log(
+                f"Ready queue: {q} files ready to transcode", "success"))
+
+            # Start ALL workers immediately — snapshot loaded, queue is ready
+            self._start_all_workers()
+
+            if queue_size > 0:
+                self.root.after(0, lambda: self.log("Starting transcoding + WAV conversion!", "success"))
+            else:
+                self.root.after(0, lambda: self.log("Queue empty - scanning for files...", "info"))
+        else:
+            # No snapshot — warm start needed.
+            # Start workers FIRST, then scan folders in background.
+            # Workers will wait on empty queue until scan populates it.
+            self._start_all_workers()
+            self.root.after(0, lambda: self.log("No snapshot — scanning folders...", "info"))
             self.warm_start_local_queue()
+            queue_size = self.ready_queue.qsize()
+            if queue_size > 0:
+                self.root.after(0, lambda q=queue_size: self.log(
+                    f"Queue loaded: {q} files ready", "success"))
 
-        queue_size = self.ready_queue.qsize()
-        self.root.after(0, lambda q=queue_size: self.log(
-            f"Ready queue: {q} files ready to transcode", "success"))
-
+    def _start_all_workers(self):
+        """Start all background worker threads."""
         # Start the ready queue worker (monitors queue, triggers downloads when needed)
         self.ready_queue_worker_running = True
         self.ready_queue_worker_thread = threading.Thread(target=self.ready_queue_worker, daemon=True)
@@ -2258,11 +2277,6 @@ class TranscoderGUI:
         # Start WAV→MP3 processing loop in parallel (uses CPU only, doesn't compete with QSV)
         self.wav_worker_thread = threading.Thread(target=self._wav_processing_loop, daemon=True)
         self.wav_worker_thread.start()
-
-        if queue_size > 0:
-            self.root.after(0, lambda: self.log("Starting transcoding + WAV conversion!", "success"))
-        else:
-            self.root.after(0, lambda: self.log("Queue empty - scanning for files...", "info"))
 
     def toggle_pause(self):
         """Pause or resume encoding."""
@@ -2557,12 +2571,18 @@ class TranscoderGUI:
                         'priority': info.get('priority', 0)
                     }
 
+            # Serializar pending_folders para evitar os.walk() no restart
+            pending = []
+            for folder_path, priority in self.pending_folders:
+                pending.append({"path": folder_path, "priority": priority})
+
             snapshot = {
-                "version": 3,  # v3 = nova arquitetura queue-first
+                "version": 4,  # v4 = pending_folders cached, skip os.walk
                 "timestamp": time.time(),
                 "pending_folders_index": self.pending_folders_index,
                 "active_queue": items,
-                "folder_tracker": folders
+                "folder_tracker": folders,
+                "pending_folders": pending
             }
 
             self.QUEUE_SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
@@ -2586,7 +2606,7 @@ class TranscoderGUI:
 
             # Verificar versão
             version = snapshot.get("version", 1)
-            if version < 3:
+            if version < 4:
                 self.root.after(0, lambda: self.log("Old snapshot format, rebuilding...", "info"))
                 return False
 
@@ -2596,12 +2616,27 @@ class TranscoderGUI:
                 self.root.after(0, lambda: self.log("Snapshot too old, rebuilding...", "info"))
                 return False
 
-            # Carregar pending_folders primeiro (necessário para índice)
-            self._load_pending_folders()
-            self.pending_folders_index = min(
-                snapshot.get("pending_folders_index", 0),
-                len(self.pending_folders)
-            )
+            # Restaurar pending_folders do snapshot (evita os.walk!)
+            cached_folders = snapshot.get("pending_folders", [])
+            if cached_folders:
+                self.pending_folders = [(f["path"], f["priority"]) for f in cached_folders]
+                self.pending_folders_loaded = True
+                self.pending_folders_index = min(
+                    snapshot.get("pending_folders_index", 0),
+                    len(self.pending_folders)
+                )
+                self.root.after(0, lambda n=len(self.pending_folders): self.log(
+                    f"Restored {n} folders from snapshot (no scan needed)", "success"))
+
+                # Atualizar pending_folders em background para detectar novas pastas
+                threading.Thread(target=self._background_refresh_folders, daemon=True).start()
+            else:
+                # Fallback: snapshot sem pending_folders (não deveria acontecer)
+                self._load_pending_folders()
+                self.pending_folders_index = min(
+                    snapshot.get("pending_folders_index", 0),
+                    len(self.pending_folders)
+                )
 
             # Carregar folder_tracker
             folders = snapshot.get("folder_tracker", {})
@@ -2675,7 +2710,9 @@ class TranscoderGUI:
 
     def _load_pending_folders(self):
         """
-        Carrega lista de pastas que contêm arquivos MP4, em ordem alfabética.
+        Carrega lista de pastas que contêm arquivos MP4.
+        PROGRESSIVO: emite primeiros resultados rápido para permitir
+        início imediato do encoding enquanto scan continua.
         NÃO lista os arquivos ainda - só as pastas. Lazy loading.
         """
         if self.pending_folders_loaded:
@@ -2685,12 +2722,16 @@ class TranscoderGUI:
         start_time = time.time()
 
         folders_with_mp4 = set()
+        first_batch_emitted = False
+        FIRST_BATCH_SIZE = 20  # Emit first 20 folders ASAP for instant queue fill
 
         for watch_folder in self.get_watch_folders():
-            # Usa os.walk que é mais eficiente para descobrir diretórios
             import os
             for dirpath, dirnames, filenames in os.walk(str(watch_folder)):
-                # Skip h264/h265 folders
+                # Prune h264/h265 dirs from traversal to speed up os.walk
+                dirnames[:] = [d for d in dirnames
+                               if d.lower() not in ('h265', 'h264')]
+
                 dirpath_lower = dirpath.lower()
                 if 'h265' in dirpath_lower or 'h264' in dirpath_lower:
                     continue
@@ -2701,10 +2742,35 @@ class TranscoderGUI:
                 if has_mp4:
                     folders_with_mp4.add(dirpath)
 
-        # Sort alphabetically
+                # Emit first batch early so queue can start filling
+                if not first_batch_emitted and len(folders_with_mp4) >= FIRST_BATCH_SIZE:
+                    first_batch_emitted = True
+                    batch = sorted(folders_with_mp4, key=lambda x: x.lower())
+                    priority = []
+                    normal = []
+                    for fp in batch:
+                        h264_path = Path(fp) / 'h264'
+                        if h264_path.exists():
+                            try:
+                                if any(h264_path.iterdir()):
+                                    priority.append((fp, 1))
+                                    continue
+                            except Exception:
+                                pass
+                        normal.append((fp, 0))
+                    self.pending_folders = priority + normal
+                    self.pending_folders_index = 0
+                    self.pending_folders_loaded = True  # Allow workers to start
+                    elapsed_batch = time.time() - start_time
+                    self.root.after(0, lambda n=len(self.pending_folders), t=elapsed_batch: self.log(
+                        f"First {n} folders ready in {t:.1f}s — filling queue...", "info"))
+                    # Fill initial queue immediately
+                    self._refill_queue_incremental()
+                    self._sync_to_ready_queue()
+
+        # Final sort and priority classification of ALL folders
         sorted_folders = sorted(folders_with_mp4, key=lambda x: x.lower())
 
-        # Priorizar pastas que já têm h264 (trabalho em progresso)
         priority_folders = []
         normal_folders = []
 
@@ -2713,19 +2779,50 @@ class TranscoderGUI:
             if h264_path.exists():
                 try:
                     if any(h264_path.iterdir()):
-                        priority_folders.append((folder_path, 1))  # Priority 1 = has h264
+                        priority_folders.append((folder_path, 1))
                         continue
                 except Exception:
                     pass
-            normal_folders.append((folder_path, 0))  # Priority 0 = normal
+            normal_folders.append((folder_path, 0))
 
         self.pending_folders = priority_folders + normal_folders
-        self.pending_folders_index = 0
+        if not first_batch_emitted:
+            self.pending_folders_index = 0
         self.pending_folders_loaded = True
 
         elapsed = time.time() - start_time
         self.root.after(0, lambda n=len(self.pending_folders), t=elapsed: self.log(
             f"Found {n} folders with MP4 files in {t:.1f}s", "success"))
+
+    def _background_refresh_folders(self):
+        """
+        Atualiza pending_folders em background para detectar novas pastas
+        que foram adicionadas desde o último snapshot.
+        Não bloqueia nenhum worker — apenas adiciona novas pastas ao final.
+        """
+        try:
+            existing_paths = {fp for fp, _ in self.pending_folders}
+
+            new_folders = []
+            for watch_folder in self.get_watch_folders():
+                import os
+                for dirpath, dirnames, filenames in os.walk(str(watch_folder)):
+                    dirpath_lower = dirpath.lower()
+                    if 'h265' in dirpath_lower or 'h264' in dirpath_lower:
+                        continue
+                    has_mp4 = any(f.lower().endswith('.mp4') for f in filenames
+                                 if not f.startswith('._') and not f.upper().startswith('DJI_'))
+                    if has_mp4 and dirpath not in existing_paths:
+                        new_folders.append(dirpath)
+
+            if new_folders:
+                sorted_new = sorted(new_folders, key=lambda x: x.lower())
+                for folder_path in sorted_new:
+                    self.pending_folders.append((folder_path, 0))
+                self.root.after(0, lambda n=len(new_folders): self.log(
+                    f"Background scan found {n} new folders", "info"))
+        except Exception:
+            pass  # Non-critical — snapshot folders are still valid
 
     def _get_folder_files(self, folder_path: str) -> list:
         """
@@ -3194,6 +3291,7 @@ class TranscoderGUI:
         """Main processing loop with auto-recovery for daemon mode."""
         consecutive_errors = 0
         max_consecutive_errors = 10
+        first_iteration = True
 
         while self.running:
             try:
@@ -3204,13 +3302,25 @@ class TranscoderGUI:
                 if not self.running:
                     break
 
+                # On first iteration, wait briefly for queue to populate
+                # (probed_queue_worker needs a moment to probe first file)
+                if first_iteration:
+                    first_iteration = False
+                    # Wait up to 10s for probed queue to have at least 1 file
+                    for _ in range(20):
+                        if self.probed_queue.qsize() > 0 or not self.ready_queue.empty():
+                            break
+                        time.sleep(0.5)
+
                 self.scan_and_process()
                 consecutive_errors = 0  # Reset on success
 
-                for _ in range(30):  # Wait 30 seconds between scans
+                # Adaptive wait: short if queue has files, longer if idle
+                queue_has_work = not self.ready_queue.empty() or self.probed_queue.qsize() > 0
+                wait_secs = 3 if queue_has_work else 15
+                for _ in range(wait_secs):
                     if not self.running:
                         break
-                    # Also check pause during wait
                     while self.paused and self.running:
                         time.sleep(0.5)
                     time.sleep(1)
