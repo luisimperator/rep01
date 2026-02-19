@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HeavyDrops Transcoder v5.6.1
+HeavyDrops Transcoder v5.7.0
 
 Dropbox Video Transcoder - GUI Version
 Simple graphical interface for local folder transcoding.
@@ -16,7 +16,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "5.6.1"
+VERSION = "5.7.0"
 
 import socket
 import subprocess
@@ -39,10 +39,28 @@ import string as _string
 def find_dropbox_path():
     """Auto-detect HeavyDrops Dropbox path by searching available drives."""
     import os
-    dropbox_folder = "HeavyDrops Dropbox"
     app_subfolder = Path("HeavyDrops") / "App h265 Converter"
 
-    # Check common drives
+    # Method 1: Read Dropbox info.json (official way — works regardless of folder name)
+    for env_var in ['APPDATA', 'LOCALAPPDATA']:
+        env_val = os.environ.get(env_var, '')
+        if not env_val:
+            continue
+        info_path = Path(env_val) / 'Dropbox' / 'info.json'
+        if info_path.exists():
+            try:
+                with open(info_path, 'r', encoding='utf-8') as f:
+                    info = json.load(f)
+                for account_type in ['personal', 'business']:
+                    if account_type in info and 'path' in info[account_type]:
+                        dropbox_root = Path(info[account_type]['path'])
+                        candidate = dropbox_root / app_subfolder
+                        if dropbox_root.exists():
+                            return candidate
+            except Exception:
+                pass
+
+    # Method 2: Search for *Dropbox* folders on available drives
     drives_to_check = ['D', 'C', 'E', 'F', 'G', 'H']
     if os.name == 'nt':
         for letter in _string.ascii_uppercase:
@@ -50,9 +68,17 @@ def find_dropbox_path():
                 drives_to_check.append(letter)
 
     for drive in drives_to_check:
-        dropbox_root = Path(f"{drive}:\\{dropbox_folder}")
-        if dropbox_root.exists():
-            return dropbox_root / app_subfolder
+        drive_path = Path(f"{drive}:\\")
+        if not drive_path.exists():
+            continue
+        try:
+            for folder in drive_path.iterdir():
+                if folder.is_dir() and 'dropbox' in folder.name.lower():
+                    candidate = folder / app_subfolder
+                    return candidate
+        except PermissionError:
+            continue
+
     return None
 
 def get_pc_name():
@@ -73,7 +99,7 @@ class ManifestManager:
             self.base_path = Path(base_dropbox_path)
         else:
             detected = find_dropbox_path()
-            self.base_path = detected if detected else Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
+            self.base_path = detected if detected else Path(r"C:\transcoder\manifest_data")
 
         self.manifests_dir = self.base_path / self.MANIFESTS_DIR
         self.pc_name = get_pc_name()
@@ -565,8 +591,8 @@ def get_dropbox_base_path() -> Path:
     detected = find_dropbox_path()
     if detected:
         return detected
-    # Fallback to D: drive (most common)
-    return Path(r"D:\HeavyDrops Dropbox\HeavyDrops\App h265 Converter")
+    # Fallback: use C:\transcoder as local-only manifest storage
+    return Path(r"C:\transcoder\manifest_data")
 
 # Windows-specific for beep sound
 try:
@@ -3445,6 +3471,7 @@ class TranscoderGUI:
         """
         Process WAV files in 'Audio Source Files' folders.
         Converts WAV to MP3 192kbps, verifies, then deletes original.
+        WAV folder deletion is scheduled only after ALL files in each folder are done.
         Returns number of files processed.
         """
         if not self.running and not self.wav_running:
@@ -3457,6 +3484,13 @@ class TranscoderGUI:
                 continue
             for wav_path in list(audio_folder.glob('*.wav')) + list(audio_folder.glob('*.WAV')):
                 if wav_path.name.startswith('._'):
+                    continue
+                # Skip if MP3 already exists (prevents duplicate processing)
+                mp3_path = wav_path.with_suffix('.mp3')
+                if mp3_path.exists():
+                    if not self.is_processed(wav_path):
+                        self.mark_processed(wav_path, str(mp3_path), "skipped_exists",
+                                          wav_path.stat().st_size, mp3_path.stat().st_size)
                     continue
                 if not self.is_processed(wav_path):
                     try:
@@ -3473,6 +3507,9 @@ class TranscoderGUI:
 
         self.root.after(0, lambda n=len(wav_files): self.log(
             f"Found {n} WAV files in Audio Source Files folders", "info"))
+
+        # Track which folders had successful conversions
+        folders_with_conversions = set()
 
         processed = 0
         for wav_path, size in wav_files:
@@ -3496,6 +3533,20 @@ class TranscoderGUI:
             # Convert WAV to MP3
             if self.convert_wav_to_mp3(wav_path):
                 processed += 1
+                folders_with_conversions.add(wav_path.parent)
+
+        # Schedule WAV folder deletion AFTER all files in each folder are done
+        for folder in folders_with_conversions:
+            wav_folder = folder / 'wav'
+            if wav_folder.exists():
+                # Check if any WAV files in the parent folder still lack MP3 counterparts
+                remaining = [f for f in list(folder.glob('*.wav')) + list(folder.glob('*.WAV'))
+                            if not f.name.startswith('._') and not f.with_suffix('.mp3').exists()]
+                if not remaining:
+                    self._schedule_wav_deletion_for_folder(wav_folder)
+                else:
+                    self.root.after(0, lambda n=len(remaining), p=folder.name: self.log(
+                        f"WAV folder not scheduled for deletion: {n} files still pending in {p}", "info"))
 
         if processed > 0:
             self.root.after(0, lambda n=processed: self.log(
@@ -3594,10 +3645,7 @@ class TranscoderGUI:
             self.root.after(0, lambda: self.log(
                 "WAV moved to backup folder", "info"))
 
-            # Schedule deletion in background (don't block processing)
-            self._schedule_wav_deletion(wav_backup_path, mp3_path)
-
-            # Mark as processed
+            # Mark as processed (folder deletion is handled by process_audio_files)
             self.mark_processed(wav_path, str(mp3_path), "done", input_size, output_size)
 
             return True
@@ -3607,18 +3655,15 @@ class TranscoderGUI:
                 f"Error converting {wav_path.name}: {err}", "error"))
             return False
 
-    def _schedule_wav_deletion(self, wav_path: Path, mp3_path: Path):
+    def _schedule_wav_deletion_for_folder(self, wav_folder: Path):
         """
-        Schedule WAV FOLDER deletion after 30 seconds (in background thread).
-        Only deletes when ALL files in the folder have valid MP3 versions.
+        Schedule WAV FOLDER deletion after 3 minutes (in background thread).
+        Called from process_audio_files ONLY after all files in the folder are converted.
         """
-        wav_folder = wav_path.parent
-
         # Track folders already scheduled to avoid duplicates
         if not hasattr(self, '_scheduled_wav_folders'):
             self._scheduled_wav_folders = set()
 
-        # Skip if this folder is already scheduled
         folder_key = str(wav_folder)
         if folder_key in self._scheduled_wav_folders:
             return
@@ -3634,59 +3679,29 @@ class TranscoderGUI:
                     self._scheduled_wav_folders.discard(folder_key)
                     return
 
-                # Get all WAV files in wav folder
+                # Calculate stats before deleting
                 wav_files = list(wav_folder.glob('*.wav')) + list(wav_folder.glob('*.WAV'))
-
                 if not wav_files:
                     self._scheduled_wav_folders.discard(folder_key)
                     return
 
-                # Verify ALL WAV files have valid MP3 counterparts
-                all_verified = True
-                for wav_file in wav_files:
-                    mp3_file = parent_folder / wav_file.with_suffix('.mp3').name
+                num_files = len(wav_files)
+                total_size = sum(f.stat().st_size for f in wav_files)
+                total_gb = total_size / (1024**3)
 
-                    # Check MP3 exists
-                    if not mp3_file.exists():
-                        self.root.after(0, lambda f=wav_file.name: self.log(
-                            f"MP3 not found for {f}, keeping wav folder", "warning"))
-                        all_verified = False
-                        break
+                shutil.rmtree(wav_folder)
+                self.root.after(0, lambda p=wav_folder, n=num_files, g=total_gb: self.log(
+                    f"WAV folder deleted: {n} files, {g:.2f}GB freed", "success"))
 
-                    # Verify MP3 is valid
-                    if not self._verify_codec(mp3_file, ('mp3',), stream_type='a:0'):
-                        self.root.after(0, lambda f=wav_file.name: self.log(
-                            f"MP3 verification failed for {f}, keeping wav folder", "warning"))
-                        all_verified = False
-                        break
-
-                    # Check file size is reasonable (MP3 should be at least 1KB)
-                    if mp3_file.stat().st_size < 1000:
-                        self.root.after(0, lambda f=wav_file.name: self.log(
-                            f"MP3 too small for {f}, keeping wav folder", "warning"))
-                        all_verified = False
-                        break
-
-                # All checks passed - delete entire wav folder
-                if all_verified:
-                    # Calculate stats before deleting
-                    num_files = len(wav_files)
-                    total_size = sum(f.stat().st_size for f in wav_files)
-                    total_gb = total_size / (1024**3)
-
-                    shutil.rmtree(wav_folder)
-                    self.root.after(0, lambda p=wav_folder, n=num_files, g=total_gb: self.log(
-                        f"WAV folder deleted: {n} files, {g:.2f}GB freed", "success"))
-
-                    # Log deletion to mp3 feito.txt
-                    mp3_folder = parent_folder / 'mp3'
-                    mp3_folder.mkdir(parents=True, exist_ok=True)
-                    log_file = mp3_folder / "mp3 feito.txt"
-                    try:
-                        with open(log_file, 'a', encoding='utf-8') as f:
-                            f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | WAV FOLDER DELETED | {num_files} files | {total_gb:.2f}GB freed\n")
-                    except Exception:
-                        pass
+                # Log deletion to mp3 feito.txt
+                mp3_folder = parent_folder / 'mp3'
+                mp3_folder.mkdir(parents=True, exist_ok=True)
+                log_file = mp3_folder / "mp3 feito.txt"
+                try:
+                    with open(log_file, 'a', encoding='utf-8') as f:
+                        f.write(f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | WAV FOLDER DELETED | {num_files} files | {total_gb:.2f}GB freed\n")
+                except Exception:
+                    pass
 
                 self._scheduled_wav_folders.discard(folder_key)
 
@@ -3695,7 +3710,8 @@ class TranscoderGUI:
                     f"Could not delete WAV folder: {err}", "warning"))
                 self._scheduled_wav_folders.discard(folder_key)
 
-        # Run in background thread
+        self.root.after(0, lambda: self.log(
+            f"WAV folder deletion scheduled for 3 min: {wav_folder.parent.name}", "info"))
         threading.Thread(target=delete_folder_after_delay, daemon=True).start()
 
     def _all_h264_have_h265(self, h264_folder: Path) -> bool:
