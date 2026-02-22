@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HeavyDrops Transcoder v5.7.0
+HeavyDrops Transcoder v5.8.0
 
 Dropbox Video Transcoder - GUI Version
 Simple graphical interface for local folder transcoding.
@@ -16,7 +16,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "5.7.0"
+VERSION = "5.8.0"
 
 import socket
 import subprocess
@@ -26,6 +26,7 @@ import json
 import re
 import sqlite3
 import shutil
+import queue
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -641,7 +642,6 @@ class TranscoderGUI:
 
         # READY QUEUE: Files confirmed downloaded and ready to transcode
         # This decouples downloading from transcoding - no more waiting!
-        import queue
         self.ready_queue = queue.Queue()  # Queue of (path, size, folder_priority) tuples
         self.ready_queue_worker_running = False
         self.ready_queue_worker_thread = None
@@ -1281,19 +1281,21 @@ class TranscoderGUI:
                         pass
 
             # Get database stats
-            cursor = self.db_conn.execute(
-                "SELECT COUNT(*), SUM(input_size), SUM(output_size) FROM processed WHERE status = 'done'"
-            )
-            db_row = cursor.fetchone()
-            db_count = db_row[0] or 0
-            db_input_total = db_row[1] or 0
-            db_output_total = db_row[2] or 0
+            with self.db_lock:
+                cursor = self.db_conn.execute(
+                    "SELECT COUNT(*), SUM(input_size), SUM(output_size) FROM processed WHERE status = 'done'"
+                )
+                db_row = cursor.fetchone()
+                db_count = db_row[0] or 0
+                db_input_total = db_row[1] or 0
+                db_output_total = db_row[2] or 0
 
-            # Get orphan entries (files in DB but no longer exist)
-            cursor = self.db_conn.execute("SELECT input_path FROM processed WHERE status = 'done'")
+                # Get orphan entries (files in DB but no longer exist)
+                cursor = self.db_conn.execute("SELECT input_path FROM processed WHERE status = 'done'")
+                db_done_paths = [row[0] for row in cursor]
             orphan_count = 0
-            for row in cursor:
-                if not Path(row[0]).exists():
+            for p in db_done_paths:
+                if not Path(p).exists():
                     orphan_count += 1
 
             # Separate pending from already processed
@@ -1595,6 +1597,8 @@ class TranscoderGUI:
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
         self.db_conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.db_conn.execute("PRAGMA journal_mode=WAL")  # WAL mode for concurrent reads
+        self.db_lock = threading.Lock()
         self.db_conn.execute("""
             CREATE TABLE IF NOT EXISTS processed (
                 id INTEGER PRIMARY KEY,
@@ -1968,25 +1972,33 @@ class TranscoderGUI:
 
     def load_stats(self):
         """Load stats from database."""
-        cursor = self.db_conn.execute(
-            "SELECT COUNT(*), SUM(input_size - output_size) FROM processed WHERE status = 'done'"
-        )
-        row = cursor.fetchone()
-        self.files_processed.set(row[0] or 0)
-        saved = (row[1] or 0) / (1024**3)
-        self.total_saved_gb.set(round(saved, 2))
+        try:
+            with self.db_lock:
+                cursor = self.db_conn.execute(
+                    "SELECT COUNT(*), SUM(input_size - output_size) FROM processed WHERE status = 'done'"
+                )
+                row = cursor.fetchone()
+            self.files_processed.set(row[0] or 0)
+            saved = (row[1] or 0) / (1024**3)
+            self.total_saved_gb.set(round(saved, 2))
+        except Exception:
+            pass
 
     def is_processed(self, path: Path) -> bool:
         """Check if file was already processed or should be skipped."""
-        # First check local database
-        cursor = self.db_conn.execute(
-            "SELECT status FROM processed WHERE input_path = ?", (str(path),)
-        )
-        row = cursor.fetchone()
+        # First check local database (thread-safe)
+        try:
+            with self.db_lock:
+                cursor = self.db_conn.execute(
+                    "SELECT status FROM processed WHERE input_path = ?", (str(path),)
+                )
+                row = cursor.fetchone()
+        except Exception:
+            row = None
         if row is not None:
             status = row[0]
             # Accept any 'done' or 'skipped_*' status (hevc, lowbitrate, exists, etc.)
-            if status == 'done' or status.startswith('skipped'):
+            if status and (status == 'done' or status.startswith('skipped')):
                 return True
 
         # Check cloud manifest - processed files
@@ -2034,14 +2046,15 @@ class TranscoderGUI:
                       input_size: int = 0, output_size: int = 0,
                       duration: float = 0, transcode_time: float = 0):
         """Mark file as processed in local DB and cloud manifest."""
-        # Save to local database
-        self.db_conn.execute("""
-            INSERT OR REPLACE INTO processed
-            (input_path, output_path, status, input_size, output_size, processed_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (str(input_path), output_path, status, input_size, output_size,
-              datetime.now().isoformat()))
-        self.db_conn.commit()
+        # Save to local database (thread-safe)
+        with self.db_lock:
+            self.db_conn.execute("""
+                INSERT OR REPLACE INTO processed
+                (input_path, output_path, status, input_size, output_size, processed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (str(input_path), output_path, status, input_size, output_size,
+                  datetime.now().isoformat()))
+            self.db_conn.commit()
         self.load_stats()
 
         # Save to cloud manifest (survives SSD wipes)
@@ -2060,7 +2073,7 @@ class TranscoderGUI:
                     )
                 elif status == 'error':
                     self.cloud_manifest.record_failure(str(input_path), "Encoding failed")
-                elif status.startswith('skipped'):
+                elif status and status.startswith('skipped'):
                     # Save skipped files too (hevc, lowbitrate, exists, etc.)
                     self.cloud_manifest.record_skipped(str(input_path), status, input_size)
             except Exception as e:
@@ -2068,8 +2081,9 @@ class TranscoderGUI:
 
     def reset_failed(self):
         """Reset failed files so they can be retried."""
-        cursor = self.db_conn.execute("SELECT COUNT(*) FROM processed WHERE status = 'error'")
-        count = cursor.fetchone()[0]
+        with self.db_lock:
+            cursor = self.db_conn.execute("SELECT COUNT(*) FROM processed WHERE status = 'error'")
+            count = cursor.fetchone()[0]
 
         # Also count cloud manifest failures
         cloud_count = 0
@@ -2082,8 +2096,9 @@ class TranscoderGUI:
             return
 
         if messagebox.askyesno("Confirm", f"Reset {total} failed files for retry?"):
-            self.db_conn.execute("DELETE FROM processed WHERE status = 'error'")
-            self.db_conn.commit()
+            with self.db_lock:
+                self.db_conn.execute("DELETE FROM processed WHERE status = 'error'")
+                self.db_conn.commit()
             # Also reset in cloud manifest
             if self.cloud_manifest:
                 self.cloud_manifest.reset_failed()
@@ -2092,8 +2107,9 @@ class TranscoderGUI:
     def clear_history(self):
         """Clear processing history."""
         if messagebox.askyesno("Confirm", "Clear all processing history?"):
-            self.db_conn.execute("DELETE FROM processed")
-            self.db_conn.commit()
+            with self.db_lock:
+                self.db_conn.execute("DELETE FROM processed")
+                self.db_conn.commit()
             self.load_stats()
             self.log("History cleared", "warning")
 
@@ -3103,35 +3119,16 @@ class TranscoderGUI:
         v2.1: Sincroniza active_queue com ready_queue para compatibilidade.
         LIMITA a ready_queue ao QUEUE_TARGET_SIZE.
         Só adiciona itens READY_LOCAL que não estão já na fila.
+        Uses _queue_items_set to check membership instead of draining the queue
+        (draining causes a race condition where scan_and_process sees qsize=0).
         """
-        # Primeiro, verificar tamanho atual da ready_queue
         current_ready_size = self.ready_queue.qsize()
 
-        # Se ready_queue já está no limite, não adicionar mais
         if current_ready_size >= self.QUEUE_TARGET_SIZE:
             return
 
-        # Criar set de paths já na ready_queue para evitar duplicatas
-        # (não podemos iterar a queue sem removê-la, então usamos _queue_items_set)
-        ready_paths = set()
-
-        # Extrair e recolocar para ver o que já está lá
-        temp_items = []
-        while not self.ready_queue.empty():
-            try:
-                item = self.ready_queue.get_nowait()
-                temp_items.append(item)
-                ready_paths.add(str(item[0]))
-            except Exception:
-                break
-
-        # Recolocar os itens
-        for item in temp_items:
-            self.ready_queue.put(item)
-
-        # Adicionar novos READY_LOCAL que não estão já na fila
         added = 0
-        max_to_add = self.QUEUE_TARGET_SIZE - len(temp_items)
+        max_to_add = self.QUEUE_TARGET_SIZE - current_ready_size
 
         with self.active_queue_lock:
             for item in self.active_queue:
@@ -3142,8 +3139,8 @@ class TranscoderGUI:
                     path = item['path']
                     path_str = str(path)
 
-                    # Skip if already in ready_queue
-                    if path_str in ready_paths:
+                    # Skip if already in ready_queue (tracked by _queue_items_set)
+                    if path_str in self._queue_items_set:
                         continue
 
                     folder = item['folder']
@@ -3151,7 +3148,7 @@ class TranscoderGUI:
                     has_h264 = h264_folder.exists()
                     priority = 1 if has_h264 else 0
                     self.ready_queue.put((path, item['size'], priority))
-                    ready_paths.add(path_str)
+                    self._queue_items_set.add(path_str)
                     added += 1
 
     def ready_queue_worker(self):
@@ -3425,21 +3422,26 @@ class TranscoderGUI:
 
             try:
                 item = self.probed_queue.get_nowait()
-                video_path = item[0]
-                file_size = item[1]
-                probe_data = item[2]  # Already probed!
+                if not isinstance(item, (tuple, list)) or len(item) < 3:
+                    continue
+                video_path, file_size, probe_data = item[0], item[1], item[2]
+            except queue.Empty:
+                pass
             except Exception:
-                # probed_queue empty, try ready_queue
-                if not self.ready_queue.empty():
-                    try:
-                        item = self.ready_queue.get_nowait()
-                        video_path = item[0]
-                        file_size = item[1]
-                        self._queue_items_set.discard(str(video_path))
-                    except Exception:
-                        break
-                else:
+                continue
+
+            # probed_queue was empty, try ready_queue
+            if video_path is None:
+                try:
+                    item = self.ready_queue.get_nowait()
+                    if not isinstance(item, (tuple, list)) or len(item) < 2:
+                        continue
+                    video_path, file_size = item[0], item[1]
+                    self._queue_items_set.discard(str(video_path))
+                except queue.Empty:
                     break
+                except Exception:
+                    continue
 
             if video_path is None:
                 break
@@ -3453,13 +3455,21 @@ class TranscoderGUI:
             self.root.after(0, lambda i=idx, q=total_queued:
                 self.current_file_label.config(text=f"Processing {i} (queue: {q})"))
 
-            if probe_data:
-                # INSTANT: Use pre-probed data
-                self.process_file_preprobed(video_path, probe_data, queue_pos=idx,
-                                           queue_total=queue_size, file_size=file_size)
-            else:
-                # SLOW: Need to probe first
-                self.process_file(video_path, queue_pos=idx, queue_total=queue_size, file_size=file_size)
+            # Wrap individual file processing in try/except so one bad file
+            # doesn't crash the entire loop and corrupt the queue state
+            try:
+                if probe_data:
+                    self.process_file_preprobed(video_path, probe_data, queue_pos=idx,
+                                               queue_total=queue_size, file_size=file_size)
+                else:
+                    self.process_file(video_path, queue_pos=idx, queue_total=queue_size, file_size=file_size)
+            except Exception as file_err:
+                self.root.after(0, lambda p=video_path.name, e=file_err: self.log(
+                    f"Error processing {p}: {e} — skipping", "error"))
+                try:
+                    self.mark_processed(video_path, "", "error", file_size, 0)
+                except Exception:
+                    pass
 
             files_processed_this_scan += 1
 
