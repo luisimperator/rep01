@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HeavyDrops Transcoder v5.8.0
+HeavyDrops Transcoder v5.8.1
 
 Dropbox Video Transcoder - GUI Version
 Simple graphical interface for local folder transcoding.
@@ -16,7 +16,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "5.8.0"
+VERSION = "5.8.1"
 
 import socket
 import subprocess
@@ -682,7 +682,8 @@ class TranscoderGUI:
         # Cada item: {'path': Path, 'size': int, 'folder': str, 'status': str, 'retry_at': float}
         self.active_queue = []  # Lista ordenada de itens
         self.active_queue_lock = threading.Lock()
-        self._queue_items_set = set()  # Fast lookup to avoid duplicates
+        self._queue_items_set = set()  # Fast lookup to avoid duplicates in active_queue
+        self._in_ready_queue = set()  # Tracks items specifically in ready_queue
 
         self.local_eligible_exhausted = False  # Gate for downloads
         self.QUEUE_SNAPSHOT_FILE = self.dropbox_base / "App h265 Converter" / ".queue_snapshot_v2.json"
@@ -2333,6 +2334,7 @@ class TranscoderGUI:
         with self.active_queue_lock:
             self.active_queue.clear()
         self._queue_items_set.clear()
+        self._in_ready_queue.clear()
 
         # Clear pending downloads
         with self.pending_downloads_lock:
@@ -3094,6 +3096,7 @@ class TranscoderGUI:
 
         # Limpar também o set de tracking
         self._queue_items_set.clear()
+        self._in_ready_queue.clear()
 
         start_time = time.time()
 
@@ -3119,7 +3122,7 @@ class TranscoderGUI:
         v2.1: Sincroniza active_queue com ready_queue para compatibilidade.
         LIMITA a ready_queue ao QUEUE_TARGET_SIZE.
         Só adiciona itens READY_LOCAL que não estão já na fila.
-        Uses _queue_items_set to check membership instead of draining the queue
+        Uses _in_ready_queue set to track membership without draining the queue
         (draining causes a race condition where scan_and_process sees qsize=0).
         """
         current_ready_size = self.ready_queue.qsize()
@@ -3139,8 +3142,8 @@ class TranscoderGUI:
                     path = item['path']
                     path_str = str(path)
 
-                    # Skip if already in ready_queue (tracked by _queue_items_set)
-                    if path_str in self._queue_items_set:
+                    # Skip if already in ready_queue
+                    if path_str in self._in_ready_queue:
                         continue
 
                     folder = item['folder']
@@ -3148,7 +3151,7 @@ class TranscoderGUI:
                     has_h264 = h264_folder.exists()
                     priority = 1 if has_h264 else 0
                     self.ready_queue.put((path, item['size'], priority))
-                    self._queue_items_set.add(path_str)
+                    self._in_ready_queue.add(path_str)
                     added += 1
 
     def ready_queue_worker(self):
@@ -3237,7 +3240,7 @@ class TranscoderGUI:
                         item = self.ready_queue.get_nowait()
                         video_path = item[0]
                         file_size = item[1]
-                        self._queue_items_set.discard(str(video_path))
+                        self._in_ready_queue.discard(str(video_path))
                     except Exception:
                         time.sleep(0.5)
                         continue
@@ -3437,7 +3440,7 @@ class TranscoderGUI:
                     if not isinstance(item, (tuple, list)) or len(item) < 2:
                         continue
                     video_path, file_size = item[0], item[1]
-                    self._queue_items_set.discard(str(video_path))
+                    self._in_ready_queue.discard(str(video_path))
                 except queue.Empty:
                     break
                 except Exception:
