@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HeavyDrops Transcoder v5.8.1
+HeavyDrops Transcoder v5.8.2
 
 Dropbox Video Transcoder - GUI Version
 Simple graphical interface for local folder transcoding.
@@ -2995,8 +2995,15 @@ class TranscoderGUI:
         return added
 
     def _mark_item_done(self, file_path: Path):
-        """Marca item como concluído e atualiza folder tracker."""
+        """Marca item como concluído, remove da active_queue e atualiza folder tracker."""
         folder_path = str(file_path.parent)
+        path_str = str(file_path)
+
+        # Remove from active_queue immediately to free slot for _refill
+        with self.active_queue_lock:
+            self.active_queue = [item for item in self.active_queue
+                                 if str(item['path']) != path_str]
+            self._queue_items_set.discard(path_str)
 
         with self.folder_tracker_lock:
             if folder_path in self.folder_tracker:
@@ -3119,11 +3126,12 @@ class TranscoderGUI:
 
     def _sync_to_ready_queue(self):
         """
-        v2.1: Sincroniza active_queue com ready_queue para compatibilidade.
+        v2.2: Sincroniza active_queue com ready_queue para compatibilidade.
         LIMITA a ready_queue ao QUEUE_TARGET_SIZE.
         Só adiciona itens READY_LOCAL que não estão já na fila.
         Uses _in_ready_queue set to track membership without draining the queue
         (draining causes a race condition where scan_and_process sees qsize=0).
+        Also prunes already-processed items from active_queue so _refill can add new files.
         """
         current_ready_size = self.ready_queue.qsize()
 
@@ -3132,6 +3140,7 @@ class TranscoderGUI:
 
         added = 0
         max_to_add = self.QUEUE_TARGET_SIZE - current_ready_size
+        processed_paths = set()
 
         with self.active_queue_lock:
             for item in self.active_queue:
@@ -3146,6 +3155,11 @@ class TranscoderGUI:
                     if path_str in self._in_ready_queue:
                         continue
 
+                    # Skip and mark for removal if already processed
+                    if self.is_processed(path):
+                        processed_paths.add(path_str)
+                        continue
+
                     folder = item['folder']
                     h264_folder = Path(folder) / 'h264'
                     has_h264 = h264_folder.exists()
@@ -3153,6 +3167,12 @@ class TranscoderGUI:
                     self.ready_queue.put((path, item['size'], priority))
                     self._in_ready_queue.add(path_str)
                     added += 1
+
+            # Prune processed items from active_queue to free slots for _refill
+            if processed_paths:
+                self.active_queue = [item for item in self.active_queue
+                                     if str(item['path']) not in processed_paths]
+                self._queue_items_set -= processed_paths
 
     def ready_queue_worker(self):
         """
@@ -3393,8 +3413,9 @@ class TranscoderGUI:
         # Track files processed in this scan
         files_processed_this_scan = 0
         queue_size = self.ready_queue.qsize()
+        probed_size = self.probed_queue.qsize()
 
-        if queue_size == 0:
+        if queue_size == 0 and probed_size == 0:
             # Only log if we just became idle
             if self._last_scan_had_work:
                 self.root.after(0, lambda: self.log(
@@ -3404,7 +3425,6 @@ class TranscoderGUI:
             return
 
         self._last_scan_had_work = True
-        probed_size = self.probed_queue.qsize()
         self.root.after(0, lambda q=queue_size, p=probed_size: self.log(
             f"Queues: {p} pre-probed, {q} ready"))
 
