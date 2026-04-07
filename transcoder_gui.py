@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HeavyDrops Transcoder v5.8.3
+HeavyDrops Transcoder v5.8.4
 
 Dropbox Video Transcoder - GUI Version
 Simple graphical interface for local folder transcoding.
@@ -16,7 +16,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "5.8.3"
+VERSION = "5.8.4"
 
 import socket
 import subprocess
@@ -2870,6 +2870,17 @@ class TranscoderGUI:
                 if self.is_processed(f):
                     continue
 
+                # Skip if output already exists (h265/filename.mp4)
+                # This catches files converted but not in DB, avoiding 20-70s probe waste
+                h265_output = folder / 'h265' / f.name
+                if h265_output.exists():
+                    try:
+                        out_size = h265_output.stat().st_size
+                        if out_size > 100000:  # Real file, not placeholder
+                            continue
+                    except Exception:
+                        pass
+
                 # Check size
                 try:
                     size = f.stat().st_size
@@ -3038,6 +3049,7 @@ class TranscoderGUI:
                     # Verificar se pode iniciar download
                     file_path = item['path']
                     if self._can_trigger_download(item['size']):
+                        self._add_to_pending_downloads(str(file_path), item['size'])
                         self._trigger_dropbox_download(file_path)
                         item['status'] = 'DOWNLOADING'
                         triggered += 1
@@ -3160,6 +3172,15 @@ class TranscoderGUI:
                         processed_paths.add(path_str)
                         continue
 
+                    # Skip if output already exists on disk
+                    h265_out = Path(item['folder']) / 'h265' / path.name
+                    try:
+                        if h265_out.exists() and h265_out.stat().st_size > 100000:
+                            processed_paths.add(path_str)
+                            continue
+                    except Exception:
+                        pass
+
                     folder = item['folder']
                     h264_folder = Path(folder) / 'h264'
                     has_h264 = h264_folder.exists()
@@ -3268,6 +3289,17 @@ class TranscoderGUI:
                     # Skip if file no longer exists or already processed
                     if not video_path.exists() or self.is_processed(video_path):
                         continue
+
+                    # Check if output already exists BEFORE expensive wait/probe
+                    output_check = video_path.parent / 'h265' / video_path.name
+                    if output_check.exists():
+                        try:
+                            if output_check.stat().st_size > 100000:
+                                self.mark_processed(video_path, str(output_check), "skipped_exists",
+                                                  file_size, output_check.stat().st_size)
+                                continue
+                        except Exception:
+                            pass
 
                     # Wait for file to be ready (downloaded)
                     if not self.wait_for_file_ready(video_path, estimated_size=file_size):
