@@ -33,6 +33,7 @@ from rich.table import Table
 
 from .config import Config, EncoderPreference, TranscodeProfile, load_config, save_example_config
 from .database import ACTIVE_STATES, Database, Job, JobState, TERMINAL_STATES
+from .disk_budget import DiskBudget
 from .dispatcher import JobDispatcher
 from .dropbox_client import DropboxClient
 from .encoder_detect import (
@@ -100,6 +101,7 @@ class Daemon:
         self.scanner: Scanner | None = None
         self.dispatcher: JobDispatcher | None = None
         self.rate_limiter: TokenBucket | None = None
+        self.disk_budget: DiskBudget | None = None
         self.stop_event = threading.Event()
         self.workers: list[threading.Thread] = []
         self._lock_fd: int | None = None
@@ -146,6 +148,12 @@ class Daemon:
         if recovered:
             logger.info(f"Recovered {recovered} interrupted jobs")
 
+        # Drop disk reservations for jobs that are no longer in flight after
+        # recovery, so the staging budget doesn't leak across restarts.
+        pruned = self.db.prune_stale_disk_reservations(ACTIVE_STATES)
+        if pruned:
+            logger.info(f"Pruned {pruned} stale disk reservations")
+
         # Rate-limit Dropbox API calls so we don't get throttled at scale
         self.rate_limiter = TokenBucket(
             rate_per_min=self.config.dropbox_api.rate_per_min,
@@ -161,11 +169,22 @@ class Daemon:
         if not self.dropbox.check_connection():
             raise RuntimeError("Failed to connect to Dropbox")
 
-        # Scanner
-        self.scanner = Scanner(self.config, self.db, self.dropbox)
+        # Scanner (shares the daemon stop_event so bulk passes bail cleanly)
+        self.scanner = Scanner(self.config, self.db, self.dropbox, self.stop_event)
 
         # Central job dispatcher feeds bounded queues consumed by workers
         self.dispatcher = JobDispatcher(self.config, self.db, self.stop_event)
+
+        # Staging-disk budget. Disabled by default; flip config.disk_budget.enabled
+        # to stall new downloads when near the cap.
+        self.disk_budget = DiskBudget(
+            staging_dir=self.config.local_staging_dir,
+            db=self.db,
+            max_staging_bytes=self.config.disk_budget.max_staging_bytes,
+            min_free_bytes=self.config.disk_budget.min_free_bytes,
+            poll_interval_sec=self.config.disk_budget.poll_interval_sec,
+            enabled=self.config.disk_budget.enabled,
+        )
 
         # Select encoder
         encoder = select_best_encoder(self.config)
@@ -192,6 +211,7 @@ class Daemon:
                 self.scanner,
                 self.stop_event,
                 self.dispatcher,
+                disk_budget=self.disk_budget,
             )
             worker.start()
             self.workers.append(worker)
@@ -206,6 +226,7 @@ class Daemon:
                 self.stop_event,
                 self.dispatcher,
                 encoder=encoder,
+                disk_budget=self.disk_budget,
             )
             worker.start()
             self.workers.append(worker)
@@ -219,6 +240,7 @@ class Daemon:
                 self.dropbox,
                 self.stop_event,
                 self.dispatcher,
+                disk_budget=self.disk_budget,
             )
             worker.start()
             self.workers.append(worker)

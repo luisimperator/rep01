@@ -37,7 +37,12 @@ class BitrateSettings(BaseModel):
 
 
 class StabilitySettings(BaseModel):
-    """File stability detection settings (R2)."""
+    """File stability detection settings (R2).
+
+    Two profiles share the same shape — one for the bulk first-pass over a
+    brand-new archive (aggressive, since static files don't need 45-minute
+    guarantees) and one for steady-state watch mode on a settled tree.
+    """
     poll_interval_sec: int = Field(
         default=300,
         ge=60,
@@ -45,14 +50,30 @@ class StabilitySettings(BaseModel):
     )
     checks_required: int = Field(
         default=3,
-        ge=2,
+        ge=1,
         le=10,
         description="Number of consecutive stable checks required"
     )
     min_age_sec: int = Field(
         default=900,
-        ge=300,
+        ge=0,
         description="Minimum age since first stable check (seconds)"
+    )
+
+
+class StabilityProfiles(BaseModel):
+    """Bulk-mode (first pass) vs steady-state stability profiles."""
+    bulk: StabilitySettings = Field(
+        default_factory=lambda: StabilitySettings(
+            poll_interval_sec=60,
+            checks_required=1,
+            min_age_sec=0,
+        ),
+        description="Aggressive profile used during the initial bulk discovery pass."
+    )
+    steady: StabilitySettings = Field(
+        default_factory=StabilitySettings,
+        description="Conservative profile used in delta/steady-state mode."
     )
 
 
@@ -87,6 +108,43 @@ class OutputLayout(str, Enum):
     """Output path layout."""
     SIBLING = "sibling"  # {parent}/h265/{name} — legacy, collides across sibling folders
     MIRROR = "mirror"    # {root}/{mirror_root}/{relative_path}/{name} — collision-free for 200TB
+
+
+class DiskBudgetSettings(BaseModel):
+    """Staging disk budget for incoming downloads."""
+    enabled: bool = Field(
+        default=False,
+        description="When true, DownloadWorker waits for budget before fetching"
+    )
+    max_staging_bytes: int = Field(
+        default=2_000_000_000_000,  # 2 TB
+        ge=1_073_741_824,           # 1 GB floor for tests
+        description="Soft cap on total bytes reserved by in-flight downloads"
+    )
+    min_free_bytes: int = Field(
+        default=500_000_000_000,    # 500 GB
+        ge=1_073_741_824,
+        description="Keep at least this many bytes free on the staging filesystem"
+    )
+    poll_interval_sec: int = Field(
+        default=30,
+        ge=1,
+        description="How often a stalled DownloadWorker rechecks for available budget"
+    )
+
+
+class ScannerSettings(BaseModel):
+    """Incremental scanner knobs."""
+    cursor_checkpoint_entries: int = Field(
+        default=500,
+        ge=1,
+        description="Persist the Dropbox cursor every N entries seen during a bulk pass"
+    )
+    feito_cache_ttl_sec: int = Field(
+        default=3600,
+        ge=60,
+        description="Max age of a cached feito.txt read before it is refetched"
+    )
 
 
 class DispatcherSettings(BaseModel):
@@ -215,6 +273,7 @@ class Config(BaseModel):
 
     # Stability settings (R2)
     stability: StabilitySettings = Field(default_factory=StabilitySettings)
+    stability_profiles: StabilityProfiles = Field(default_factory=StabilityProfiles)
 
     # Concurrency
     concurrency: ConcurrencySettings = Field(default_factory=ConcurrencySettings)
@@ -224,6 +283,12 @@ class Config(BaseModel):
 
     # Central dispatcher (bounded worker queues fed by a single DB-reading thread)
     dispatcher: DispatcherSettings = Field(default_factory=DispatcherSettings)
+
+    # Incremental scanner (cursor persistence, feito-log cache)
+    scanner: ScannerSettings = Field(default_factory=ScannerSettings)
+
+    # Staging disk budget — pauses new downloads when near the disk cap
+    disk_budget: DiskBudgetSettings = Field(default_factory=DiskBudgetSettings)
 
     # Dropbox API token-bucket rate limiter
     dropbox_api: DropboxApiSettings = Field(default_factory=DropboxApiSettings)
@@ -398,6 +463,10 @@ def save_example_config(path: Path) -> None:
             'checks_required': 3,
             'min_age_sec': 900,
         },
+        'stability_profiles': {
+            'bulk':   {'poll_interval_sec': 60,  'checks_required': 1, 'min_age_sec': 0},
+            'steady': {'poll_interval_sec': 300, 'checks_required': 3, 'min_age_sec': 900},
+        },
         'concurrency': {
             'scan_interval_sec': 600,
             'download_workers': 2,
@@ -413,6 +482,16 @@ def save_example_config(path: Path) -> None:
         'dispatcher': {
             'poll_interval_sec': 2.0,
             'queue_multiplier': 4,
+        },
+        'scanner': {
+            'cursor_checkpoint_entries': 500,
+            'feito_cache_ttl_sec': 3600,
+        },
+        'disk_budget': {
+            'enabled': False,
+            'max_staging_bytes': 2_000_000_000_000,
+            'min_free_bytes':      500_000_000_000,
+            'poll_interval_sec': 30,
         },
         'dropbox_api': {
             'rate_per_min': 600,

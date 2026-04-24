@@ -87,6 +87,38 @@ CREATE TABLE IF NOT EXISTS settings (
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Scan state: singleton row persisting the Dropbox list_folder cursor so
+-- incremental scans resume after restart. bulk_pass_complete flips to 1
+-- once the first recursive enumeration has walked the entire tree; after
+-- that the scanner only processes delta entries.
+CREATE TABLE IF NOT EXISTS scan_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    dropbox_root TEXT NOT NULL,
+    cursor TEXT,
+    bulk_pass_complete INTEGER NOT NULL DEFAULT 0,
+    bulk_started_at TEXT,
+    bulk_completed_at TEXT,
+    last_delta_at TEXT,
+    entries_seen INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- feito.txt cache: persists the "already transcoded" filename lists keyed by
+-- folder so we don't re-read every h265/h265 feito.txt on every scan.
+CREATE TABLE IF NOT EXISTS feito_cache (
+    folder_path TEXT PRIMARY KEY,
+    filenames TEXT NOT NULL,          -- newline-joined filenames
+    last_checked TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Disk reservations: one row per in-flight download so the budget subsystem
+-- can compute committed staging bytes across all workers.
+CREATE TABLE IF NOT EXISTS disk_reservations (
+    job_id INTEGER PRIMARY KEY,
+    reserved_bytes INTEGER NOT NULL,
+    reserved_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
 -- Trigger to update updated_at on jobs table
 CREATE TRIGGER IF NOT EXISTS jobs_updated_at
     AFTER UPDATE ON jobs

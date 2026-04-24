@@ -111,6 +111,18 @@ class Job:
 
 
 @dataclass
+class ScanState:
+    """Persisted cursor + progress of the recursive Dropbox scan."""
+    dropbox_root: str
+    cursor: str | None
+    bulk_pass_complete: bool
+    bulk_started_at: datetime | None
+    bulk_completed_at: datetime | None
+    last_delta_at: datetime | None
+    entries_seen: int
+
+
+@dataclass
 class StabilityCheck:
     """Represents a file stability check record."""
     id: int
@@ -205,6 +217,31 @@ CREATE TABLE IF NOT EXISTS settings (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Scan cursor persistence (singleton) — see schema.sql for docs.
+CREATE TABLE IF NOT EXISTS scan_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    dropbox_root TEXT NOT NULL,
+    cursor TEXT,
+    bulk_pass_complete INTEGER NOT NULL DEFAULT 0,
+    bulk_started_at TEXT,
+    bulk_completed_at TEXT,
+    last_delta_at TEXT,
+    entries_seen INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS feito_cache (
+    folder_path TEXT PRIMARY KEY,
+    filenames TEXT NOT NULL,
+    last_checked TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS disk_reservations (
+    job_id INTEGER PRIMARY KEY,
+    reserved_bytes INTEGER NOT NULL,
+    reserved_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Trigger to update updated_at on jobs
@@ -633,6 +670,219 @@ class Database:
                 """,
                 (key, value, value),
             )
+
+    # =========================================================================
+    # Scan State (cursor persistence for incremental Dropbox scans)
+    # =========================================================================
+
+    def get_scan_state(self, dropbox_root: str) -> ScanState:
+        """
+        Fetch the singleton scan-state row, creating it on first access.
+
+        If the configured dropbox_root changed, the cursor is invalidated
+        (different root = different cursor namespace in Dropbox).
+        """
+        conn = self._get_connection()
+        cursor = conn.execute("SELECT * FROM scan_state WHERE id = 1")
+        row = cursor.fetchone()
+
+        if row is None:
+            with self.transaction() as txn:
+                txn.execute(
+                    "INSERT INTO scan_state (id, dropbox_root) VALUES (1, ?)",
+                    (dropbox_root,),
+                )
+            return ScanState(
+                dropbox_root=dropbox_root,
+                cursor=None,
+                bulk_pass_complete=False,
+                bulk_started_at=None,
+                bulk_completed_at=None,
+                last_delta_at=None,
+                entries_seen=0,
+            )
+
+        if row['dropbox_root'] != dropbox_root:
+            # Root changed — drop the cursor so we rescan under the new root
+            with self.transaction() as txn:
+                txn.execute(
+                    """
+                    UPDATE scan_state
+                       SET dropbox_root = ?,
+                           cursor = NULL,
+                           bulk_pass_complete = 0,
+                           bulk_started_at = NULL,
+                           bulk_completed_at = NULL,
+                           last_delta_at = NULL,
+                           entries_seen = 0,
+                           updated_at = datetime('now')
+                     WHERE id = 1
+                    """,
+                    (dropbox_root,),
+                )
+            return ScanState(
+                dropbox_root=dropbox_root,
+                cursor=None,
+                bulk_pass_complete=False,
+                bulk_started_at=None,
+                bulk_completed_at=None,
+                last_delta_at=None,
+                entries_seen=0,
+            )
+
+        return ScanState(
+            dropbox_root=row['dropbox_root'],
+            cursor=row['cursor'],
+            bulk_pass_complete=bool(row['bulk_pass_complete']),
+            bulk_started_at=_parse_datetime(row['bulk_started_at']),
+            bulk_completed_at=_parse_datetime(row['bulk_completed_at']),
+            last_delta_at=_parse_datetime(row['last_delta_at']),
+            entries_seen=row['entries_seen'] or 0,
+        )
+
+    def save_scan_cursor(self, cursor: str, entries_seen: int) -> None:
+        """Persist the Dropbox list_folder cursor after a page of results."""
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE scan_state
+                   SET cursor = ?,
+                       entries_seen = ?,
+                       updated_at = datetime('now')
+                 WHERE id = 1
+                """,
+                (cursor, entries_seen),
+            )
+
+    def mark_bulk_started(self) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE scan_state
+                   SET bulk_started_at = COALESCE(bulk_started_at, datetime('now')),
+                       updated_at = datetime('now')
+                 WHERE id = 1
+                """
+            )
+
+    def mark_bulk_complete(self) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE scan_state
+                   SET bulk_pass_complete = 1,
+                       bulk_completed_at = datetime('now'),
+                       updated_at = datetime('now')
+                 WHERE id = 1
+                """
+            )
+
+    def mark_delta_pass(self) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE scan_state
+                   SET last_delta_at = datetime('now'),
+                       updated_at = datetime('now')
+                 WHERE id = 1
+                """
+            )
+
+    # =========================================================================
+    # feito.txt cache (avoid re-reading logs on every scan)
+    # =========================================================================
+
+    def get_feito_cache(
+        self,
+        folder_path: str,
+        ttl_sec: int,
+    ) -> set[str] | None:
+        """
+        Return the cached filenames set if present and not expired, else None.
+        """
+        conn = self._get_connection()
+        cursor = conn.execute(
+            """
+            SELECT filenames, last_checked
+              FROM feito_cache
+             WHERE folder_path = ?
+               AND last_checked > datetime('now', ? || ' seconds')
+            """,
+            (folder_path, -ttl_sec),
+        )
+        row = cursor.fetchone()
+        if row is None:
+            return None
+        return set(filter(None, (row['filenames'] or '').split('\n')))
+
+    def put_feito_cache(self, folder_path: str, filenames: set[str]) -> None:
+        joined = '\n'.join(sorted(filenames))
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO feito_cache (folder_path, filenames, last_checked)
+                VALUES (?, ?, datetime('now'))
+                ON CONFLICT(folder_path) DO UPDATE
+                    SET filenames = excluded.filenames,
+                        last_checked = datetime('now')
+                """,
+                (folder_path, joined),
+            )
+
+    def invalidate_feito_cache(self, folder_path: str) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "DELETE FROM feito_cache WHERE folder_path = ?",
+                (folder_path,),
+            )
+
+    # =========================================================================
+    # Disk reservations (staging-dir budget)
+    # =========================================================================
+
+    def reserve_disk(self, job_id: int, size_bytes: int) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO disk_reservations (job_id, reserved_bytes)
+                VALUES (?, ?)
+                ON CONFLICT(job_id) DO UPDATE SET reserved_bytes = excluded.reserved_bytes,
+                                                   reserved_at = datetime('now')
+                """,
+                (job_id, size_bytes),
+            )
+
+    def release_disk(self, job_id: int) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                "DELETE FROM disk_reservations WHERE job_id = ?",
+                (job_id,),
+            )
+
+    def total_reserved_bytes(self) -> int:
+        conn = self._get_connection()
+        cursor = conn.execute("SELECT COALESCE(SUM(reserved_bytes), 0) AS s FROM disk_reservations")
+        row = cursor.fetchone()
+        return int(row['s']) if row else 0
+
+    def prune_stale_disk_reservations(self, active_states: set[JobState]) -> int:
+        """
+        Drop reservations whose jobs are no longer in an active state.
+        Called at startup after recover_active_jobs.
+        """
+        conn = self._get_connection()
+        placeholders = ','.join('?' * len(active_states))
+        with self.transaction() as txn:
+            cursor = txn.execute(
+                f"""
+                DELETE FROM disk_reservations
+                 WHERE job_id NOT IN (
+                     SELECT id FROM jobs WHERE state IN ({placeholders})
+                 )
+                """,
+                [s.value for s in active_states],
+            )
+            return cursor.rowcount
 
     # =========================================================================
     # Queue Operations

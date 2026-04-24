@@ -20,6 +20,7 @@ from queue import Empty, Queue
 from typing import TYPE_CHECKING, Callable
 
 from .database import Database, Job, JobState
+from .disk_budget import DiskBudget
 from .dispatcher import JobDispatcher
 from .dropbox_client import DropboxClient, DropboxRevChangedError
 from .encoder_detect import EncoderType, select_best_encoder
@@ -112,14 +113,26 @@ class DownloadWorker(BaseWorker):
         scanner: Scanner,
         stop_event: threading.Event,
         dispatcher: JobDispatcher,
+        disk_budget: DiskBudget | None = None,
     ):
         super().__init__(f"downloader-{worker_id}", config, db, stop_event, dispatcher)
         self.dropbox = dropbox
         self.scanner = scanner
+        self.disk_budget = disk_budget
 
     def process_job(self, job: Job) -> None:
         """Download the file for the given job."""
         logger.info(f"[{self.name}] Downloading: {job.dropbox_path}")
+
+        # Block until staging has room. On stop_event, bail cleanly and let the
+        # dispatcher re-enqueue the job on next refill (state is still NEW).
+        if self.disk_budget is not None and self.disk_budget.enabled:
+            granted = self.disk_budget.wait_for_slot(
+                job.id, job.dropbox_size, self.stop_event
+            )
+            if not granted:
+                logger.info(f"[{self.name}] Aborting job {job.id}: shutting down")
+                return
 
         try:
             self._download_job(job)
@@ -130,9 +143,13 @@ class DownloadWorker(BaseWorker):
                 JobState.STABLE_WAIT,
                 error_message=str(e),
             )
+            if self.disk_budget is not None:
+                self.disk_budget.release(job.id)
         except Exception as e:
             logger.error(f"[{self.name}] Download failed: {e}")
             self._handle_failure(job, str(e))
+            if self.disk_budget is not None:
+                self.disk_budget.release(job.id)
 
     def _download_job(self, job: Job) -> None:
         """Download file for job."""
@@ -246,11 +263,13 @@ class TranscodeWorker(BaseWorker):
         stop_event: threading.Event,
         dispatcher: JobDispatcher,
         encoder: EncoderType | None = None,
+        disk_budget: DiskBudget | None = None,
     ):
         super().__init__(f"transcoder-{worker_id}", config, db, stop_event, dispatcher)
         self.encoder = encoder
         self.command_builder = FFmpegCommandBuilder(config)
         self._ffmpeg_process: subprocess.Popen | None = None
+        self.disk_budget = disk_budget
 
     def process_job(self, job: Job) -> None:
         """Transcode the file for the given job."""
@@ -459,6 +478,8 @@ class TranscodeWorker(BaseWorker):
                     shutil.rmtree(job_dir)
                 except Exception as e:
                     logger.warning(f"Failed to clean staging: {e}")
+        if self.disk_budget is not None:
+            self.disk_budget.release(job.id)
 
     def _handle_failure(self, job: Job, error: str) -> None:
         """Handle job failure with retry logic."""
@@ -473,6 +494,8 @@ class TranscodeWorker(BaseWorker):
                 JobState.FAILED,
                 error_message=f"Max retries exceeded: {error}",
             )
+            if self.disk_budget is not None:
+                self.disk_budget.release(job.id)
         else:
             self.db.update_job_state(
                 job.id,
@@ -494,9 +517,11 @@ class UploadWorker(BaseWorker):
         dropbox: DropboxClient,
         stop_event: threading.Event,
         dispatcher: JobDispatcher,
+        disk_budget: DiskBudget | None = None,
     ):
         super().__init__(f"uploader-{worker_id}", config, db, stop_event, dispatcher)
         self.dropbox = dropbox
+        self.disk_budget = disk_budget
 
     def process_job(self, job: Job) -> None:
         """Upload the transcoded file for the given job."""
@@ -576,6 +601,8 @@ class UploadWorker(BaseWorker):
                     logger.debug(f"[{self.name}] Cleaned staging: {job_dir}")
                 except Exception as e:
                     logger.warning(f"Failed to clean staging: {e}")
+        if self.disk_budget is not None:
+            self.disk_budget.release(job.id)
 
     def _handle_failure(self, job: Job, error: str) -> None:
         """Handle upload failure."""
@@ -590,6 +617,8 @@ class UploadWorker(BaseWorker):
                 JobState.FAILED,
                 error_message=f"Upload failed after retries: {error}",
             )
+            if self.disk_budget is not None:
+                self.disk_budget.release(job.id)
         else:
             # Stay in UPLOADING state for retry
             self.db.update_job_state(

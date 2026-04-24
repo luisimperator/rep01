@@ -235,19 +235,35 @@ class DropboxClient:
         Yields:
             DropboxFileInfo for each file found.
         """
+        for entry in self.list_folder_entries(path, recursive=recursive):
+            if isinstance(entry, DropboxFileInfo):
+                yield entry
+
+    def list_folder_entries(
+        self,
+        path: str,
+        recursive: bool = False,
+    ) -> Generator[DropboxFileInfo | str, None, None]:
+        """
+        Low-level generator yielding DropboxFileInfo for each file, and the
+        cursor string at each page boundary (as a bare str). Callers that want
+        to persist cursors for resumable scans should check ``isinstance(x, str)``.
+        """
         norm_path = self._normalize_path(path)
 
-        def list_page(cursor: str | None = None) -> ListFolderResult:
-            if cursor:
-                return self._dbx.files_list_folder_continue(cursor)
+        def list_page(c: str | None) -> ListFolderResult:
+            if c:
+                return self._dbx.files_list_folder_continue(c)
             return self._dbx.files_list_folder(norm_path, recursive=recursive)
 
-        cursor = None
+        cursor: str | None = None
         has_more = True
 
         while has_more:
+            # Closure captures cursor by name — snapshot it for _retry_operation
+            current = cursor
             result = self._retry_operation(
-                lambda: list_page(cursor),
+                lambda: list_page(current),
                 f"list_folder({path})",
             )
 
@@ -257,6 +273,44 @@ class DropboxClient:
 
             cursor = result.cursor
             has_more = result.has_more
+            # Yield the cursor after each page so callers can checkpoint
+            yield cursor
+
+    def list_folder_delta(
+        self,
+        start_cursor: str,
+    ) -> Generator[tuple[str, object] | str, None, None]:
+        """
+        Yield incremental changes since ``start_cursor``.
+
+        Each tuple is ``(kind, payload)`` where kind is ``"file"`` (payload is
+        DropboxFileInfo) or ``"deleted"`` (payload is the deleted path as str).
+        Folder entries are skipped. At every page boundary the new cursor is
+        also yielded as a bare str so the caller can persist it.
+        """
+        from dropbox.files import DeletedMetadata  # local import keeps top clean
+
+        cursor: str = start_cursor
+        has_more = True
+
+        while has_more:
+            current = cursor
+            result = self._retry_operation(
+                lambda: self._dbx.files_list_folder_continue(current),
+                "list_folder_continue",
+            )
+
+            for entry in result.entries:
+                if isinstance(entry, FileMetadata):
+                    yield ("file", DropboxFileInfo.from_metadata(entry))
+                elif isinstance(entry, DeletedMetadata):
+                    path = entry.path_display or entry.path_lower or ""
+                    yield ("deleted", path)
+                # FolderMetadata entries are ignored (scanner walks files only)
+
+            cursor = result.cursor
+            has_more = result.has_more
+            yield cursor
 
     def folder_exists(self, path: str) -> bool:
         """Check if folder exists."""
