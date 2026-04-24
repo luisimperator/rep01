@@ -31,6 +31,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
+from .api import ApiServer
 from .config import Config, EncoderPreference, TranscodeProfile, load_config, save_example_config
 from .database import ACTIVE_STATES, Database, Job, JobState, TERMINAL_STATES
 from .disk_budget import DiskBudget
@@ -44,6 +45,7 @@ from .encoder_detect import (
 )
 from .rate_limit import TokenBucket
 from .scanner import Scanner
+from .updater import apply_update, check_for_update_async, installed_version
 from .watchdog import HealthChecker, Watchdog
 from .workers import DownloadWorker, TranscodeWorker, UploadWorker
 from .inventory import (
@@ -102,7 +104,10 @@ class Daemon:
         self.dispatcher: JobDispatcher | None = None
         self.rate_limiter: TokenBucket | None = None
         self.disk_budget: DiskBudget | None = None
+        self.api_server: ApiServer | None = None
         self.stop_event = threading.Event()
+        self.scan_trigger = threading.Event()
+        self.started_at = time.time()
         self.workers: list[threading.Thread] = []
         self._lock_fd: int | None = None
 
@@ -190,6 +195,15 @@ class Daemon:
         encoder = select_best_encoder(self.config)
         logger.info(f"Using encoder: {encoder.value}")
 
+        # Fire-and-forget GitHub release check; the HTTP API surfaces the result
+        # once it lands in the settings table.
+        if self.config.updater.enabled:
+            check_for_update_async(
+                self.db,
+                self.config.updater.github_repo,
+                timeout_sec=self.config.updater.check_timeout_sec,
+            )
+
     def start_workers(self) -> None:
         """Start the dispatcher and all worker threads."""
         assert self.db is not None
@@ -200,6 +214,16 @@ class Daemon:
         # Dispatcher must be running before workers try to consume
         self.dispatcher.start()
         self.workers.append(self.dispatcher)
+
+        # Start the status API (loopback) so the GUI / curl can inspect us
+        self.api_server = ApiServer(
+            config=self.config,
+            db=self.db,
+            dispatcher=self.dispatcher,
+            scan_trigger=self.scan_trigger,
+            started_at_epoch=self.started_at,
+        )
+        self.api_server.start()
 
         # Download workers
         for i in range(self.config.concurrency.download_workers):
@@ -258,7 +282,7 @@ class Daemon:
         )
 
     def run_scan_loop(self) -> None:
-        """Run periodic scanning."""
+        """Run periodic scanning; /api/scan-now shortens the inter-scan sleep."""
         assert self.scanner is not None
 
         while not self.stop_event.is_set():
@@ -273,16 +297,25 @@ class Daemon:
             except Exception as e:
                 logger.error(f"Scan error: {e}")
 
-            # Wait for next scan
-            for _ in range(self.config.concurrency.scan_interval_sec):
-                if self.stop_event.is_set():
+            # Sleep until either stop or scan-now trigger fires
+            self.scan_trigger.clear()
+            deadline = time.monotonic() + self.config.concurrency.scan_interval_sec
+            while not self.stop_event.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
                     break
-                time.sleep(1)
+                if self.scan_trigger.wait(timeout=min(remaining, 1.0)):
+                    logger.info("scan-now triggered via API")
+                    break
 
     def stop(self) -> None:
         """Signal all workers to stop."""
         logger.info("Stopping daemon...")
         self.stop_event.set()
+
+        # Tear down the HTTP server first so new requests don't block shutdown
+        if self.api_server is not None:
+            self.api_server.shutdown()
 
         # Wait for workers
         for worker in self.workers:
@@ -620,6 +653,66 @@ def init_config(path: str) -> None:
 def show_encoders() -> None:
     """Show available hardware encoders."""
     console.print(get_encoder_info_string())
+
+
+@cli.command()
+@click.option(
+    '--install-dir',
+    type=click.Path(exists=True, file_okay=False),
+    default=None,
+    help='Path to the git checkout (default: the package source tree).',
+)
+def update(install_dir: str | None) -> None:
+    """
+    Apply an available update: git pull + pip install if pyproject changed.
+
+    Does not restart the daemon — the operator (or Task Scheduler) is
+    responsible for that. The command prints every git/pip line it runs.
+    """
+    if install_dir is None:
+        # Default to the repository root that contains this source tree
+        install_dir = str(Path(__file__).resolve().parents[2])
+
+    console.print(f"[blue]Updating HeavyDrops Transcoder at {install_dir}[/blue]")
+    console.print(f"[blue]Installed version: {installed_version()}[/blue]\n")
+
+    rc = apply_update(Path(install_dir), log_fn=console.print)
+
+    if rc == 0:
+        console.print("\n[green]Update applied.[/green] Restart the daemon to load the new code.")
+    else:
+        console.print(f"\n[red]Update failed with exit code {rc}.[/red]")
+        sys.exit(rc)
+
+
+@cli.command('check-update')
+@click.pass_context
+def check_update(ctx: click.Context) -> None:
+    """Check GitHub for a newer release and print the result."""
+    config_path = ctx.obj.get('config_path')
+    config = load_config(config_path)
+    config.ensure_directories()
+
+    db = Database(config.database_path)
+    db.initialize()
+    try:
+        from .updater import check_for_update
+        status = check_for_update(
+            db,
+            config.updater.github_repo,
+            timeout_sec=config.updater.check_timeout_sec,
+        )
+    finally:
+        db.close()
+
+    console.print(f"Installed: [cyan]{status.current_version}[/cyan]")
+    console.print(f"Latest:    [cyan]{status.latest_tag or '(unknown)'}[/cyan]")
+    if status.update_available:
+        console.print(f"\n[yellow]Update available.[/yellow] Run: [bold]hd update[/bold]")
+    elif status.error:
+        console.print(f"\n[red]Check failed:[/red] {status.error}")
+    else:
+        console.print("\n[green]Up to date.[/green]")
 
 
 @cli.command()

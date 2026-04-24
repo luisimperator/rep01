@@ -63,12 +63,27 @@ class JobDispatcher(threading.Thread):
 
         self.poll_interval = config.dispatcher.poll_interval_sec
 
+        # Pause flag: when set, the dispatcher keeps running but stops refilling
+        # queues. Workers drain whatever is already in flight and then idle.
+        self._paused = threading.Event()
+
     # ------------------------------------------------------------------ public
 
     def mark_done(self, job_id: int) -> None:
         """Worker calls this in its `finally:` block to release the slot."""
         with self._active_lock:
             self._active_set.discard(job_id)
+
+    def pause(self) -> None:
+        """Stop enqueuing new jobs. Workers drain what's already in queues."""
+        self._paused.set()
+
+    def resume(self) -> None:
+        """Resume enqueueing new jobs."""
+        self._paused.clear()
+
+    def is_paused(self) -> bool:
+        return self._paused.is_set()
 
     def queue_for_stage(self, stage: str) -> Queue[Job]:
         """Look up a worker queue by stage name."""
@@ -101,9 +116,10 @@ class JobDispatcher(threading.Thread):
         )
         while not self.stop_event.is_set():
             try:
-                self._refill(self.download_q, DOWNLOAD_STATES)
-                self._refill(self.transcode_q, TRANSCODE_STATES)
-                self._refill(self.upload_q, UPLOAD_STATES)
+                if not self._paused.is_set():
+                    self._refill(self.download_q, DOWNLOAD_STATES)
+                    self._refill(self.transcode_q, TRANSCODE_STATES)
+                    self._refill(self.upload_q, UPLOAD_STATES)
             except Exception:
                 logger.exception("dispatcher refill error")
 

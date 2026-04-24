@@ -147,6 +147,42 @@ class ScannerSettings(BaseModel):
     )
 
 
+class ApiSettings(BaseModel):
+    """Local HTTP API settings."""
+    enabled: bool = Field(
+        default=True,
+        description="When true, the daemon serves a JSON/HTML status API on loopback"
+    )
+    bind: str = Field(
+        default="127.0.0.1",
+        description="Interface to bind; loopback by default so no auth is needed"
+    )
+    port: int = Field(
+        default=9123,
+        ge=1,
+        le=65535,
+        description="TCP port for the status API"
+    )
+
+
+class UpdaterSettings(BaseModel):
+    """Notify-only update check against GitHub Releases."""
+    enabled: bool = Field(
+        default=True,
+        description="When true, the daemon checks GitHub Releases on startup"
+    )
+    github_repo: str = Field(
+        default="luisimperator/rep01",
+        description="GitHub repo to query for latest release (owner/name)"
+    )
+    check_timeout_sec: float = Field(
+        default=5.0,
+        ge=1.0,
+        le=60.0,
+        description="Network timeout for the release check; failure is non-fatal"
+    )
+
+
 class DispatcherSettings(BaseModel):
     """Central job dispatcher settings."""
     poll_interval_sec: float = Field(
@@ -289,6 +325,12 @@ class Config(BaseModel):
 
     # Staging disk budget — pauses new downloads when near the disk cap
     disk_budget: DiskBudgetSettings = Field(default_factory=DiskBudgetSettings)
+
+    # Local HTTP status API (GUI thin client + curl inspection)
+    api: ApiSettings = Field(default_factory=ApiSettings)
+
+    # Update-notification via GitHub Releases (notify-only; apply via `hd update`)
+    updater: UpdaterSettings = Field(default_factory=UpdaterSettings)
 
     # Dropbox API token-bucket rate limiter
     dropbox_api: DropboxApiSettings = Field(default_factory=DropboxApiSettings)
@@ -492,6 +534,16 @@ def save_example_config(path: Path) -> None:
             'max_staging_bytes': 2_000_000_000_000,
             'min_free_bytes':      500_000_000_000,
             'poll_interval_sec': 30,
+        },
+        'api': {
+            'enabled': True,
+            'bind': '127.0.0.1',
+            'port': 9123,
+        },
+        'updater': {
+            'enabled': True,
+            'github_repo': 'luisimperator/rep01',
+            'check_timeout_sec': 5.0,
         },
         'dropbox_api': {
             'rate_per_min': 600,
