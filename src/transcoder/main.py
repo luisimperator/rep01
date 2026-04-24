@@ -75,7 +75,9 @@ def setup_logging(verbose: bool = False, log_file: Path | None = None) -> None:
 
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
-        file_handler = logging.FileHandler(log_file)
+        # On Windows, FileHandler's default encoding is the local code page
+        # (cp1252). Force UTF-8 so non-ASCII Dropbox paths don't crash logging.
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
         file_handler.setFormatter(
             logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
         )

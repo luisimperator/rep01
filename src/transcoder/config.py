@@ -454,11 +454,13 @@ def load_config(config_path: Path | str | None = None) -> Config:
     """
     config_data: dict[str, Any] = {}
 
-    # Try loading from file
+    # Try loading from file. Always read as UTF-8: on Windows `open()` defaults
+    # to the system code page (cp1252) and will choke on any non-ASCII byte or
+    # a UTF-8 BOM the installer/notepad may have written.
     if config_path:
         config_path = Path(config_path)
         if config_path.exists():
-            with open(config_path, 'r') as f:
+            with open(config_path, 'r', encoding='utf-8-sig') as f:
                 config_data = yaml.safe_load(f) or {}
     else:
         # Try default paths
@@ -470,7 +472,7 @@ def load_config(config_path: Path | str | None = None) -> Config:
         ]
         for path in default_paths:
             if path.exists():
-                with open(path, 'r') as f:
+                with open(path, 'r', encoding='utf-8-sig') as f:
                     config_data = yaml.safe_load(f) or {}
                 break
 
@@ -566,5 +568,5 @@ def save_example_config(path: Path) -> None:
         'audio_fallback_bitrate': '320k',
     }
 
-    with open(path, 'w') as f:
-        yaml.dump(example, f, default_flow_style=False, sort_keys=False)
+    with open(path, 'w', encoding='utf-8') as f:
+        yaml.dump(example, f, default_flow_style=False, sort_keys=False, allow_unicode=True)

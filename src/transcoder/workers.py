@@ -406,12 +406,17 @@ class TranscodeWorker(BaseWorker):
         log_file = log_dir / "ffmpeg.log"
 
         try:
-            with open(log_file, 'w') as log_f:
+            # On Windows the console code page (cp1252) will choke on any
+            # non-ASCII char in a filename; force UTF-8 end-to-end and
+            # tolerate the rare invalid byte so the transcode still proceeds.
+            with open(log_file, 'w', encoding='utf-8', errors='replace') as log_f:
                 self._ffmpeg_process = subprocess.Popen(
                     cmd.args,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
+                    encoding='utf-8',
+                    errors='replace',
                 )
 
                 # Monitor stderr for progress
