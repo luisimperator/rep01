@@ -1,38 +1,101 @@
-# HeavyDrops Transcoder v3 — Config
-# ===================================
-# Copy to config.yaml and edit. Only dropbox_token is required.
+# HeavyDrops Transcoder — example configuration.
+#
+# Copy this file to config.yaml and edit. Only dropbox_token is required.
+#
+# dropbox_token:  your Dropbox API access token (from developers.dropbox.com).
+# dropbox_root:   a VIRTUAL path inside your Dropbox account (starts with "/").
+#                 Use "/" to process your entire Dropbox, or "/Videos" etc.
+#                 This is NOT your local Dropbox folder on disk.
+# local_*_dir:    local paths on THIS machine. On Windows keep forward slashes
+#                 (e.g. C:/Users/you/HeavyDrops/data/staging) to avoid YAML
+#                 escape issues, or quote the path with single quotes.
+# output_layout:  "sibling" writes next to each source folder at .../h265/name.mp4
+#                 (legacy, default). "mirror" mirrors the tree under a single
+#                 root folder — recommended for large archives with sibling
+#                 folders that share filenames.
+# disk_budget.enabled: flip to true when staging disk is a bottleneck (e.g.
+#                 few TB local disk pointed at a huge Dropbox).
 
-# Dropbox access token (or set DROPBOX_TOKEN env var)
-dropbox_token: ""
-
-# Root folder to scan in Dropbox
-dropbox_root: "/Videos"
-
-# Local temp directory (use your SSD)
-staging_dir: "/tmp/transcode"
-
-# Minimum file size in GB (0 = process everything)
-min_size_gb: 0
-
-# Encoder: auto / hevc_qsv / hevc_nvenc / libx265
-encoder: "auto"
-
-# Quality value (lower = better quality, bigger files). 20-28 typical.
-cq: 24
-
-# How many files to queue per scan cycle
-queue_size: 100
-
-# Seconds between Dropbox rescans when queue is empty
-scan_interval: 300
-
-# Video extensions to process
-extensions:
-  - ".mp4"
-  - ".mov"
-
-# File tracking (so we never redo work)
-done_file: "done.json"
-
-# Delete original h264 after successful h265 upload
-delete_original: true
+dropbox_token: ${DROPBOX_TOKEN}
+dropbox_root: /Videos
+local_staging_dir: /data/transcoder/staging
+local_output_dir: /data/transcoder/output
+database_path: /data/transcoder/transcoder.db
+lockfile_path: /var/run/transcoder.lock
+log_dir: /var/log/transcoder
+encoder_preference: auto
+profile: quality
+cq_value: 24
+cpu_crf_equivalent: 23
+min_size_gb: 6.0
+bitrate:
+  target_mbps: 40
+  max_mbps: 60
+  bufsize_mbps: 120
+stability:
+  poll_interval_sec: 300
+  checks_required: 3
+  min_age_sec: 900
+stability_profiles:
+  bulk:
+    poll_interval_sec: 60
+    checks_required: 1
+    min_age_sec: 0
+  steady:
+    poll_interval_sec: 300
+    checks_required: 3
+    min_age_sec: 900
+concurrency:
+  scan_interval_sec: 600
+  download_workers: 2
+  transcode_workers: 2
+  upload_workers: 2
+watchdog:
+  download_timeout_sec: 7200
+  transcode_timeout_sec: 86400
+  upload_timeout_sec: 7200
+  max_retries: 10
+dispatcher:
+  poll_interval_sec: 2.0
+  queue_multiplier: 4
+scanner:
+  cursor_checkpoint_entries: 500
+  feito_cache_ttl_sec: 3600
+disk_budget:
+  enabled: false
+  max_staging_bytes: 2000000000000
+  min_free_bytes: 500000000000
+  poll_interval_sec: 30
+api:
+  enabled: true
+  bind: 127.0.0.1
+  port: 9123
+updater:
+  enabled: true
+  github_repo: luisimperator/rep01
+  check_timeout_sec: 5.0
+dropbox_api:
+  rate_per_min: 600
+  burst: 50
+output_layout: sibling
+output_mirror_root: _h265_output
+video_extensions:
+- .mp4
+- .mov
+- .MP4
+- .MOV
+exclude_patterns:
+- '*/h265/*'
+- '*/.h265/*'
+- '*/H265/*'
+upload_to_dropbox: true
+delete_staging_after_upload: true
+allow_delete_original: false
+delete_original_delay_hours: 168
+allow_mkv_fallback: false
+ffmpeg_path: ffmpeg
+ffprobe_path: ffprobe
+ffmpeg_extra_args: []
+gop_size: 60
+audio_fallback_codec: aac
+audio_fallback_bitrate: 320k
