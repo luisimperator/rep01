@@ -857,9 +857,56 @@ def inventory_diff(old_inventory: str, new_inventory: str) -> None:
     console.print("=" * 60)
 
 
+@cli.command('gui')
+@click.pass_context
+def gui(ctx: click.Context) -> None:
+    """
+    Open the daemon's status dashboard in the default browser.
+
+    This does not launch the daemon itself — run ``transcoder start`` (or
+    let the Task Scheduler do it). The dashboard served at the API's bind
+    address is the GUI.
+    """
+    config_path = ctx.obj.get('config_path')
+    config = load_config(config_path)
+
+    host = config.api.bind
+    # When the API is bound to 0.0.0.0 (unusual), the dashboard is actually
+    # reachable on localhost from the same machine.
+    if host in ('', '0.0.0.0'):
+        host = '127.0.0.1'
+    url = f"http://{host}:{config.api.port}/"
+
+    console.print(f"[blue]Opening dashboard at {url}[/blue]")
+
+    import webbrowser
+    opened = webbrowser.open(url, new=2)
+    if not opened:
+        console.print(
+            f"[yellow]Could not launch a browser automatically.[/yellow] "
+            f"Open [cyan]{url}[/cyan] manually."
+        )
+
+
 def main() -> None:
     """Main entry point."""
     cli()
+
+
+def gui_main() -> None:
+    """Entry point for `hd-gui`: open the dashboard without parsing CLI args."""
+    try:
+        config = load_config(None)
+    except Exception:  # pragma: no cover — defensive
+        config = Config()
+
+    host = config.api.bind
+    if host in ('', '0.0.0.0'):
+        host = '127.0.0.1'
+    url = f"http://{host}:{config.api.port}/"
+
+    import webbrowser
+    webbrowser.open(url, new=2)
 
 
 if __name__ == '__main__':

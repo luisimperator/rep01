@@ -1,8 +1,37 @@
-# Dropbox Video Transcoder
+# HeavyDrops Transcoder
 
 A robust, idempotent daemon that monitors a Dropbox folder, downloads videos, transcodes H.264 to H.265 (HEVC) using FFmpeg with hardware acceleration support, and uploads the results back to Dropbox.
 
 Designed for processing massive video archives (hundreds of TB) with minimal intervention, running 24/7 for months.
+
+## Quick install on Windows (one command, no admin)
+
+Open PowerShell and paste:
+
+```powershell
+iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
+```
+
+This installs under `%USERPROFILE%\HeavyDrops`, pulls Python 3.12 and Git via `winget` if missing, downloads FFmpeg, writes a `config.yaml` (you'll be prompted once for your Dropbox token), registers a scheduled task so the daemon auto-starts at logon and restarts on failure, and drops a **HeavyDrops** shortcut on the Desktop. The shortcut opens the dashboard at <http://127.0.0.1:9123/> in your default browser — queue status, bulk-scan progress, disk usage, and pause / scan-now / retry-failed buttons, refreshing every 3 seconds. Closing the browser does **not** stop the daemon.
+
+To apply a new release later:
+
+```powershell
+cd $env:USERPROFILE\HeavyDrops
+.\.venv\Scripts\hd.exe update
+schtasks /End /TN HeavyDropsDaemon
+schtasks /Run /TN HeavyDropsDaemon
+```
+
+The daemon already checks GitHub on startup and flags an update in the dashboard when one is available; applying it is still a conscious operator action.
+
+## Architecture at a glance
+
+- **Daemon**: a long-running process orchestrating scan → download → probe → transcode → upload. Auto-starts via Task Scheduler, survives logoff when configured to. Single instance guarded by a lockfile.
+- **Scanner**: two-mode. On first run (BULK) it walks the whole Dropbox root once, checkpointing the cursor in SQLite so crashes resume. After completion (DELTA) it only processes changes.
+- **Dispatcher**: one thread owns the job queues. Workers consume from bounded per-stage queues instead of polling the database — fewer duplicate pickups, better SQLite behaviour at scale.
+- **Disk budget** (opt-in): caps staging bytes so a 2TB local disk pointed at a 200TB Dropbox doesn't ENOSPC. Downloaders stall gracefully and log every 5 minutes while waiting.
+- **HTTP status API**: loopback-only (127.0.0.1:9123 by default). Serves the browser dashboard plus JSON endpoints (`/api/status`, `/api/jobs`, `/api/metrics`, `POST /api/pause`, `/api/resume`, `/api/scan-now`, `/api/retry-failed`).
 
 ## Features
 
