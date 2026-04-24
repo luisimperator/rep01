@@ -1,0 +1,38 @@
+# HeavyDrops Transcoder v3 — Config
+# ===================================
+# Copy to config.yaml and edit. Only dropbox_token is required.
+
+# Dropbox access token (or set DROPBOX_TOKEN env var)
+dropbox_token: ""
+
+# Root folder to scan in Dropbox
+dropbox_root: "/Videos"
+
+# Local temp directory (use your SSD)
+staging_dir: "/tmp/transcode"
+
+# Minimum file size in GB (0 = process everything)
+min_size_gb: 0
+
+# Encoder: auto / hevc_qsv / hevc_nvenc / libx265
+encoder: "auto"
+
+# Quality value (lower = better quality, bigger files). 20-28 typical.
+cq: 24
+
+# How many files to queue per scan cycle
+queue_size: 100
+
+# Seconds between Dropbox rescans when queue is empty
+scan_interval: 300
+
+# Video extensions to process
+extensions:
+  - ".mp4"
+  - ".mov"
+
+# File tracking (so we never redo work)
+done_file: "done.json"
+
+# Delete original h264 after successful h265 upload
+delete_original: true

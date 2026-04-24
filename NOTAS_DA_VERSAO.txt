@@ -1,0 +1,373 @@
+================================================================================
+                    HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
+================================================================================
+
+Versão: 1.4.4
+Data: 04/02/2026
+--------------------------------------------------------------------------------
+
+NOVIDADES DESTA VERSÃO:
+
+  [BUGFIX] Dashboard global com contagem estável
+  ----------------------------------------------
+  ANTES: Total de arquivos mudava dependendo de qual PC escaneava
+  AGORA: Totais só AUMENTAM, nunca diminuem (cada scan adiciona ao total)
+
+  [FEATURE] Arquivos DJI de drone ignorados automaticamente
+  ---------------------------------------------------------
+  Arquivos DJI_*.mp4 (gravações de drone) são automaticamente pulados.
+  Isso preserva a qualidade original dos vídeos aéreos.
+  Status: "skipped_drone_dji" no manifest.
+
+  [PERFORMANCE] Detecção de cloud files 10x mais rápida
+  -----------------------------------------------------
+  ANTES: Cada arquivo cloud levava segundos para detectar
+  AGORA: Detecção instantânea, pula para próximo arquivo imediatamente
+
+  [FEATURE] Lookahead prefetch - Downloads antecipados
+  ----------------------------------------------------
+  Enquanto processa arquivo N, já inicia download dos próximos 10 arquivos!
+  Isso elimina tempo de espera entre transcodificações.
+
+  ANTES: Processa -> Espera download -> Processa -> Espera download...
+  AGORA: Processa (enquanto próximos 10 baixam) -> Processa -> Processa...
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.4.1 (04/02/2026):
+
+  [FEATURE] SCAN mostra ONDE estão os arquivos pendentes
+  ------------------------------------------------------
+  Agora o SCAN mostra exatamente em quais pastas estão os arquivos pendentes:
+
+    ONDE ESTÃO OS ARQUIVOS PENDENTES:
+      📁 Projeto_ABC: 45 arquivo(s)
+      📁 Comercial_XYZ: 23 arquivo(s)
+      📁 Evento_2024: 12 arquivo(s)
+      ... e mais 5 pastas (8 arquivos)
+
+  Isso responde: "por que diz 70 pendentes mas minha pasta está completa?"
+  (porque os 70 estão em OUTRAS pastas!)
+
+  [FEATURE] Download automático dos próximos 50 arquivos
+  ------------------------------------------------------
+  Ao clicar SCAN, o sistema automaticamente:
+  - Identifica os 50 menores arquivos pendentes
+  - Dispara o download deles no Dropbox
+  - Mostra: "Downloads iniciados: 50 arquivos (primeiros da fila)"
+
+  [BUGFIX] Velocidade GB/h agora calculada corretamente
+  -----------------------------------------------------
+  ANTES: Sempre mostrava "50.0 GB/h" (valor fixo padrão)
+  AGORA: Calcula baseado no tempo REAL de transcodificação
+
+  O log agora mostra: "Done! 65.2% smaller in 342s"
+  Isso alimenta a estatística de velocidade no dashboard.
+
+  [INFO] Sobre uso de CPU vs GPU
+  ------------------------------
+  Se você usa Intel QSV, é NORMAL ver CPU baixo (10-16%) e GPU alto (70-80%).
+  O QSV usa o chip de vídeo integrado da Intel, não a CPU.
+  Isso é EFICIENTE - significa que a GPU está fazendo o trabalho pesado!
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.4.0 (03/02/2026):
+
+  [FEATURE] SCAN mostra ONDE estão os arquivos pendentes
+  ------------------------------------------------------
+  Agora o SCAN mostra exatamente em quais pastas estão os arquivos pendentes:
+
+    ONDE ESTÃO OS ARQUIVOS PENDENTES:
+      📁 Projeto_ABC: 45 arquivo(s)
+      📁 Comercial_XYZ: 23 arquivo(s)
+      📁 Evento_2024: 12 arquivo(s)
+      ... e mais 5 pastas (8 arquivos)
+
+  Isso responde: "por que diz 70 pendentes mas minha pasta está completa?"
+  (porque os 70 estão em OUTRAS pastas!)
+
+  [FEATURE] Download automático dos próximos 50 arquivos
+  ------------------------------------------------------
+  Ao clicar SCAN, o sistema automaticamente:
+  - Identifica os 50 menores arquivos pendentes
+  - Dispara o download deles no Dropbox
+  - Mostra: "Downloads iniciados: 50 arquivos (primeiros da fila)"
+
+  [BUGFIX] Velocidade GB/h agora calculada corretamente
+  -----------------------------------------------------
+  ANTES: Sempre mostrava "50.0 GB/h" (valor fixo padrão)
+  AGORA: Calcula baseado no tempo REAL de transcodificação
+
+  O log agora mostra: "Done! 65.2% smaller in 342s"
+  Isso alimenta a estatística de velocidade no dashboard.
+
+  [INFO] Sobre uso de CPU vs GPU
+  ------------------------------
+  Se você usa Intel QSV, é NORMAL ver CPU baixo (10-16%) e GPU alto (70-80%).
+  O QSV usa o chip de vídeo integrado da Intel, não a CPU.
+  Isso é EFICIENTE - significa que a GPU está fazendo o trabalho pesado!
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.4.0 (03/02/2026):
+
+  [FEATURE] Visibilidade total dos downloads do Dropbox
+  -----------------------------------------------------
+  Agora você vê exatamente o que está acontecendo com os downloads:
+
+  NOVA SEÇÃO "Downloads" na UI:
+  +----------------------------------------------------------+
+  | Local: Idle - all files processed                        |
+  | Downloads: ⬇️ 5 files downloading (12.34 GB) - ETA: ~8min |
+  |   video1.mp4 (45%), video2.mp4 (23%), video3.mp4 (waiting)|
+  +----------------------------------------------------------+
+
+  O QUE MOSTRA:
+  - Quantos arquivos estão baixando
+  - Quanto em GB está na fila
+  - Estimativa de tempo (ETA)
+  - Nomes dos arquivos e progresso de cada um
+  - Atualiza a cada 2 segundos
+
+  [UX] Separação clara: Local vs Global
+  -------------------------------------
+  - "Local:" mostra status da pasta atual (Watch Folder)
+  - "Dashboard Global" mostra stats de TODOS os PCs (do último SCAN)
+  - Nota explicativa: "Dados do último SCAN. Clique SCAN para atualizar."
+
+  Isso resolve a confusão de "por que diz idle se tem arquivos pendentes?"
+  (resposta: os pendentes estão em outras pastas, não na Watch Folder atual)
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.10 (02/02/2026):
+
+  [UX] Logs mais claros e menos spam
+  ----------------------------------
+  - Mostra caminho completo (não trunca mais)
+  - Explica claramente: X encontrados, Y já feitos, Z precisam processar
+  - Não repete log quando idle (mostra só uma vez)
+  - Status bar mostra "Idle - all files processed"
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.9 (02/02/2026):
+
+  [FEATURE] Botão CLEANUP H264 - limpa backups órfãos
+  ---------------------------------------------------
+  Novo botão no dashboard que encontra e deleta pastas h264 que:
+  - Deveriam ter sido deletadas mas não foram
+  - Todos os arquivos h264 têm versões h265 válidas
+
+  COMO USAR:
+  1. Clica no botão "🗑️ CLEANUP H264"
+  2. O sistema escaneia todas as pastas h264
+  3. Verifica se cada arquivo tem h265 correspondente
+  4. Deleta as pastas h264 verificadas
+  5. Mostra resumo: "Cleanup complete: X folders, Y files, Z GB freed"
+
+  Isso recupera espaço de backups que ficaram para trás.
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.8 (02/02/2026):
+
+  [BUGFIX] Importação de "h265 feito.txt" agora funciona
+  ------------------------------------------------------
+  PROBLEMA: O import dos arquivos h265 feito.txt não estava funcionando.
+
+  CAUSA: Dois bugs encontrados:
+  1. Código procurava "h265 feitos.txt" (com s) mas o arquivo é "h265 feito.txt"
+  2. Parser esperava 4 colunas com bytes, mas o formato real é:
+     "2024-01-01 12:00:00 | arquivo.mp4 | 100.0MB -> 50.0MB (50% menor)"
+
+  SOLUÇÃO:
+  - Corrigido o nome do arquivo para "h265 feito.txt"
+  - Parser atualizado para o formato real com regex
+  - Agora importa corretamente os arquivos processados anteriormente
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.7 (02/02/2026):
+
+  [BUGFIX] Arquivos low-bitrate agora são lembrados corretamente
+  --------------------------------------------------------------
+  PROBLEMA: Arquivos já verificados como "well-compressed" eram baixados
+  novamente do Dropbox em cada scan, desperdiçando banda e tempo.
+
+  CAUSA: Dois bugs encontrados:
+  1. O status "skipped_lowbitrate" não estava na lista de status reconhecidos
+  2. Arquivos skipped não eram salvos no manifest da nuvem (só local DB)
+
+  SOLUÇÃO:
+  - Agora reconhece qualquer status começando com "skipped" (hevc, lowbitrate, etc.)
+  - Arquivos skipped são salvos no cloud manifest (sobrevive wipe do SSD)
+  - Nunca mais baixa arquivo que já foi verificado como low-bitrate
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.6 (02/02/2026):
+
+  [FEATURE] Controle inteligente de downloads do Dropbox
+  ------------------------------------------------------
+  Agora o software balanceia os downloads com o espaço livre no SSD:
+
+  - Máximo de 50 arquivos baixando simultaneamente
+  - Reserva 20 GB livres para downloads pendentes
+  - Mostra quantos arquivos estão na fila de download
+  - Limpa automaticamente downloads completados
+
+  Exemplo de log:
+  "Download queue: 3 completed, 0 removed, 7 pending"
+  "Online-only file, queued for download (8 pending, 45.2 GB)"
+  "Download queue full (10 files, 120.5 GB pending), skipping..."
+
+  Isso evita que o SSD encha quando há muitos arquivos online-only.
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.5 (02/02/2026):
+
+  [UX] Mostra espaço liberado ao deletar pasta h264
+  -------------------------------------------------
+  Agora ao deletar uma pasta h264, mostra quantos arquivos e GB foram liberados:
+  "H264 folder deleted: 20 files, 45.32 GB freed - h264"
+
+  Igual ao que já era feito com pastas WAV.
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.4 (02/02/2026):
+
+  [REVERT] Volta ao processamento sequencial com feedback imediato
+  ----------------------------------------------------------------
+  Removido o pre-check paralelo que demorava muito sem dar feedback.
+  Agora você vê cada arquivo sendo processado em tempo real novamente.
+
+  Mantidas as otimizações:
+  - Arquivos duplicados removidos automaticamente
+  - Wait reduzido de 2s para 0.3s
+  - Skipped files salvos no manifest
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.3 (02/02/2026):
+
+  [DOC] Documentação incluída no pacote
+  -------------------------------------
+  Agora cada versão inclui:
+  - NOTAS_DA_VERSAO.txt: changelog e novidades
+  - COMO_FUNCIONA.txt: guia completo para filmmakers
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.2 (02/02/2026):
+
+  [PERFORMANCE] Verificação paralela com 16 threads (REMOVIDO na 1.3.4)
+  ---------------------------------------------------------------------
+  Feature removida por demorar muito sem feedback visual.
+
+  [FIX] Arquivos duplicados na fila
+  ---------------------------------
+  Corrigido bug onde o mesmo arquivo aparecia múltiplas vezes na fila
+  de processamento. Agora usa deduplicação automática.
+
+  [FIX] Tempo de espera reduzido
+  ------------------------------
+  Reduzido de 2 segundos para 0.3 segundos por arquivo na verificação
+  de estabilidade (já verificado na fase paralela).
+
+  [FEATURE] Arquivos skipados salvos no manifest
+  ----------------------------------------------
+  Arquivos que não precisam transcodar (já HEVC, baixo bitrate, etc.)
+  são salvos no manifest. Próximos scans ignoram esses arquivos.
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.1 (01/02/2026):
+
+  [FIX] Manifest embutido na GUI
+  ------------------------------
+  O manifest agora funciona standalone - não precisa mais da pasta src/
+  Acabou o erro "module not found".
+
+  [FEATURE] Horário de Brasília
+  -----------------------------
+  Logs agora mostram horário BRT (UTC-3) em vez de UTC.
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.3.0 (01/02/2026):
+
+  [FEATURE] Botão SCAN para inventário
+  ------------------------------------
+  Novo botão SCAN que mapeia todos os arquivos ANTES de começar.
+  Mostra exatamente quantos arquivos precisam transcodar.
+
+  [FEATURE] Importação automática de h265 feitos.txt
+  --------------------------------------------------
+  O sistema importa automaticamente os logs existentes de arquivos
+  já processados para evitar retrabalho.
+
+  [FEATURE] Status de arquivos skipados
+  -------------------------------------
+  Arquivos que não precisam transcodar são marcados com motivo:
+  - already_hevc: já é H.265
+  - low_bitrate: bitrate menor que 8 Mbps
+  - too_small: arquivo muito pequeno
+  - output_exists: saída já existe
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.2.9 (01/02/2026):
+
+  [FEATURE] Auto-detecção do Dropbox
+  ----------------------------------
+  O software agora detecta automaticamente onde está a pasta do Dropbox.
+  Funciona em qualquer drive (C:, D:, E:, etc.)
+
+  Heavy1-Heavy6 usam D:\HeavyDrops Dropbox\...
+  Heavy7 usa C:\HeavyDrops Dropbox\...
+  Ambos funcionam automaticamente!
+
+--------------------------------------------------------------------------------
+
+VERSÃO 1.2.8 (31/01/2026):
+
+  [FEATURE] Dashboard Global
+  --------------------------
+  Novo painel mostrando progresso de TODOS os 7 PCs:
+  - Progresso total em %
+  - TB processados / restantes
+  - TB economizados
+  - Velocidade média (GB/h)
+  - Taxa de compressão
+  - ETA em dias
+  - Histórico dos últimos 14 dias
+
+  [FEATURE] Botão REFRESH
+  -----------------------
+  Atualiza o dashboard com dados mais recentes de todos os PCs.
+
+  [FEATURE] Manifest Global
+  -------------------------
+  Um único arquivo JSON compartilhado por todos os PCs no Dropbox.
+  Localização: {Dropbox}/HeavyDrops/App h265 Converter/global_manifest.json
+
+================================================================================
+                              HISTÓRICO COMPLETO
+================================================================================
+
+1.2.7 - Cloud manifest inicial
+1.2.6 - Verificação de arquivos bem comprimidos (< 8 Mbps)
+1.2.5 - Suporte a WAV -> MP3 em "Audio Source Files"
+1.2.4 - Auto-delete de pastas h264 após verificação
+1.2.3 - Smart sorting por pasta (prioriza pastas quase completas)
+1.2.2 - Detecção automática de encoder (NVENC/QSV/CPU)
+1.2.1 - Fallback automático para CPU se GPU falhar
+1.2.0 - Suporte a múltiplos encoders
+1.1.0 - Integração com Dropbox Smart Sync
+1.0.0 - Versão inicial
+
+================================================================================
