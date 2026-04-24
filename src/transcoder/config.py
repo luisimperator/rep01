@@ -83,6 +83,42 @@ class ConcurrencySettings(BaseModel):
     )
 
 
+class OutputLayout(str, Enum):
+    """Output path layout."""
+    SIBLING = "sibling"  # {parent}/h265/{name} — legacy, collides across sibling folders
+    MIRROR = "mirror"    # {root}/{mirror_root}/{relative_path}/{name} — collision-free for 200TB
+
+
+class DispatcherSettings(BaseModel):
+    """Central job dispatcher settings."""
+    poll_interval_sec: float = Field(
+        default=2.0,
+        ge=0.5,
+        le=30.0,
+        description="How often the dispatcher refills worker queues from the DB"
+    )
+    queue_multiplier: int = Field(
+        default=4,
+        ge=1,
+        le=32,
+        description="Queue size = workers * this; controls pipelining slack"
+    )
+
+
+class DropboxApiSettings(BaseModel):
+    """Dropbox API rate limiting (token bucket)."""
+    rate_per_min: int = Field(
+        default=600,
+        ge=1,
+        description="Average API calls per minute permitted"
+    )
+    burst: int = Field(
+        default=50,
+        ge=1,
+        description="Maximum burst of calls before throttling kicks in"
+    )
+
+
 class WatchdogSettings(BaseModel):
     """Job timeout and watchdog settings."""
     download_timeout_sec: int = Field(
@@ -185,6 +221,24 @@ class Config(BaseModel):
 
     # Watchdog
     watchdog: WatchdogSettings = Field(default_factory=WatchdogSettings)
+
+    # Central dispatcher (bounded worker queues fed by a single DB-reading thread)
+    dispatcher: DispatcherSettings = Field(default_factory=DispatcherSettings)
+
+    # Dropbox API token-bucket rate limiter
+    dropbox_api: DropboxApiSettings = Field(default_factory=DropboxApiSettings)
+
+    # Output path layout (R3): "sibling" preserves legacy {parent}/h265/{name},
+    # "mirror" writes to {dropbox_root}/{output_mirror_root}/{rel}/{name} — required
+    # for set-and-forget on large trees where sibling folders share filenames.
+    output_layout: OutputLayout = Field(
+        default=OutputLayout.SIBLING,
+        description="Output path layout: sibling (legacy) or mirror (collision-free)"
+    )
+    output_mirror_root: str = Field(
+        default="_h265_output",
+        description="Top-level folder under dropbox_root used when output_layout=mirror"
+    )
 
     # File patterns
     video_extensions: list[str] = Field(
@@ -356,6 +410,16 @@ def save_example_config(path: Path) -> None:
             'upload_timeout_sec': 7200,
             'max_retries': 10,
         },
+        'dispatcher': {
+            'poll_interval_sec': 2.0,
+            'queue_multiplier': 4,
+        },
+        'dropbox_api': {
+            'rate_per_min': 600,
+            'burst': 50,
+        },
+        'output_layout': 'sibling',
+        'output_mirror_root': '_h265_output',
         'video_extensions': ['.mp4', '.mov', '.MP4', '.MOV'],
         'exclude_patterns': ['*/h265/*', '*/.h265/*', '*/H265/*'],
         'upload_to_dropbox': True,

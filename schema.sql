@@ -47,6 +47,13 @@ CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_jobs_path ON jobs(dropbox_path);
 CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at);
 
+-- Prevent duplicate active jobs for the same dropbox_path across rev bumps.
+-- Multiple terminal rows (DONE/SKIPPED_*/FAILED) for one path are allowed;
+-- only one in-progress or queued row per path is permitted at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_path
+    ON jobs(dropbox_path)
+    WHERE state NOT IN ('DONE','FAILED','SKIPPED_HEVC','SKIPPED_ALREADY_EXISTS','SKIPPED_TOO_SMALL');
+
 -- Stability checks table: tracks file stability over time (R2)
 -- Used to ensure files are fully synced before processing
 CREATE TABLE IF NOT EXISTS stability_checks (

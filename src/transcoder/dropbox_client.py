@@ -23,6 +23,8 @@ from dropbox.files import (
     WriteMode,
 )
 
+from .rate_limit import TokenBucket
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,6 +86,7 @@ class DropboxClient:
         token: str,
         max_retries: int = 5,
         retry_delay: float = 2.0,
+        rate_limiter: TokenBucket | None = None,
     ):
         """
         Initialize Dropbox client.
@@ -92,12 +95,15 @@ class DropboxClient:
             token: Dropbox API access token.
             max_retries: Maximum number of retries for transient errors.
             retry_delay: Base delay between retries (exponential backoff).
+            rate_limiter: Optional token bucket. If provided, every retried
+                operation acquires `weight` tokens before issuing a request.
         """
         if not token:
             raise DropboxAuthError("Dropbox token is required")
 
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        self.rate_limiter = rate_limiter
         self._dbx = dropbox.Dropbox(token)
 
     def _normalize_path(self, path: str) -> str:
@@ -114,11 +120,14 @@ class DropboxClient:
         self,
         operation: Callable[[], any],
         operation_name: str,
+        weight: float = 1.0,
     ) -> any:
-        """Execute operation with retry logic."""
+        """Execute operation with retry logic and optional token-bucket throttle."""
         last_error = None
 
         for attempt in range(self.max_retries):
+            if self.rate_limiter is not None:
+                self.rate_limiter.acquire(weight=weight)
             try:
                 return operation()
             except AuthError as e:
@@ -128,8 +137,20 @@ class DropboxClient:
                     raise DropboxNotFoundError(f"Path not found: {e}") from e
 
                 last_error = e
+                # Server-driven backoff: respect Dropbox's retry hint when present
+                retry_after = getattr(e, 'backoff', None)
+                if retry_after and self.rate_limiter is not None:
+                    try:
+                        self.rate_limiter.on_throttle(float(retry_after))
+                    except (TypeError, ValueError):
+                        pass
                 if attempt < self.max_retries - 1:
                     delay = self.retry_delay * (2 ** attempt)
+                    if retry_after:
+                        try:
+                            delay = max(delay, float(retry_after))
+                        except (TypeError, ValueError):
+                            pass
                     logger.warning(
                         f"{operation_name} failed (attempt {attempt + 1}), "
                         f"retrying in {delay:.1f}s: {e}"

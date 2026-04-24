@@ -20,6 +20,7 @@ from queue import Empty, Queue
 from typing import TYPE_CHECKING, Callable
 
 from .database import Database, Job, JobState
+from .dispatcher import JobDispatcher
 from .dropbox_client import DropboxClient, DropboxRevChangedError
 from .encoder_detect import EncoderType, select_best_encoder
 from .ffmpeg_builder import FFmpegCommand, FFmpegCommandBuilder
@@ -32,6 +33,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# How long worker.queue.get() blocks before re-checking stop_event.
+_QUEUE_GET_TIMEOUT_SEC = 5.0
+
 
 class WorkerStop(Exception):
     """Signal to stop worker."""
@@ -41,36 +45,52 @@ class WorkerStop(Exception):
 class BaseWorker(threading.Thread):
     """Base class for pipeline workers."""
 
+    # Subclasses set this to identify which dispatcher queue to consume from.
+    stage: str = ""
+
     def __init__(
         self,
         name: str,
         config: Config,
         db: Database,
         stop_event: threading.Event,
+        dispatcher: JobDispatcher,
     ):
         super().__init__(name=name, daemon=True)
         self.config = config
         self.db = db
         self.stop_event = stop_event
+        self.dispatcher = dispatcher
+        self.queue: Queue = dispatcher.queue_for_stage(self.stage)
         self._current_job: Job | None = None
 
     def run(self) -> None:
-        """Main worker loop."""
-        logger.info(f"Worker {self.name} started")
+        """Main worker loop: pull jobs from dispatcher, process, release slot."""
+        logger.info(f"Worker {self.name} started (stage={self.stage})")
 
         while not self.stop_event.is_set():
             try:
-                self.process_next()
+                job = self.queue.get(timeout=_QUEUE_GET_TIMEOUT_SEC)
+            except Empty:
+                continue
+
+            self._current_job = job
+            try:
+                self.process_job(job)
             except WorkerStop:
+                self.dispatcher.mark_done(job.id)
                 break
             except Exception as e:
-                logger.exception(f"Worker {self.name} error: {e}")
-                time.sleep(5)  # Brief pause on error
+                logger.exception(f"Worker {self.name} error on job {job.id}: {e}")
+                time.sleep(1)
+            finally:
+                self._current_job = None
+                self.dispatcher.mark_done(job.id)
 
         logger.info(f"Worker {self.name} stopped")
 
-    def process_next(self) -> None:
-        """Process next job. Override in subclasses."""
+    def process_job(self, job: Job) -> None:
+        """Process a single job. Override in subclasses."""
         raise NotImplementedError
 
     def should_stop(self) -> bool:
@@ -81,6 +101,8 @@ class BaseWorker(threading.Thread):
 class DownloadWorker(BaseWorker):
     """Worker that downloads files from Dropbox."""
 
+    stage = "download"
+
     def __init__(
         self,
         worker_id: int,
@@ -89,26 +111,14 @@ class DownloadWorker(BaseWorker):
         dropbox: DropboxClient,
         scanner: Scanner,
         stop_event: threading.Event,
+        dispatcher: JobDispatcher,
     ):
-        super().__init__(f"downloader-{worker_id}", config, db, stop_event)
+        super().__init__(f"downloader-{worker_id}", config, db, stop_event, dispatcher)
         self.dropbox = dropbox
         self.scanner = scanner
 
-    def process_next(self) -> None:
-        """Get next NEW job and download it."""
-        # Get job
-        jobs = self.db.get_jobs_by_state(JobState.NEW, limit=1)
-        if not jobs:
-            # Also check RETRY_WAIT jobs
-            jobs = self.db.get_jobs_by_state(JobState.RETRY_WAIT, limit=1)
-
-        if not jobs:
-            time.sleep(5)
-            return
-
-        job = jobs[0]
-        self._current_job = job
-
+    def process_job(self, job: Job) -> None:
+        """Download the file for the given job."""
         logger.info(f"[{self.name}] Downloading: {job.dropbox_path}")
 
         try:
@@ -123,8 +133,6 @@ class DownloadWorker(BaseWorker):
         except Exception as e:
             logger.error(f"[{self.name}] Download failed: {e}")
             self._handle_failure(job, str(e))
-        finally:
-            self._current_job = None
 
     def _download_job(self, job: Job) -> None:
         """Download file for job."""
@@ -228,29 +236,24 @@ class DownloadWorker(BaseWorker):
 class TranscodeWorker(BaseWorker):
     """Worker that transcodes downloaded videos."""
 
+    stage = "transcode"
+
     def __init__(
         self,
         worker_id: int,
         config: Config,
         db: Database,
         stop_event: threading.Event,
+        dispatcher: JobDispatcher,
         encoder: EncoderType | None = None,
     ):
-        super().__init__(f"transcoder-{worker_id}", config, db, stop_event)
+        super().__init__(f"transcoder-{worker_id}", config, db, stop_event, dispatcher)
         self.encoder = encoder
         self.command_builder = FFmpegCommandBuilder(config)
         self._ffmpeg_process: subprocess.Popen | None = None
 
-    def process_next(self) -> None:
-        """Get next DOWNLOADED job and transcode it."""
-        jobs = self.db.get_jobs_by_state(JobState.DOWNLOADED, limit=1)
-        if not jobs:
-            time.sleep(5)
-            return
-
-        job = jobs[0]
-        self._current_job = job
-
+    def process_job(self, job: Job) -> None:
+        """Transcode the file for the given job."""
         logger.info(f"[{self.name}] Transcoding: {job.dropbox_path}")
 
         try:
@@ -259,7 +262,6 @@ class TranscodeWorker(BaseWorker):
             logger.error(f"[{self.name}] Transcode failed: {e}")
             self._handle_failure(job, str(e))
         finally:
-            self._current_job = None
             self._ffmpeg_process = None
 
     def _transcode_job(self, job: Job) -> None:
@@ -482,6 +484,8 @@ class TranscodeWorker(BaseWorker):
 class UploadWorker(BaseWorker):
     """Worker that uploads transcoded files to Dropbox."""
 
+    stage = "upload"
+
     def __init__(
         self,
         worker_id: int,
@@ -489,21 +493,13 @@ class UploadWorker(BaseWorker):
         db: Database,
         dropbox: DropboxClient,
         stop_event: threading.Event,
+        dispatcher: JobDispatcher,
     ):
-        super().__init__(f"uploader-{worker_id}", config, db, stop_event)
+        super().__init__(f"uploader-{worker_id}", config, db, stop_event, dispatcher)
         self.dropbox = dropbox
 
-    def process_next(self) -> None:
-        """Get next job ready for upload."""
-        # Jobs with UPLOADING state have completed transcode
-        jobs = self.db.get_jobs_by_state(JobState.UPLOADING, limit=1)
-        if not jobs:
-            time.sleep(5)
-            return
-
-        job = jobs[0]
-        self._current_job = job
-
+    def process_job(self, job: Job) -> None:
+        """Upload the transcoded file for the given job."""
         logger.info(f"[{self.name}] Uploading: {job.output_path}")
 
         try:
@@ -511,8 +507,6 @@ class UploadWorker(BaseWorker):
         except Exception as e:
             logger.error(f"[{self.name}] Upload failed: {e}")
             self._handle_failure(job, str(e))
-        finally:
-            self._current_job = None
 
     def _upload_job(self, job: Job) -> None:
         """Upload transcoded file to Dropbox."""

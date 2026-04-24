@@ -169,6 +169,12 @@ CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_jobs_path ON jobs(dropbox_path);
 CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at);
 
+-- One active row per dropbox_path: blocks duplicate queued/in-progress jobs
+-- when the same file is rediscovered between scans.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_path
+    ON jobs(dropbox_path)
+    WHERE state NOT IN ('DONE','FAILED','SKIPPED_HEVC','SKIPPED_ALREADY_EXISTS','SKIPPED_TOO_SMALL');
+
 -- Stability checks table: tracks file stability over time (R2)
 CREATE TABLE IF NOT EXISTS stability_checks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -341,6 +347,28 @@ class Database:
         placeholders = ','.join('?' * len(states))
         cursor = conn.execute(
             f"SELECT * FROM jobs WHERE state IN ({placeholders}) ORDER BY created_at ASC LIMIT ?",
+            [s.value for s in states] + [limit],
+        )
+        return [Job.from_row(row) for row in cursor.fetchall()]
+
+    def get_dispatchable_jobs(
+        self,
+        states: set[JobState],
+        limit: int,
+    ) -> list[Job]:
+        """
+        Get jobs eligible for dispatch into a worker queue.
+
+        Ordered FIFO by created_at to ensure first-discovered files are processed
+        first across long-running scans.
+        """
+        if not states or limit <= 0:
+            return []
+        conn = self._get_connection()
+        placeholders = ','.join('?' * len(states))
+        cursor = conn.execute(
+            f"SELECT * FROM jobs WHERE state IN ({placeholders}) "
+            f"ORDER BY created_at ASC LIMIT ?",
             [s.value for s in states] + [limit],
         )
         return [Job.from_row(row) for row in cursor.fetchall()]

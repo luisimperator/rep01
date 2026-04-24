@@ -140,8 +140,8 @@ class Scanner:
         if not is_video_file(path, self.config.video_extensions):
             return None
 
-        # R4: Skip h265 output folders
-        if is_in_h265_folder(path):
+        # R4: Skip h265 output folders (sibling /h265/ and configured mirror root)
+        if is_in_h265_folder(path, mirror_root=self.config.output_mirror_root):
             logger.debug(f"Skipping (in h265 folder): {path}")
             return 'skipped_excluded'
 
@@ -177,7 +177,7 @@ class Scanner:
             return 'skipped_h265_log'
 
         # Check if output already exists
-        output_path = get_output_path(path)
+        output_path = self._output_path(path)
         if self.dropbox.file_exists(output_path):
             logger.debug(f"Skipping (output exists): {path}")
             if not dry_run:
@@ -222,7 +222,12 @@ class Scanner:
         """
         from pathlib import PurePosixPath
 
-        log_path = get_h265_log_path(file_info.path)
+        log_path = get_h265_log_path(
+            file_info.path,
+            layout=self.config.output_layout.value,
+            dropbox_root=self.config.dropbox_root,
+            mirror_root=self.config.output_mirror_root,
+        )
         filename = PurePosixPath(file_info.path).name
 
         # Check cache first
@@ -313,9 +318,18 @@ class Scanner:
         logger.debug(f"Stability: file is stable: {path}")
         return StabilityResult.STABLE
 
+    def _output_path(self, dropbox_path: str) -> str:
+        """Resolve the configured output path for a given dropbox source path."""
+        return get_output_path(
+            dropbox_path,
+            layout=self.config.output_layout.value,
+            dropbox_root=self.config.dropbox_root,
+            mirror_root=self.config.output_mirror_root,
+        )
+
     def _create_new_job(self, file_info: DropboxFileInfo) -> None:
         """Create a new job for the file."""
-        output_path = get_output_path(file_info.path)
+        output_path = self._output_path(file_info.path)
 
         self.db.create_job(
             dropbox_path=file_info.path,
@@ -334,7 +348,7 @@ class Scanner:
         state: JobState,
     ) -> None:
         """Create a job marked as skipped (for tracking)."""
-        output_path = get_output_path(file_info.path)
+        output_path = self._output_path(file_info.path)
 
         self.db.create_job(
             dropbox_path=file_info.path,

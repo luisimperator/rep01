@@ -37,46 +37,77 @@ def normalize_dropbox_path(path: str) -> str:
     return path
 
 
-def get_output_path(input_path: str) -> str:
+def get_output_path(
+    input_path: str,
+    layout: str = "sibling",
+    dropbox_root: str | None = None,
+    mirror_root: str = "_h265_output",
+) -> str:
     """
     Calculate output path for a given input path (R3).
 
-    Input: /A/B/clip001.MP4
-    Output: /A/B/h265/clip001.MP4
+    Layouts:
+    - sibling (legacy): /A/B/clip001.MP4 -> /A/B/h265/clip001.MP4.
+      Collides when sibling folders contain files with the same name.
+    - mirror: /A/B/clip001.MP4 with dropbox_root=/ -> /_h265_output/A/B/clip001.MP4.
+      Preserves the source folder hierarchy under a single output root.
 
     Preserves exact filename and extension.
     """
     input_path = normalize_dropbox_path(input_path)
     p = PurePosixPath(input_path)
 
-    # Parent directory + h265 subdirectory + same filename
+    if layout == "mirror":
+        root = normalize_dropbox_path(dropbox_root or "/")
+        root_p = PurePosixPath(root)
+        try:
+            rel = p.relative_to(root_p)
+        except ValueError:
+            # input is not under dropbox_root; fall back to sibling layout
+            output_dir = p.parent / "h265"
+            return str(output_dir / p.name)
+        # Strip the filename: rel.parent is the relative folder hierarchy
+        output_dir = root_p / mirror_root / rel.parent
+        output_path = output_dir / p.name
+        return str(output_path)
+
+    # sibling (default / legacy)
     output_dir = p.parent / "h265"
     output_path = output_dir / p.name
-
     return str(output_path)
 
 
-def get_h265_log_path(input_path: str) -> str:
+def get_h265_log_path(
+    input_path: str,
+    layout: str = "sibling",
+    dropbox_root: str | None = None,
+    mirror_root: str = "_h265_output",
+) -> str:
     """
     Get path to h265 feito.txt log file for a given input path.
 
-    Input: /A/B/clip001.MP4
-    Output: /A/B/h265/h265 feito.txt
+    Tracks the same layout convention as get_output_path so the log lives
+    next to the output it describes.
     """
-    input_path = normalize_dropbox_path(input_path)
-    p = PurePosixPath(input_path)
-    h265_dir = p.parent / "h265"
-    return str(h265_dir / "h265 feito.txt")
+    output_path = get_output_path(input_path, layout, dropbox_root, mirror_root)
+    p = PurePosixPath(output_path)
+    return str(p.parent / "h265 feito.txt")
 
 
-def is_in_h265_folder(path: str) -> bool:
+def is_in_h265_folder(path: str, mirror_root: str = "_h265_output") -> bool:
     """
     Check if path is inside an h265 output folder (R4).
 
-    Case-insensitive check for "/h265/" anywhere in path.
+    Case-insensitive check for "/h265/" or the configured mirror_root anywhere
+    in the path.
     """
     path_lower = path.lower()
-    return '/h265/' in path_lower or path_lower.endswith('/h265')
+    if '/h265/' in path_lower or path_lower.endswith('/h265'):
+        return True
+    mr = mirror_root.lower().strip('/')
+    if mr and (f'/{mr}/' in path_lower or path_lower.endswith(f'/{mr}')):
+        return True
+    return False
 
 
 def matches_exclude_pattern(path: str, patterns: list[str]) -> bool:

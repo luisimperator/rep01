@@ -33,6 +33,7 @@ from rich.table import Table
 
 from .config import Config, EncoderPreference, TranscodeProfile, load_config, save_example_config
 from .database import ACTIVE_STATES, Database, Job, JobState, TERMINAL_STATES
+from .dispatcher import JobDispatcher
 from .dropbox_client import DropboxClient
 from .encoder_detect import (
     EncoderType,
@@ -40,6 +41,7 @@ from .encoder_detect import (
     get_encoder_info_string,
     select_best_encoder,
 )
+from .rate_limit import TokenBucket
 from .scanner import Scanner
 from .watchdog import HealthChecker, Watchdog
 from .workers import DownloadWorker, TranscodeWorker, UploadWorker
@@ -96,6 +98,8 @@ class Daemon:
         self.db: Database | None = None
         self.dropbox: DropboxClient | None = None
         self.scanner: Scanner | None = None
+        self.dispatcher: JobDispatcher | None = None
+        self.rate_limiter: TokenBucket | None = None
         self.stop_event = threading.Event()
         self.workers: list[threading.Thread] = []
         self._lock_fd: int | None = None
@@ -142,23 +146,41 @@ class Daemon:
         if recovered:
             logger.info(f"Recovered {recovered} interrupted jobs")
 
+        # Rate-limit Dropbox API calls so we don't get throttled at scale
+        self.rate_limiter = TokenBucket(
+            rate_per_min=self.config.dropbox_api.rate_per_min,
+            burst=self.config.dropbox_api.burst,
+            name="dropbox",
+        )
+
         # Dropbox client
-        self.dropbox = DropboxClient(self.config.dropbox_token)
+        self.dropbox = DropboxClient(
+            self.config.dropbox_token,
+            rate_limiter=self.rate_limiter,
+        )
         if not self.dropbox.check_connection():
             raise RuntimeError("Failed to connect to Dropbox")
 
         # Scanner
         self.scanner = Scanner(self.config, self.db, self.dropbox)
 
+        # Central job dispatcher feeds bounded queues consumed by workers
+        self.dispatcher = JobDispatcher(self.config, self.db, self.stop_event)
+
         # Select encoder
         encoder = select_best_encoder(self.config)
         logger.info(f"Using encoder: {encoder.value}")
 
     def start_workers(self) -> None:
-        """Start all worker threads."""
+        """Start the dispatcher and all worker threads."""
         assert self.db is not None
         assert self.dropbox is not None
         assert self.scanner is not None
+        assert self.dispatcher is not None
+
+        # Dispatcher must be running before workers try to consume
+        self.dispatcher.start()
+        self.workers.append(self.dispatcher)
 
         # Download workers
         for i in range(self.config.concurrency.download_workers):
@@ -169,6 +191,7 @@ class Daemon:
                 self.dropbox,
                 self.scanner,
                 self.stop_event,
+                self.dispatcher,
             )
             worker.start()
             self.workers.append(worker)
@@ -181,6 +204,7 @@ class Daemon:
                 self.config,
                 self.db,
                 self.stop_event,
+                self.dispatcher,
                 encoder=encoder,
             )
             worker.start()
@@ -194,6 +218,7 @@ class Daemon:
                 self.db,
                 self.dropbox,
                 self.stop_event,
+                self.dispatcher,
             )
             worker.start()
             self.workers.append(worker)
@@ -204,7 +229,7 @@ class Daemon:
         self.workers.append(watchdog)
 
         logger.info(
-            f"Started {len(self.workers)} workers: "
+            f"Started dispatcher + {len(self.workers) - 2} workers + watchdog: "
             f"{self.config.concurrency.download_workers} download, "
             f"{self.config.concurrency.transcode_workers} transcode, "
             f"{self.config.concurrency.upload_workers} upload"
@@ -509,9 +534,13 @@ def dry_run(ctx: click.Context, dropbox_path: str) -> None:
     console.print(f"[blue]Analyzing: {dropbox_path}[/blue]\n")
 
     # Check path patterns
+    layout = config.output_layout.value
+    mirror_root = config.output_mirror_root
     console.print("[cyan]Path Analysis:[/cyan]")
-    console.print(f"  Output path: {get_output_path(dropbox_path)}")
-    console.print(f"  In h265 folder: {is_in_h265_folder(dropbox_path)}")
+    console.print(
+        f"  Output path: {get_output_path(dropbox_path, layout, config.dropbox_root, mirror_root)}"
+    )
+    console.print(f"  In h265 folder: {is_in_h265_folder(dropbox_path, mirror_root)}")
 
     # Check Dropbox
     if config.dropbox_token:
@@ -532,7 +561,9 @@ def dry_run(ctx: click.Context, dropbox_path: str) -> None:
                 console.print(f"\n[green]Size OK (>= {config.min_size_gb} GB)[/green]")
 
             # Output exists?
-            output_path = get_output_path(dropbox_path)
+            output_path = get_output_path(
+                dropbox_path, layout, config.dropbox_root, mirror_root
+            )
             if dropbox.file_exists(output_path):
                 console.print(f"[yellow]Output already exists: {output_path}[/yellow]")
         else:
