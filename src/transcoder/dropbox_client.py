@@ -71,6 +71,24 @@ class DropboxRevChangedError(DropboxClientError):
     pass
 
 
+def _is_path_not_found(api_error) -> bool:
+    """True iff the Dropbox ApiError represents a path-not-found in
+    *whichever* operation-specific Error union it carries. Defensive
+    against `is_not_found` not existing on the concrete error type
+    (e.g. WriteError on uploads has no such method)."""
+    try:
+        if not hasattr(api_error, "error"):
+            return False
+        err = api_error.error
+        if not getattr(err, "is_path", lambda: False)():
+            return False
+        path_err = err.get_path()
+        is_nf = getattr(path_err, "is_not_found", None)
+        return bool(is_nf() if callable(is_nf) else False)
+    except Exception:
+        return False
+
+
 def make_client_from_config(config, rate_limiter: TokenBucket | None = None) -> "DropboxClient":
     """
     Build a DropboxClient from a Config object, picking the right auth mode.
@@ -222,7 +240,15 @@ class DropboxClient:
             except AuthError as e:
                 raise DropboxAuthError(f"Authentication failed: {e}") from e
             except ApiError as e:
-                if e.error.is_path() and e.error.get_path().is_not_found():
+                # `is_path()` exists on most operation-specific Errors, but
+                # what `get_path()` returns differs by op:
+                #   - ListFolderError.path -> LookupError (.is_not_found())
+                #   - UploadError.path     -> UploadWriteFailed.reason ->
+                #                             WriteError (NO .is_not_found())
+                #   - GetMetadataError.path -> LookupError (.is_not_found())
+                # Be tolerant: only flag DropboxNotFoundError when the
+                # returned error union actually exposes is_not_found().
+                if _is_path_not_found(e):
                     raise DropboxNotFoundError(f"Path not found: {e}") from e
 
                 last_error = e
@@ -408,7 +434,7 @@ class DropboxClient:
             metadata = self._dbx.files_get_metadata(norm_path)
             return isinstance(metadata, FolderMetadata)
         except ApiError as e:
-            if e.error.is_path() and e.error.get_path().is_not_found():
+            if _is_path_not_found(e):
                 return False
             raise
 

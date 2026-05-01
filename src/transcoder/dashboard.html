@@ -518,6 +518,20 @@ async function renderSettings() {
       <span class="hint">Daemon restart needed after change.</span>
     </div>
     <div class="field">
+      <label for="set-tw">${lbl('transcode_workers', 'Parallel transcodes')}</label>
+      <select id="set-tw">
+        ${[1,2,3,4].map(v => `<option value="${v}" ${v === s.transcode_workers ? 'selected' : ''}>${v}</option>`).join('')}
+      </select>
+      <span class="hint">1 = max QSV speed. Higher splits the encoder (slower per job).</span>
+    </div>
+    <div class="field">
+      <label for="set-dw">${lbl('download_workers', 'Parallel downloads')}</label>
+      <select id="set-dw">
+        ${[1,2,3,4].map(v => `<option value="${v}" ${v === s.download_workers ? 'selected' : ''}>${v}</option>`).join('')}
+      </select>
+      <span class="hint">Daemon restart needed after change.</span>
+    </div>
+    <div class="field">
       <label>Encoder · Profile</label>
       <span class="hint">${escapeHtml(ctx.encoder_preference || '')} · ${escapeHtml(ctx.profile || '')} (edit in config.yaml + restart)</span>
     </div>
@@ -542,6 +556,8 @@ async function saveSettings() {
     legacy_reorganize_min_age_days: parseInt(document.getElementById('set-age').value),
     health_check_interval_minutes: parseInt(document.getElementById('set-health').value),
     api_bind: document.getElementById('set-bind').value,
+    transcode_workers: parseInt(document.getElementById('set-tw').value),
+    download_workers: parseInt(document.getElementById('set-dw').value),
   };
   try {
     const r = await fetchJSON('/api/settings', {

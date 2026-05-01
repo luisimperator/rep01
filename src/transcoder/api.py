@@ -538,6 +538,20 @@ _SETTINGS_KNOBS: dict[str, dict] = {
         "yaml_key": "api.bind",
         "label": "Dashboard access (127.0.0.1 = local only, 0.0.0.0 = LAN)",
     },
+    "transcode_workers": {
+        "type": "int",
+        "min": 1,
+        "max": 8,
+        "yaml_key": "concurrency.transcode_workers",
+        "label": "Parallel transcodes (1 = max QSV speed; >1 splits the encoder)",
+    },
+    "download_workers": {
+        "type": "int",
+        "min": 1,
+        "max": 8,
+        "yaml_key": "concurrency.download_workers",
+        "label": "Parallel downloads from Dropbox",
+    },
 }
 
 
@@ -552,6 +566,8 @@ def _settings_payload(api: ApiServer) -> dict:
             "dropbox_root": cfg.dropbox_root,
             "health_check_interval_minutes": cfg.incidents.health_check_interval_minutes,
             "api_bind": cfg.api.bind,
+            "transcode_workers": cfg.concurrency.transcode_workers,
+            "download_workers": cfg.concurrency.download_workers,
             "cq_value": cfg.cq_value,
             "min_size_gb": cfg.min_size_gb,
         },
