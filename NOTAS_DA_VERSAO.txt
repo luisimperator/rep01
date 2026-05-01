@@ -2,6 +2,51 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.2
+Data: 01/05/2026
+--------------------------------------------------------------------------------
+
+VISIBILIDADE EM TEMPO REAL NO DASHBOARD
+
+  [NOVO] Cards "Workers — live"
+  -----------------------------
+  Pra cada worker rodando, um card no painel mostra ao vivo:
+    - Stage (DOWNLOAD / TRANSCODE / UPLOAD), código colorido
+    - Nome do arquivo + caminho completo
+    - Barra de progresso com porcentagem
+    - Velocidade real:
+        download/upload: MB/s, bytes baixados / total
+        transcode:       fps, speed (ex: 2.5x), bitrate, tempo de vídeo
+                         encodado / duração total
+    - ETA até terminar
+    - Tempo decorrido
+
+  Atualiza a cada 3 segundos. Se nada está acontecendo, mostra "No active
+  jobs right now."
+
+  [NOVO] Card "Scanner"
+  ---------------------
+  Quando o scanner está rodando, mostra:
+    - Modo: BULK (1ª passada) ou DELTA (incremental)
+    - Caminho exato que ele está varrendo agora no Dropbox
+    - Quantos itens já viu
+    - Há quanto tempo está rodando
+  Quando para, mostra "Scanner idle".
+
+  [NOVO] Painel "Activity log"
+  ----------------------------
+  Últimas 200 linhas do log do daemon, ao vivo, na parte de baixo do
+  dashboard. Erros aparecem em vermelho, avisos em laranja. Auto-scroll
+  acompanha enquanto novas linhas chegam, mas você pode rolar pra cima
+  pra ler sem ele "puxar" de volta.
+
+  [API] Novos endpoints
+  ---------------------
+    GET /api/active   - workers + scanner ao vivo (JSON)
+    GET /api/log?lines=200 - tail do log do daemon (JSON)
+
+================================================================================
+
 Versão: 6.0.1
 Data: 01/05/2026
 --------------------------------------------------------------------------------

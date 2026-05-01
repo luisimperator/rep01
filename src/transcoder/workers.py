@@ -27,6 +27,7 @@ from .encoder_detect import EncoderType, select_best_encoder
 from .ffmpeg_builder import FFmpegCommand, FFmpegCommandBuilder
 from .prober import ProbeError, ProbeResult, probe_video, validate_output
 from .scanner import Scanner
+from .progress import REGISTRY
 from .utils import format_bytes, format_duration, get_staging_paths, parse_ffmpeg_progress
 
 if TYPE_CHECKING:
@@ -86,6 +87,7 @@ class BaseWorker(threading.Thread):
                 time.sleep(1)
             finally:
                 self._current_job = None
+                REGISTRY.end(self.name)
                 self.dispatcher.mark_done(job.id)
 
         logger.info(f"Worker {self.name} stopped")
@@ -123,6 +125,10 @@ class DownloadWorker(BaseWorker):
     def process_job(self, job: Job) -> None:
         """Download the file for the given job."""
         logger.info(f"[{self.name}] Downloading: {job.dropbox_path}")
+        REGISTRY.begin(
+            self.name, "download", job.id, job.dropbox_path,
+            bytes_total=int(job.dropbox_size or 0),
+        )
 
         # Block until staging has room. On stop_event, bail cleanly and let the
         # dispatcher re-enqueue the job on next refill (state is still NEW).
@@ -215,6 +221,8 @@ class DownloadWorker(BaseWorker):
             if self.should_stop():
                 raise WorkerStop("Worker stopping")
 
+            REGISTRY.update(self.name, bytes_done=downloaded, bytes_total=total)
+
             now = time.time()
             if now - last_log[0] > 30:  # Log every 30s
                 pct = (downloaded / total * 100) if total else 0
@@ -274,6 +282,7 @@ class TranscodeWorker(BaseWorker):
     def process_job(self, job: Job) -> None:
         """Transcode the file for the given job."""
         logger.info(f"[{self.name}] Transcoding: {job.dropbox_path}")
+        REGISTRY.begin(self.name, "transcode", job.id, job.dropbox_path)
 
         try:
             self._transcode_job(job)
@@ -435,6 +444,14 @@ class TranscodeWorker(BaseWorker):
                     # Parse progress
                     progress = parse_ffmpeg_progress(line)
                     if progress and 'time_sec' in progress:
+                        REGISTRY.update(
+                            self.name,
+                            time_sec=progress.get('time_sec', 0.0),
+                            duration_sec=cmd.expected_duration_sec or 0.0,
+                            fps=progress.get('fps', 0.0),
+                            speed=progress.get('speed', 0.0),
+                            bitrate_kbps=progress.get('bitrate_kbps', 0.0),
+                        )
                         now = time.time()
                         if now - last_progress > 30:  # Log every 30s
                             pct = (progress['time_sec'] / cmd.expected_duration_sec * 100
@@ -531,6 +548,16 @@ class UploadWorker(BaseWorker):
     def process_job(self, job: Job) -> None:
         """Upload the transcoded file for the given job."""
         logger.info(f"[{self.name}] Uploading: {job.output_path}")
+        upload_size = 0
+        if job.local_output_path:
+            try:
+                upload_size = Path(job.local_output_path).stat().st_size
+            except OSError:
+                upload_size = 0
+        REGISTRY.begin(
+            self.name, "upload", job.id, job.output_path or job.dropbox_path,
+            bytes_total=upload_size,
+        )
 
         try:
             self._upload_job(job)
@@ -584,6 +611,8 @@ class UploadWorker(BaseWorker):
         def callback(uploaded: int, total: int) -> None:
             if self.should_stop():
                 raise WorkerStop("Worker stopping")
+
+            REGISTRY.update(self.name, bytes_done=uploaded, bytes_total=total)
 
             now = time.time()
             if now - last_log[0] > 30:

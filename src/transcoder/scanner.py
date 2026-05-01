@@ -92,6 +92,9 @@ class Scanner:
             state.entries_seen,
         )
 
+        from .progress import REGISTRY as _REGISTRY
+        mode_label = "bulk" if not state.bulk_pass_complete else "delta"
+        _REGISTRY.scan_begin(mode_label)
         try:
             if not state.bulk_pass_complete:
                 stats['mode'] = 1  # 1 = bulk, 0 = delta (kept as int for table printing)
@@ -101,6 +104,8 @@ class Scanner:
                 self._run_delta(state, stats, dry_run)
         except _StopScan:
             logger.info("scan: stop_event signalled, exiting early")
+        finally:
+            _REGISTRY.scan_end()
 
         logger.info(
             "scan complete: scanned=%d new=%d waiting=%d skipped_h265_log=%d youtube=%d",
@@ -189,6 +194,12 @@ class Scanner:
             entries_since_checkpoint += 1
             self._handle_file(file_info, stats, dry_run, stability_cfg)
 
+            from .progress import REGISTRY as _REGISTRY
+            _REGISTRY.scan_update(
+                current_path=file_info.path,
+                entries_seen=entries_seen,
+            )
+
             if entries_since_checkpoint >= checkpoint_every:
                 # Cursor hasn't updated yet in mid-page iteration, but we bump
                 # entries_seen so a crash+restart preserves progress visibility.
@@ -241,6 +252,12 @@ class Scanner:
 
             entries_seen += 1
             self._handle_file(file_info, stats, dry_run, stability_cfg)
+
+            from .progress import REGISTRY as _REGISTRY
+            _REGISTRY.scan_update(
+                current_path=file_info.path,
+                entries_seen=entries_seen,
+            )
 
         self.db.mark_delta_pass()
 

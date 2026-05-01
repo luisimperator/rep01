@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 from .database import Database, JobState
+from .progress import REGISTRY as ACTIVITY
 from .updater import read_status as read_update_status
 
 if TYPE_CHECKING:
@@ -60,6 +61,24 @@ DASHBOARD_HTML = """<!doctype html>
            padding: .4em .9em; cursor: pointer; font: inherit; margin-right: .4em; }
   button:hover { background: #444; }
   .banner { background: #332a1a; border: 1px solid #8a6a2a; color: #fda; padding: .7em 1em; border-radius: 6px; margin-bottom: 1em; }
+  .worker { background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 6px; padding: .8em 1em; margin-bottom: .6em; }
+  .worker-head { display: flex; justify-content: space-between; gap: 1em; margin-bottom: .3em; }
+  .worker-head .name { color: #aaa; font-size: .85em; text-transform: uppercase; letter-spacing: .03em; }
+  .worker-head .stage { font-size: .85em; padding: 1px 8px; border-radius: 10px; }
+  .stage-download { background: #1a3a52; color: #9cf; }
+  .stage-transcode { background: #4a2a52; color: #d9f; }
+  .stage-upload { background: #1a523a; color: #9fc; }
+  .worker .path { word-break: break-all; font-size: .9em; color: #ccc; margin-bottom: .4em; }
+  .worker .meta { color: #888; font-size: .82em; }
+  .bar { background: #2a2a2a; border-radius: 4px; height: 8px; overflow: hidden; margin: .3em 0; }
+  .bar > span { display: block; height: 100%; background: linear-gradient(90deg, #4a8 0%, #7c8 100%); }
+  .scan-card { background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 6px; padding: .8em 1em; margin-bottom: 1em; }
+  .scan-card .path { color: #ccc; font-size: .9em; word-break: break-all; }
+  .empty { color: #666; padding: .6em 0; font-style: italic; }
+  pre.log { background: #0c0c0c; border: 1px solid #2a2a2a; border-radius: 6px;
+            padding: .7em 1em; font: 12px/1.4 ui-monospace, Consolas, monospace;
+            color: #cfc; max-height: 320px; overflow-y: scroll; margin: 0; white-space: pre-wrap; }
+  pre.log .err { color: #f99; } pre.log .warn { color: #fc7; }
 </style>
 </head>
 <body>
@@ -75,6 +94,12 @@ DASHBOARD_HTML = """<!doctype html>
   <button onclick="post('/api/retry-failed')">Retry FAILED</button>
 </div>
 
+<h2>Scanner</h2>
+<div id="scan-card" class="scan-card"></div>
+
+<h2>Workers — live</h2>
+<div id="workers"></div>
+
 <h2>Jobs by state</h2>
 <table id="state-table"><thead><tr><th>State</th><th>Count</th></tr></thead><tbody></tbody></table>
 
@@ -84,6 +109,9 @@ DASHBOARD_HTML = """<!doctype html>
   <tbody></tbody>
 </table>
 
+<h2>Activity log <span style="color:#666;font-weight:normal;font-size:.85em">(last 200 lines, auto-refresh)</span></h2>
+<pre id="log" class="log"></pre>
+
 <script>
 function fmtBytes(n) {
   if (!n) return '0 B';
@@ -91,11 +119,94 @@ function fmtBytes(n) {
   while (n >= 1024 && i < u.length-1) { n /= 1024; i++; }
   return n.toFixed(2) + ' ' + u[i];
 }
+function fmtDuration(sec) {
+  if (sec == null || isNaN(sec)) return '—';
+  sec = Math.max(0, Math.floor(sec));
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60), s = sec % 60;
+  if (m < 60) return m + 'm ' + s + 's';
+  const h = Math.floor(m / 60), mm = m % 60;
+  if (h < 24) return h + 'h ' + mm + 'm';
+  const d = Math.floor(h / 24), hh = h % 24;
+  return d + 'd ' + hh + 'h';
+}
+function basename(p) { if (!p) return ''; const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i+1) : p; }
 function card(k, v, cls='') { return `<div class="card"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`; }
+
+function renderScan(scan) {
+  const el = document.getElementById('scan-card');
+  if (!scan || scan.mode === 'idle' || !scan.mode) {
+    el.innerHTML = `<div class="empty">Scanner idle (next pass scheduled).</div>`;
+    return;
+  }
+  const cls = scan.mode === 'bulk' ? 'warn' : 'ok';
+  el.innerHTML = `
+    <div class="worker-head">
+      <span class="name">Scanner</span>
+      <span class="stage stage-download ${cls}">${scan.mode.toUpperCase()}</span>
+    </div>
+    <div class="path">${scan.current_path || '—'}</div>
+    <div class="meta">${scan.entries_seen.toLocaleString()} entries seen · running for ${fmtDuration(scan.elapsed_sec)}</div>
+  `;
+}
+
+function renderWorkers(active) {
+  const el = document.getElementById('workers');
+  const ws = (active && active.workers) || [];
+  if (ws.length === 0) {
+    el.innerHTML = `<div class="empty">No active jobs right now.</div>`;
+    return;
+  }
+  el.innerHTML = ws.sort((a,b) => a.worker.localeCompare(b.worker)).map(w => {
+    const pct = (w.percent || 0).toFixed(1);
+    let meta = '';
+    if (w.stage === 'transcode') {
+      meta = `${fmtDuration(w.time_sec)} / ${fmtDuration(w.duration_sec)} · ${w.fps.toFixed(1)} fps · ${w.speed.toFixed(2)}x`;
+      if (w.bitrate_kbps) meta += ` · ${(w.bitrate_kbps/1024).toFixed(1)} Mb/s`;
+    } else {
+      meta = `${fmtBytes(w.bytes_done)} / ${fmtBytes(w.bytes_total)}`;
+      if (w.elapsed_sec > 0 && w.bytes_done > 0) {
+        const rate = w.bytes_done / w.elapsed_sec;
+        meta += ` · ${fmtBytes(rate)}/s`;
+      }
+    }
+    if (w.eta_sec != null) meta += ` · ETA ${fmtDuration(w.eta_sec)}`;
+    meta += ` · elapsed ${fmtDuration(w.elapsed_sec)}`;
+    return `
+      <div class="worker">
+        <div class="worker-head">
+          <span class="name">${w.worker} · job #${w.job_id}</span>
+          <span class="stage stage-${w.stage}">${w.stage.toUpperCase()} ${pct}%</span>
+        </div>
+        <div class="path">${basename(w.path)} <span style="color:#666">${w.path.replace(basename(w.path),'').replace(/\\/$/,'')}</span></div>
+        <div class="bar"><span style="width:${pct}%"></span></div>
+        <div class="meta">${meta}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderLog(payload) {
+  const el = document.getElementById('log');
+  const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  const lines = (payload && payload.lines) || [];
+  el.innerHTML = lines.map(ln => {
+    const safe = ln.replace(/[<&>]/g, c => ({'<':'&lt;','&':'&amp;','>':'&gt;'})[c]);
+    if (/\bERROR\b/.test(ln)) return `<span class="err">${safe}</span>`;
+    if (/\bWARNING\b/.test(ln)) return `<span class="warn">${safe}</span>`;
+    return safe;
+  }).join('\n');
+  if (wasAtBottom) el.scrollTop = el.scrollHeight;
+}
+
 async function tick() {
   try {
-    const s = await fetch('/api/status').then(r => r.json());
-    const j = await fetch('/api/jobs?limit=20').then(r => r.json());
+    const [s, j, a, lg] = await Promise.all([
+      fetch('/api/status').then(r => r.json()),
+      fetch('/api/jobs?limit=20').then(r => r.json()),
+      fetch('/api/active').then(r => r.json()),
+      fetch('/api/log?lines=200').then(r => r.json()),
+    ]);
 
     document.getElementById('banner').innerHTML = s.update.update_available
       ? `<div class="banner">Update available: <b>${s.update.latest_tag}</b> (installed ${s.update.current_version}). Run <code>hd update</code> to apply.</div>`
@@ -128,6 +239,10 @@ async function tick() {
       `<tr><td>${r.id}</td><td>${r.state}</td><td>${r.dropbox_path}</td>
            <td>${fmtBytes(r.dropbox_size)}</td><td>${r.retry_count}</td></tr>`
     ).join('');
+
+    renderScan(a.scanner);
+    renderWorkers(a);
+    renderLog(lg);
   } catch (e) {
     document.getElementById('banner').innerHTML =
       `<div class="banner">Daemon unreachable: ${e}</div>`;
@@ -219,6 +334,10 @@ def _build_handler(api: ApiServer):
                 return self._send_json(_jobs_payload(api, qs))
             if route == "/api/metrics":
                 return self._send_json(_metrics_payload(api))
+            if route == "/api/active":
+                return self._send_json(_active_payload(api))
+            if route == "/api/log":
+                return self._send_json(_log_payload(api, qs))
             if route == "/healthz":
                 return self._send_text("ok")
             self.send_error(404, "not found")
@@ -388,6 +507,41 @@ def _disk_snapshot(api: ApiServer) -> dict:
         "min_free_bytes": api.config.disk_budget.min_free_bytes,
         "free_bytes": usage.free if usage else 0,
         "total_bytes": usage.total if usage else 0,
+    }
+
+
+def _active_payload(api: ApiServer) -> dict:
+    """Live snapshot of every worker's current job + the scanner walk position."""
+    return {
+        "ok": True,
+        "workers": ACTIVITY.workers_snapshot(),
+        "scanner": ACTIVITY.scan_snapshot(),
+    }
+
+
+def _log_payload(api: ApiServer, qs: dict[str, list[str]]) -> dict:
+    """Tail of the daemon log file. Capped at 2000 lines to keep payloads small."""
+    try:
+        n = max(1, min(2000, int((qs.get("lines") or ["200"])[0])))
+    except ValueError:
+        n = 200
+
+    log_file = Path(api.config.log_dir) / "transcoder.log"
+    lines: list[str] = []
+    if log_file.exists():
+        try:
+            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
+                # Read the whole file — modest size given daily rotation in
+                # practice; cheap enough for a 3s polling dashboard.
+                lines = f.readlines()[-n:]
+        except OSError as e:
+            return {"ok": False, "error": str(e), "lines": []}
+
+    return {
+        "ok": True,
+        "log_file": str(log_file),
+        "lines": [ln.rstrip("\n") for ln in lines],
+        "count": len(lines),
     }
 
 
