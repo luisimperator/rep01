@@ -583,22 +583,119 @@ class UploadWorker(BaseWorker):
         output_dir = str(Path(job.output_path).parent)
         self.dropbox.create_folder(output_dir)
 
-        # Upload
+        # Upload to /<parent>/h265/<name>.MP4 — the temporary location
+        # before the optional reorganization swap.
+        local_size = output_path.stat().st_size
         self.dropbox.upload_file(
             output_path,
             job.output_path,
             overwrite=True,
-            progress_callback=self._make_progress_callback(job, output_path.stat().st_size),
+            progress_callback=self._make_progress_callback(job, local_size),
         )
 
-        # Mark done
-        self.db.update_job_state(job.id, JobState.DONE)
-
         logger.info(f"[{self.name}] Upload complete: {job.output_path}")
+
+        final_path = job.output_path
+        if self.config.legacy_reorganize:
+            try:
+                final_path = self._legacy_reorganize(job, local_size)
+            except Exception as reorg_err:
+                # Surface the failure but keep the upload state — the H.265
+                # file is sitting at /<parent>/h265/<name> and reachable.
+                logger.error(
+                    f"[{self.name}] Reorganization failed for job {job.id} "
+                    f"({job.dropbox_path}): {reorg_err}. "
+                    f"H.265 left at {job.output_path}; original untouched."
+                )
+
+        # Mark done. Persist the *final* output path (post-reorg if it ran).
+        self.db.update_job_state(
+            job.id,
+            JobState.DONE,
+            output_path=final_path,
+        )
 
         # Clean up staging if configured
         if self.config.delete_staging_after_upload:
             self._cleanup_staging(job)
+
+    def _legacy_reorganize(self, job: Job, h265_size: int) -> str:
+        """
+        Replicate the legacy GUI's post-upload reorganization in Dropbox:
+          1. Ensure /<parent>/h264/ exists.
+          2. Move the original H.264 to /<parent>/h264/<name>.
+          3. Move the H.265 from /<parent>/h265/<name> to /<parent>/<name>,
+             so the H.265 takes the original's place.
+          4. Append a line to /<parent>/h265/h265 feito.txt in the format
+             produced by the legacy GUI (timestamp | name | sizes).
+
+        Returns the final Dropbox path of the H.265 file.
+        On step 3 failure, rolls back step 2 to keep the original reachable
+        at its canonical path.
+        """
+        from datetime import datetime
+        from pathlib import PurePosixPath
+
+        original = job.dropbox_path
+        h265_temp = job.output_path
+        original_p = PurePosixPath(original)
+        parent = str(original_p.parent)
+        name = original_p.name
+        h264_dir = parent.rstrip('/') + '/h264'
+        h264_backup = h264_dir + '/' + name
+        feito_path = parent.rstrip('/') + '/h265/h265 feito.txt'
+
+        logger.info(f"[{self.name}] Reorganize: backing original up to {h264_backup}")
+        self.dropbox.create_folder(h264_dir)
+        self.dropbox.move_file(original, h264_backup, allow_overwrite=True)
+
+        try:
+            logger.info(f"[{self.name}] Reorganize: swapping H.265 into {original}")
+            self.dropbox.move_file(h265_temp, original, allow_overwrite=False)
+        except Exception:
+            # Swap failed mid-flight: put the original back where it was so
+            # the user's references aren't broken. Re-raise so the caller logs.
+            logger.warning(
+                f"[{self.name}] Reorganize: swap failed; rolling back backup "
+                f"from {h264_backup} to {original}"
+            )
+            try:
+                self.dropbox.move_file(h264_backup, original, allow_overwrite=False)
+            except Exception as rollback_err:
+                logger.error(
+                    f"[{self.name}] Reorganize: rollback also failed: {rollback_err}. "
+                    f"Original is at {h264_backup}; H.265 at {h265_temp}."
+                )
+            raise
+
+        # Append to h265 feito.txt with the legacy line format. We read the
+        # existing log (if any), append, and overwrite — Dropbox has no
+        # native append, but the file is small so this is cheap.
+        try:
+            input_size = int(job.dropbox_size or 0)
+            input_mb = input_size / (1024 ** 2)
+            output_mb = h265_size / (1024 ** 2)
+            reduction = (1 - h265_size / input_size) * 100 if input_size > 0 else 0.0
+            line = (
+                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
+                f"{name} | "
+                f"{input_mb:.1f}MB -> {output_mb:.1f}MB ({reduction:.1f}% menor)\n"
+            )
+            existing = self.dropbox.read_text_file(feito_path) or ""
+            if existing and not existing.endswith("\n"):
+                existing += "\n"
+            self.dropbox.write_text_file(feito_path, existing + line)
+        except Exception as log_err:
+            # The reorganization itself succeeded — the log is just a journal.
+            logger.warning(
+                f"[{self.name}] Could not append to {feito_path}: {log_err}"
+            )
+
+        logger.info(
+            f"[{self.name}] Reorganize complete: original at {h264_backup}, "
+            f"H.265 at {original}"
+        )
+        return original
 
     def _make_progress_callback(
         self,

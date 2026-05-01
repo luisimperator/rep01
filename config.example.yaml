@@ -99,8 +99,15 @@ exclude_patterns:
 - '*/h265/*'
 - '*/.h265/*'
 - '*/H265/*'
+- '*/h264/*'
+- '*/H264/*'
 upload_to_dropbox: true
 delete_staging_after_upload: true
+# legacy_reorganize: when true, after each successful upload the daemon moves
+# the original H.264 to <parent>/h264/<name> and moves the H.265 to <parent>/<name>
+# so the H.265 takes the original's place. Replicates the legacy GUI workflow.
+# Also appends to <parent>/h265/h265 feito.txt.
+legacy_reorganize: false
 allow_delete_original: false
 delete_original_delay_hours: 168
 allow_mkv_fallback: false

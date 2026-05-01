@@ -2,6 +2,64 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.3
+Data: 01/05/2026
+--------------------------------------------------------------------------------
+
+REORGANIZAÇÃO PÓS-UPLOAD (FLUXO LEGADO RESTAURADO)
+
+  [NOVO] Daemon reorganiza arquivos no Dropbox depois de cada conversão
+  --------------------------------------------------------------------
+  Quando você ativa "legacy_reorganize: true" no config.yaml, o daemon faz
+  o mesmo processo do GUI antigo logo depois de subir o H.265:
+
+    ANTES:                       DEPOIS:
+    /Pasta/                      /Pasta/
+      clip.MP4 (H.264)             clip.MP4    <- agora E H.265 (no lugar do original)
+                                   h264/
+      h265/  (vazio)                 clip.MP4  <- H.264 original preservado como backup
+                                   h265/
+                                     h265 feito.txt  <- log completo
+
+  O H.265 toma o lugar do original com o MESMO nome e MESMO caminho. Qualquer
+  link/projeto externo apontando pra /Pasta/clip.MP4 continua funcionando,
+  agora com o arquivo menor. O original H.264 fica preservado em /Pasta/h264/.
+
+  [LOG] h265 feito.txt agora e ESCRITO pelo daemon
+  ------------------------------------------------
+  Formato exato do GUI legado:
+    2024-03-15 14:32:01 | clip001.MP4 | 12345.6MB -> 5432.1MB (56.0% menor)
+  Cada conversao apenda uma linha. Escaneamentos seguintes leem este log e
+  pulam arquivos ja convertidos (cross-PC: outra maquina escaneando o mesmo
+  Dropbox respeita o registro).
+
+  [SCANNER] Pastas h264/ excluidas automaticamente
+  ------------------------------------------------
+  exclude_patterns padrao agora inclui */h264/* e */H264/*. Os backups H.264
+  nao entram em fila de transcodificacao quando o scanner re-passa.
+
+  [SEGURANCA] Rollback em caso de falha no swap
+  ----------------------------------------------
+  Se o passo 2 (mover H.265 pro lugar do original) falhar depois do passo 1
+  (mover original pra h264/), o daemon faz rollback automatico: devolve o
+  original pro caminho original. Voce nunca fica sem o arquivo no caminho
+  esperado.
+
+  [DEFAULT] Comecando desligado, igual o legado
+  ---------------------------------------------
+  legacy_reorganize: false e o padrao. Pra ligar, edita config.yaml:
+    legacy_reorganize: true
+  e reinicia o daemon. Apenas conversoes futuras seguem o fluxo legado;
+  conversoes ja feitas no v6.0.2 ficam onde estao (em /h265/).
+
+  [PENDENTE] Auto-delete da pasta h264/ apos N horas
+  ---------------------------------------------------
+  Por enquanto a pasta h264/ fica indefinidamente como backup. O processo
+  do legado de apagar a pasta h264/ apos 20 minutos (com retries) sera
+  implementado em v6.0.4 se voce pedir.
+
+================================================================================
+
 Versão: 6.0.2
 Data: 01/05/2026
 --------------------------------------------------------------------------------

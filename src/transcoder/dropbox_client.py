@@ -683,6 +683,50 @@ class DropboxClient:
 
         return self._retry_operation(operation, f"delete({path})")
 
+    def move_file(self, src: str, dst: str, allow_overwrite: bool = False) -> bool:
+        """
+        Move (rename) a file or folder inside Dropbox.
+
+        Args:
+            src: source path.
+            dst: destination path.
+            allow_overwrite: if True, deletes any existing file at `dst` first.
+                files_move_v2 has no autorename-overwrite combination, so we
+                fake it by deleting the destination beforehand. Use with care.
+
+        Returns:
+            True on success.
+        """
+        norm_src = self._normalize_path(src)
+        norm_dst = self._normalize_path(dst)
+
+        if allow_overwrite and self.file_exists(dst):
+            self.delete_file(dst)
+
+        def operation() -> bool:
+            self._dbx.files_move_v2(norm_src, norm_dst, autorename=False)
+            return True
+
+        return self._retry_operation(operation, f"move({src} -> {dst})")
+
+    def write_text_file(
+        self,
+        path: str,
+        content: str,
+        encoding: str = "utf-8",
+    ) -> bool:
+        """
+        Write a text file to Dropbox, overwriting any existing content.
+        """
+        norm_path = self._normalize_path(path)
+        data = content.encode(encoding)
+
+        def operation() -> bool:
+            self._dbx.files_upload(data, norm_path, mode=WriteMode("overwrite"))
+            return True
+
+        return self._retry_operation(operation, f"write_text({path})")
+
     def compute_content_hash(self, local_path: Path) -> str:
         """
         Compute Dropbox content hash for local file.
