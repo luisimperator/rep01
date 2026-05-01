@@ -238,6 +238,27 @@ class WatchdogSettings(BaseModel):
     )
 
 
+class IncidentsSettings(BaseModel):
+    """Auto-reporting of daemon errors as GitHub Issues."""
+    enabled: bool = Field(
+        default=False,
+        description="Open/update GitHub Issues automatically on transcode/scan errors."
+    )
+    github_repo: str = Field(
+        default="luisimperator/rep01",
+        description="Target repo, in 'owner/name' form."
+    )
+    github_token: str = Field(
+        default="",
+        description="GitHub PAT with issues:write. Use env GITHUB_TOKEN to keep out of yaml."
+    )
+    throttle_sec: int = Field(
+        default=600,
+        ge=10,
+        description="Identical errors within this window are coalesced into comments on the same issue."
+    )
+
+
 class Config(BaseModel):
     """Main configuration model."""
 
@@ -351,6 +372,7 @@ class Config(BaseModel):
 
     # Update-notification via GitHub Releases (notify-only; apply via `hd update`)
     updater: UpdaterSettings = Field(default_factory=UpdaterSettings)
+    incidents: IncidentsSettings = Field(default_factory=IncidentsSettings)
 
     # Dropbox API token-bucket rate limiter
     dropbox_api: DropboxApiSettings = Field(default_factory=DropboxApiSettings)

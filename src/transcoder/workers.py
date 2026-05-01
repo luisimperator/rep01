@@ -272,12 +272,15 @@ class TranscodeWorker(BaseWorker):
         dispatcher: JobDispatcher,
         encoder: EncoderType | None = None,
         disk_budget: DiskBudget | None = None,
+        incident_reporter=None,
     ):
         super().__init__(f"transcoder-{worker_id}", config, db, stop_event, dispatcher)
         self.encoder = encoder
         self.command_builder = FFmpegCommandBuilder(config)
         self._ffmpeg_process: subprocess.Popen | None = None
         self.disk_budget = disk_budget
+        self.incident_reporter = incident_reporter
+        self._last_ffmpeg_log: Path | None = None
 
     def process_job(self, job: Job) -> None:
         """Transcode the file for the given job."""
@@ -392,6 +395,30 @@ class TranscodeWorker(BaseWorker):
                 success = self._run_ffmpeg(cmd, job)
 
         if not success:
+            # File an auto-incident before raising so the operator (and any AI
+            # tailing the repo) sees the actual ffmpeg stderr without having
+            # to copy logs by hand.
+            if self.incident_reporter is not None:
+                tail = ""
+                if self._last_ffmpeg_log:
+                    tail = self._tail_ffmpeg_log(self._last_ffmpeg_log, lines=30)
+                self.incident_reporter.report(
+                    kind="transcode-fail",
+                    summary=f"{encoder.value} failed on {Path(job.dropbox_path).name} "
+                            f"({probe_result.video_info.codec_name} "
+                            f"{probe_result.video_info.width}x{probe_result.video_info.height})",
+                    log_tail=tail,
+                    context={
+                        "job_id": job.id,
+                        "dropbox_path": job.dropbox_path,
+                        "input_size": f"{(job.dropbox_size or 0)/(1024**3):.2f} GB",
+                        "input_codec": probe_result.video_info.codec_name,
+                        "input_resolution": f"{probe_result.video_info.width}x{probe_result.video_info.height}",
+                        "input_duration_sec": probe_result.video_info.duration_sec,
+                        "encoder_attempted": encoder.value,
+                        "worker": self.name,
+                    },
+                )
             raise ValueError("FFmpeg transcode failed")
 
         # Rename temp to final
@@ -441,6 +468,7 @@ class TranscodeWorker(BaseWorker):
         log_dir = self.config.log_dir / f"job_{job.id}"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "ffmpeg.log"
+        self._last_ffmpeg_log = log_file
 
         try:
             # On Windows the console code page (cp1252) will choke on any

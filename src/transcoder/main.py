@@ -107,6 +107,7 @@ class Daemon:
         self.rate_limiter: TokenBucket | None = None
         self.disk_budget: DiskBudget | None = None
         self.api_server: ApiServer | None = None
+        self.incident_reporter = None  # IncidentReporter | None, set in setup()
         self.stop_event = threading.Event()
         self.scan_trigger = threading.Event()
         self.started_at = time.time()
@@ -220,6 +221,23 @@ class Daemon:
                 timeout_sec=self.config.updater.check_timeout_sec,
             )
 
+        # Auto-incident reporter: opens GitHub Issues on transcode/scan
+        # failures so the operator (and any AI assistant tailing the repo)
+        # sees them without manual log copying. Disabled if no token.
+        from .incidents import IncidentReporter
+        from . import __version__
+        token = (self.config.incidents.github_token or "").strip() or os.environ.get("GITHUB_TOKEN", "")
+        if self.config.incidents.enabled and token:
+            self.incident_reporter = IncidentReporter(
+                repo=self.config.incidents.github_repo,
+                token=token,
+                throttle_sec=self.config.incidents.throttle_sec,
+                version=__version__,
+            )
+            logger.info(f"incident reporter: ON (repo={self.config.incidents.github_repo})")
+        else:
+            logger.info("incident reporter: OFF (set incidents.enabled + github_token to turn on)")
+
     def start_workers(self) -> None:
         """Start the dispatcher and all worker threads."""
         assert self.db is not None
@@ -271,6 +289,7 @@ class Daemon:
                 self.dispatcher,
                 encoder=encoder,
                 disk_budget=self.disk_budget,
+                incident_reporter=self.incident_reporter,
             )
             worker.start()
             self.workers.append(worker)
@@ -319,6 +338,16 @@ class Daemon:
                 logger.error(f"Scan error: {e}")
                 self.last_scan_error = str(e)
                 self.last_scan_error_at = time.time()
+                if self.incident_reporter is not None:
+                    self.incident_reporter.report(
+                        kind="scan-fail",
+                        summary=str(e),
+                        log_tail="",
+                        context={
+                            "dropbox_root": self.config.dropbox_root,
+                            "namespace": getattr(self.dropbox, "namespace", "unknown") if self.dropbox else "n/a",
+                        },
+                    )
 
             # Sleep until either stop or scan-now trigger fires
             self.scan_trigger.clear()
@@ -966,6 +995,94 @@ def reorganize_existing(
     if failed:
         console.print(f"[red]Failed: {failed}[/red]")
     console.print(f"[yellow]Deferred (active folders): {sum(len(c.pairs) for c in deferred)}[/yellow]")
+
+
+@cli.command('github-auth')
+@click.option('--repo', default=None, help='Target repo (owner/name). Default: incidents.github_repo from config.')
+@click.option('--token', default=None, help='GitHub PAT. If omitted, prompts for it.')
+@click.option('--enable/--no-enable', default=True, help='Set incidents.enabled at the same time.')
+@click.pass_context
+def github_auth(ctx, repo, token, enable):
+    """Configure auto-incident reporting to a GitHub repo.
+
+    Generate a Personal Access Token at https://github.com/settings/tokens
+    with the `repo` scope (or fine-grained: Issues read/write on the target
+    repo). Pass --token, set GITHUB_TOKEN env var, or be prompted.
+    """
+    import json
+    import re
+    import urllib.error
+    import urllib.request
+    from pathlib import Path
+
+    config_path_str = ctx.obj.get('config_path')
+    config = load_config(config_path_str)
+
+    if not token:
+        token = os.environ.get("GITHUB_TOKEN", "")
+    if not token:
+        token = click.prompt("Paste your GitHub PAT", hide_input=True).strip()
+    if not token:
+        console.print("[red]A token is required.[/red]")
+        sys.exit(1)
+
+    target_repo = (repo or config.incidents.github_repo or "").strip()
+    if not target_repo or "/" not in target_repo:
+        target_repo = click.prompt("Target repo (owner/name)", default="luisimperator/rep01").strip()
+
+    # Validate the token can read the repo + create issues
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{target_repo}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "User-Agent": "heavydrops-transcoder",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            console.print(f"[green]Token validated for {data.get('full_name')}[/green]")
+            if not data.get("permissions", {}).get("push", False):
+                console.print("[yellow]Note: push permission not detected on this token. Issue creation may still work if the repo allows public issues.[/yellow]")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")
+        console.print(f"[red]Token validation failed: HTTP {e.code} {e.reason}\n{body}[/red]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[red]Could not reach GitHub: {e}[/red]")
+        sys.exit(1)
+
+    # Persist to config.yaml using the same regex line-replacement pattern
+    # used elsewhere so the user's comments survive.
+    if config_path_str:
+        cfg_path = Path(config_path_str)
+    else:
+        cfg_path = Path("config.yaml")
+
+    raw = cfg_path.read_text(encoding="utf-8") if cfg_path.exists() else ""
+
+    def _set_block(text: str) -> str:
+        # Insert/replace an `incidents:` block. Simple approach: append a fresh
+        # block at the bottom and remove any prior one. Comments inside the
+        # block are not preserved but the rest of the file is.
+        text = re.sub(r'(?ms)^incidents:\s*\n(?: {2}.*\n)*', '', text)
+        if text and not text.endswith("\n"):
+            text += "\n"
+        block = (
+            "incidents:\n"
+            f"  enabled: {'true' if enable else 'false'}\n"
+            f"  github_repo: {target_repo}\n"
+            f"  github_token: \"{token}\"\n"
+            f"  throttle_sec: {config.incidents.throttle_sec}\n"
+        )
+        return text + block
+
+    cfg_path.write_text(_set_block(raw), encoding="utf-8")
+    console.print(f"[green]Saved incidents config to {cfg_path}.[/green]")
+    console.print("Restart the daemon to pick it up:")
+    console.print("  schtasks /End /TN HeavyDropsDaemon")
+    console.print("  schtasks /Run /TN HeavyDropsDaemon")
 
 
 @cli.command('show-encoders')
