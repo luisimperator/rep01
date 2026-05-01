@@ -134,6 +134,8 @@ class DropboxClient:
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.rate_limiter = rate_limiter
+        self.namespace = "home"          # "home" or "team"
+        self.namespace_id: str | None = None
 
         if refresh_token and app_key:
             kwargs = {
@@ -151,6 +153,39 @@ class DropboxClient:
                 "or dropbox_app_key + dropbox_refresh_token. "
                 "Run `hd auth` to set up a refresh token."
             )
+
+        # Auto-switch to the team-space root for Dropbox Business accounts so
+        # paths like /HeavyDrops/h265test (which live under the team folder
+        # tree) are reachable. Without this, the SDK uses the user's personal
+        # home namespace and team folders are invisible.
+        self._configure_namespace()
+
+    def _configure_namespace(self) -> None:
+        from dropbox import common
+        try:
+            account = self._dbx.users_get_current_account()
+        except Exception as e:
+            logger.warning(f"could not fetch dropbox account info: {e}")
+            return
+        root_info = getattr(account, "root_info", None)
+        if root_info is None:
+            return
+        home_ns = getattr(root_info, "home_namespace_id", None)
+        root_ns = getattr(root_info, "root_namespace_id", None)
+        if not home_ns or not root_ns:
+            return
+        if home_ns != root_ns:
+            # Team account: switch to the team's root namespace so the user's
+            # team folders show up at /. The SDK builds a fresh client wrapped
+            # with the Dropbox-API-Path-Root header.
+            self._dbx = self._dbx.with_path_root(common.PathRoot.root(root_ns))
+            self.namespace = "team"
+            self.namespace_id = root_ns
+            logger.info(f"dropbox: switched to team namespace ({root_ns})")
+        else:
+            self.namespace = "home"
+            self.namespace_id = home_ns
+            logger.info(f"dropbox: using personal namespace ({home_ns})")
 
     def _normalize_path(self, path: str) -> str:
         """Normalize Dropbox path: leading slash, no trailing slash, root → ''.

@@ -2,6 +2,34 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.8
+Data: 01/05/2026
+--------------------------------------------------------------------------------
+
+DROPBOX BUSINESS - TEAM SPACE AUTOMATICO
+
+  [BUGFIX CRITICO] Browse mostrava so pasta pessoal, nao team space
+  -----------------------------------------------------------------
+  ANTES: Pra contas Dropbox Business, a SDK conectava no namespace
+         pessoal do usuario por padrao. As pastas do team space
+         (que voce ve no Windows como "HeavyDrops Dropbox\HeavyDrops\...")
+         ficavam invisiveis. Resultado: scan dava "Path not found" e
+         o browse mostrava so suas pastas pessoais (Documentos, Filmes,
+         Fotos, etc), ocultando o team folder onde os videos estao.
+
+  AGORA: Na inicializacao, o cliente faz users_get_current_account(),
+         compara home_namespace_id com root_namespace_id, e se forem
+         diferentes (= conta Business com team space), troca via
+         with_path_root pra ver o team root. Logs do daemon agora dizem
+         "dropbox: switched to team namespace (NS_ID)" pra confirmar.
+
+  Browse: badge no titulo do modal mostra "TEAM SPACE" (verde) ou
+  "PERSONAL" (cinza) pra voce saber em qual lado esta navegando.
+
+  /api/status: campo scan.namespace = "team" | "home".
+
+================================================================================
+
 Versão: 6.0.7
 Data: 01/05/2026
 --------------------------------------------------------------------------------

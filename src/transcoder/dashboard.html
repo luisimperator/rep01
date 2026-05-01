@@ -663,6 +663,11 @@ async function loadBrowse(path) {
   browseCurrent = r.path;
   document.getElementById('browse-pathbar').textContent = r.path;
   let html = '';
+  if (r.namespace === 'team') {
+    document.querySelector('#browse-modal h3').innerHTML = 'Browse Dropbox <span style="font-size:.65em;color:var(--ok);background:rgba(103,217,156,.15);padding:2px 8px;border-radius:10px;margin-left:.5em;">TEAM SPACE</span>';
+  } else if (r.namespace === 'home') {
+    document.querySelector('#browse-modal h3').innerHTML = 'Browse Dropbox <span style="font-size:.65em;color:var(--muted);background:#2a2e36;padding:2px 8px;border-radius:10px;margin-left:.5em;">PERSONAL</span>';
+  }
   if (r.fallback) {
     html += `<div class="err-hint" style="margin: .6em">Path <code>${escapeHtml(r.missing)}</code> not found. Showing <code>${escapeHtml(r.path)}</code> instead — pick the right folder below.</div>`;
   }

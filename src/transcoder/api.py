@@ -245,6 +245,7 @@ def _status_payload(api: ApiServer) -> dict:
             "last_delta_at": scan_state.last_delta_at,
             "last_error": getattr(getattr(api, "daemon", None), "last_scan_error", None),
             "last_error_at": getattr(getattr(api, "daemon", None), "last_scan_error_at", None),
+            "namespace": getattr(getattr(getattr(api, "daemon", None), "dropbox", None), "namespace", None),
         },
         "dispatcher": {
             "paused": api.dispatcher.is_paused(),
@@ -726,7 +727,13 @@ def _dropbox_list_payload(api: ApiServer, qs: dict[str, list[str]]) -> dict:
 
     try:
         entries = _list(requested)
-        return {"ok": True, "path": requested, "entries": entries, "fallback": False}
+        return {
+            "ok": True,
+            "path": requested,
+            "entries": entries,
+            "fallback": False,
+            "namespace": dropbox.namespace,
+        }
     except DropboxNotFoundError:
         # Try the closest existing parent so the user sees neighbors and can
         # spot the right name.
@@ -743,6 +750,7 @@ def _dropbox_list_payload(api: ApiServer, qs: dict[str, list[str]]) -> dict:
                     "entries": entries,
                     "fallback": True,
                     "missing": requested,
+                    "namespace": dropbox.namespace,
                 }
             except DropboxNotFoundError:
                 continue
@@ -754,6 +762,7 @@ def _dropbox_list_payload(api: ApiServer, qs: dict[str, list[str]]) -> dict:
             "entries": entries,
             "fallback": True,
             "missing": requested,
+            "namespace": dropbox.namespace,
         }
     except Exception as e:
         return {"ok": False, "error": str(e), "path": requested}
