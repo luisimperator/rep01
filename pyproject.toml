@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "heavydrops-transcoder"
-version = "6.0.4"
+version = "6.0.5"
 description = "Minimal Dropbox H.264→H.265 transcoder. Daemon + dashboard."
 readme = "README.md"
 license = {text = "MIT"}
@@ -31,3 +31,7 @@ package-dir = {"" = "src"}
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+# Ship dashboard.html and any other resource files alongside the wheel.
+"transcoder" = ["*.html", "*.sql"]

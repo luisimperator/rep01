@@ -2,6 +2,85 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.5
+Data: 01/05/2026
+--------------------------------------------------------------------------------
+
+DASHBOARD CONSERTADO + CONTROLE DIRETO + ESTATISTICAS
+
+  [BUGFIX CRITICO] Dashboard ficava em branco
+  --------------------------------------------
+  ANTES: O HTML do dashboard estava embutido como string Python tripla.
+         O Python interpretou \\n e \\b dentro como escapes (newline e
+         backspace), corrompendo o JS servido. Browser dava
+         "Uncaught SyntaxError" e a pagina nao renderizava nada alem
+         do esqueleto e dos botoes.
+  AGORA: Dashboard mora em src/transcoder/dashboard.html como arquivo
+         separado, lido cru do disco. Sem mais escape issues.
+
+  [NOVO] Banner "AGORA" no topo
+  -----------------------------
+  Texto grande em portugues claro mostrando o que o daemon esta fazendo
+  neste segundo:
+    - "Transcodando clip001.MP4 — 47.3% (62.4 fps · 2.41x speed, ETA 4m)"
+    - "Scanning Dropbox (BULK) at /Videos/Casamento_2024/clip.MP4
+        12,345 entries seen · running for 14m"
+    - "Idle — waiting for next scan"
+    - "Daemon unreachable" se a conexao caiu
+
+  [NOVO] Cards "Today / All time"
+  -------------------------------
+  Hoje: jobs feitos, GB economizados, % medio de reducao
+  All-time: idem, totais
+
+  Pra isso o banco agora guarda o tamanho do H.265 em jobs.output_size
+  (migracao automatica idempotente; conversoes anteriores ficam sem dado
+  e sao ignoradas no calculo).
+
+  [NOVO] Painel "Settings" editavel direto no dashboard
+  -----------------------------------------------------
+  Sem mexer em config.yaml. Botao "Save" persiste no arquivo e atualiza
+  a config rodando — sem restart pra:
+    - CQ (qualidade do H.265, 14-36)
+    - Tamanho minimo (GB)
+    - Reorganize ON/OFF (toggle)
+    - Threshold de pasta ativa (always / 30 / 60 / 90 / 180 / 365 dias)
+  Encoder e profile continuam read-only por enquanto.
+
+  [NOVO] Painel "Reorganize" com botoes
+  -------------------------------------
+  Botao "Preview": sem mexer em nada, mostra a tabela das pastas
+  candidatas com pares + status (ready/defer N dias) + threshold atual.
+  Botao "Run all ready": confirma e executa em background. Barra de
+  progresso, contador done/failed/skipped, log das ultimas 50 linhas
+  ao vivo.
+
+  [NOVO] Botao "Restart daemon"
+  -----------------------------
+  os._exit(0) controlado, Task Scheduler religa em segundos. Painel
+  recarrega sozinho apos 12s.
+
+  [NOVO] Endpoints API
+  --------------------
+  GET  /api/stats               - savings hoje/semana/all-time
+  GET  /api/settings            - config atual + knobs editaveis
+  POST /api/settings            - salva no config.yaml + memoria
+  POST /api/reorganize/preview  - lista pares + ready/defer
+  POST /api/reorganize/run      - inicia sweep em background
+  GET  /api/reorganize/status   - polling do progresso
+  POST /api/restart             - exit + auto-restart via Task Scheduler
+
+  [ROBUSTEZ] tick() resiliente
+  ----------------------------
+  ANTES: Promise.all rejeitava o lote inteiro se UM endpoint falhasse,
+         e a pagina ficava completamente em branco.
+  AGORA: cada fetch e isolado (safeFetch retorna {_error}), endpoints
+         que falham mostram "—" no card mas o resto da UI continua
+         atualizando. Indicador de saude no canto superior esquerdo
+         (ponto verde online / vermelho offline).
+
+================================================================================
+
 Versão: 6.0.4
 Data: 01/05/2026
 --------------------------------------------------------------------------------

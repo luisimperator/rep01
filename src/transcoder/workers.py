@@ -608,11 +608,13 @@ class UploadWorker(BaseWorker):
                     f"H.265 left at {job.output_path}; original untouched."
                 )
 
-        # Mark done. Persist the *final* output path (post-reorg if it ran).
+        # Mark done. Persist the *final* output path (post-reorg if it ran)
+        # plus the actual H.265 byte count so /api/stats can report savings.
         self.db.update_job_state(
             job.id,
             JobState.DONE,
             output_path=final_path,
+            output_size=int(local_size),
         )
 
         # Clean up staging if configured

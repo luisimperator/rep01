@@ -29,6 +29,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
+from dataclasses import dataclass, field
+
 from .database import Database, JobState
 from .progress import REGISTRY as ACTIVITY
 from .updater import read_status as read_update_status
@@ -40,225 +42,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-DASHBOARD_HTML = """<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>HeavyDrops Transcoder</title>
-<style>
-  body { font: 14px/1.45 system-ui, sans-serif; margin: 2em; background: #111; color: #eee; }
-  h1 { margin: 0 0 .3em 0; }
-  h2 { margin: 1.2em 0 .3em 0; color: #aaa; font-weight: 500; font-size: 1em; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1em; margin-bottom: 1em; }
-  .card { background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 6px; padding: .8em 1em; }
-  .k { color: #888; font-size: .85em; text-transform: uppercase; letter-spacing: .03em; }
-  .v { font-size: 1.3em; margin-top: .15em; word-break: break-all; }
-  .ok { color: #8c8; } .warn { color: #ea8; } .err { color: #e66; }
-  table { width: 100%; border-collapse: collapse; margin-top: .4em; font-size: 13px; }
-  th, td { text-align: left; padding: 4px 8px; border-bottom: 1px solid #2a2a2a; }
-  th { color: #888; font-weight: 500; }
-  button { background: #333; color: #eee; border: 1px solid #444; border-radius: 4px;
-           padding: .4em .9em; cursor: pointer; font: inherit; margin-right: .4em; }
-  button:hover { background: #444; }
-  .banner { background: #332a1a; border: 1px solid #8a6a2a; color: #fda; padding: .7em 1em; border-radius: 6px; margin-bottom: 1em; }
-  .worker { background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 6px; padding: .8em 1em; margin-bottom: .6em; }
-  .worker-head { display: flex; justify-content: space-between; gap: 1em; margin-bottom: .3em; }
-  .worker-head .name { color: #aaa; font-size: .85em; text-transform: uppercase; letter-spacing: .03em; }
-  .worker-head .stage { font-size: .85em; padding: 1px 8px; border-radius: 10px; }
-  .stage-download { background: #1a3a52; color: #9cf; }
-  .stage-transcode { background: #4a2a52; color: #d9f; }
-  .stage-upload { background: #1a523a; color: #9fc; }
-  .worker .path { word-break: break-all; font-size: .9em; color: #ccc; margin-bottom: .4em; }
-  .worker .meta { color: #888; font-size: .82em; }
-  .bar { background: #2a2a2a; border-radius: 4px; height: 8px; overflow: hidden; margin: .3em 0; }
-  .bar > span { display: block; height: 100%; background: linear-gradient(90deg, #4a8 0%, #7c8 100%); }
-  .scan-card { background: #1c1c1c; border: 1px solid #2a2a2a; border-radius: 6px; padding: .8em 1em; margin-bottom: 1em; }
-  .scan-card .path { color: #ccc; font-size: .9em; word-break: break-all; }
-  .empty { color: #666; padding: .6em 0; font-style: italic; }
-  pre.log { background: #0c0c0c; border: 1px solid #2a2a2a; border-radius: 6px;
-            padding: .7em 1em; font: 12px/1.4 ui-monospace, Consolas, monospace;
-            color: #cfc; max-height: 320px; overflow-y: scroll; margin: 0; white-space: pre-wrap; }
-  pre.log .err { color: #f99; } pre.log .warn { color: #fc7; }
-</style>
-</head>
-<body>
-<h1>HeavyDrops Transcoder</h1>
-<div id="banner"></div>
-
-<div class="grid" id="status-grid"></div>
-
-<div>
-  <button onclick="post('/api/scan-now')">Scan now</button>
-  <button onclick="post('/api/pause')">Pause</button>
-  <button onclick="post('/api/resume')">Resume</button>
-  <button onclick="post('/api/retry-failed')">Retry FAILED</button>
-</div>
-
-<h2>Scanner</h2>
-<div id="scan-card" class="scan-card"></div>
-
-<h2>Workers — live</h2>
-<div id="workers"></div>
-
-<h2>Jobs by state</h2>
-<table id="state-table"><thead><tr><th>State</th><th>Count</th></tr></thead><tbody></tbody></table>
-
-<h2>Recent jobs</h2>
-<table id="jobs-table">
-  <thead><tr><th>ID</th><th>State</th><th>Path</th><th>Size</th><th>Retries</th></tr></thead>
-  <tbody></tbody>
-</table>
-
-<h2>Activity log <span style="color:#666;font-weight:normal;font-size:.85em">(last 200 lines, auto-refresh)</span></h2>
-<pre id="log" class="log"></pre>
-
-<script>
-function fmtBytes(n) {
-  if (!n) return '0 B';
-  const u = ['B','KB','MB','GB','TB','PB']; let i = 0;
-  while (n >= 1024 && i < u.length-1) { n /= 1024; i++; }
-  return n.toFixed(2) + ' ' + u[i];
-}
-function fmtDuration(sec) {
-  if (sec == null || isNaN(sec)) return '—';
-  sec = Math.max(0, Math.floor(sec));
-  if (sec < 60) return sec + 's';
-  const m = Math.floor(sec / 60), s = sec % 60;
-  if (m < 60) return m + 'm ' + s + 's';
-  const h = Math.floor(m / 60), mm = m % 60;
-  if (h < 24) return h + 'h ' + mm + 'm';
-  const d = Math.floor(h / 24), hh = h % 24;
-  return d + 'd ' + hh + 'h';
-}
-function basename(p) { if (!p) return ''; const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i+1) : p; }
-function card(k, v, cls='') { return `<div class="card"><div class="k">${k}</div><div class="v ${cls}">${v}</div></div>`; }
-
-function renderScan(scan) {
-  const el = document.getElementById('scan-card');
-  if (!scan || scan.mode === 'idle' || !scan.mode) {
-    el.innerHTML = `<div class="empty">Scanner idle (next pass scheduled).</div>`;
-    return;
-  }
-  const cls = scan.mode === 'bulk' ? 'warn' : 'ok';
-  el.innerHTML = `
-    <div class="worker-head">
-      <span class="name">Scanner</span>
-      <span class="stage stage-download ${cls}">${scan.mode.toUpperCase()}</span>
-    </div>
-    <div class="path">${scan.current_path || '—'}</div>
-    <div class="meta">${scan.entries_seen.toLocaleString()} entries seen · running for ${fmtDuration(scan.elapsed_sec)}</div>
-  `;
-}
-
-function renderWorkers(active) {
-  const el = document.getElementById('workers');
-  const ws = (active && active.workers) || [];
-  if (ws.length === 0) {
-    el.innerHTML = `<div class="empty">No active jobs right now.</div>`;
-    return;
-  }
-  el.innerHTML = ws.sort((a,b) => a.worker.localeCompare(b.worker)).map(w => {
-    const pct = (w.percent || 0).toFixed(1);
-    let meta = '';
-    if (w.stage === 'transcode') {
-      meta = `${fmtDuration(w.time_sec)} / ${fmtDuration(w.duration_sec)} · ${w.fps.toFixed(1)} fps · ${w.speed.toFixed(2)}x`;
-      if (w.bitrate_kbps) meta += ` · ${(w.bitrate_kbps/1024).toFixed(1)} Mb/s`;
-    } else {
-      meta = `${fmtBytes(w.bytes_done)} / ${fmtBytes(w.bytes_total)}`;
-      if (w.elapsed_sec > 0 && w.bytes_done > 0) {
-        const rate = w.bytes_done / w.elapsed_sec;
-        meta += ` · ${fmtBytes(rate)}/s`;
-      }
-    }
-    if (w.eta_sec != null) meta += ` · ETA ${fmtDuration(w.eta_sec)}`;
-    meta += ` · elapsed ${fmtDuration(w.elapsed_sec)}`;
-    return `
-      <div class="worker">
-        <div class="worker-head">
-          <span class="name">${w.worker} · job #${w.job_id}</span>
-          <span class="stage stage-${w.stage}">${w.stage.toUpperCase()} ${pct}%</span>
-        </div>
-        <div class="path">${basename(w.path)} <span style="color:#666">${w.path.replace(basename(w.path),'').replace(/\\/$/,'')}</span></div>
-        <div class="bar"><span style="width:${pct}%"></span></div>
-        <div class="meta">${meta}</div>
-      </div>
-    `;
-  }).join('');
-}
-
-function renderLog(payload) {
-  const el = document.getElementById('log');
-  const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
-  const lines = (payload && payload.lines) || [];
-  el.innerHTML = lines.map(ln => {
-    const safe = ln.replace(/[<&>]/g, c => ({'<':'&lt;','&':'&amp;','>':'&gt;'})[c]);
-    if (/\bERROR\b/.test(ln)) return `<span class="err">${safe}</span>`;
-    if (/\bWARNING\b/.test(ln)) return `<span class="warn">${safe}</span>`;
-    return safe;
-  }).join('\n');
-  if (wasAtBottom) el.scrollTop = el.scrollHeight;
-}
-
-async function tick() {
-  try {
-    const [s, j, a, lg] = await Promise.all([
-      fetch('/api/status').then(r => r.json()),
-      fetch('/api/jobs?limit=20').then(r => r.json()),
-      fetch('/api/active').then(r => r.json()),
-      fetch('/api/log?lines=200').then(r => r.json()),
-    ]);
-
-    document.getElementById('banner').innerHTML = s.update.update_available
-      ? `<div class="banner">Update available: <b>${s.update.latest_tag}</b> (installed ${s.update.current_version}). Run <code>hd update</code> to apply.</div>`
-      : '';
-
-    const g = document.getElementById('status-grid');
-    g.innerHTML = [
-      card('Version', s.update.current_version),
-      card('Uptime', s.uptime_human),
-      card('Scan mode', s.scan.mode, s.scan.mode === 'bulk' ? 'warn' : 'ok'),
-      card('Bulk complete', s.scan.bulk_pass_complete ? 'yes' : 'no', s.scan.bulk_pass_complete ? 'ok' : 'warn'),
-      card('Entries seen', s.scan.entries_seen.toLocaleString()),
-      card('Dispatcher', s.dispatcher.paused ? 'PAUSED' : 'running', s.dispatcher.paused ? 'warn' : 'ok'),
-      card('Queues (D/T/U)', `${s.dispatcher.download}/${s.dispatcher.transcode}/${s.dispatcher.upload}`),
-      card('Active jobs', s.dispatcher.active),
-      card('Disk reserved', fmtBytes(s.disk.reserved_bytes)),
-      card('Disk free', fmtBytes(s.disk.free_bytes)),
-      card('Jobs done', s.jobs.done.toLocaleString(), 'ok'),
-      card('Jobs failed', s.jobs.failed.toLocaleString(), s.jobs.failed ? 'err' : ''),
-    ].join('');
-
-    const st = document.querySelector('#state-table tbody');
-    st.innerHTML = Object.entries(s.jobs.state_counts)
-      .sort((a, b) => b[1] - a[1])
-      .map(([k, v]) => `<tr><td>${k}</td><td>${v.toLocaleString()}</td></tr>`)
-      .join('');
-
-    const jt = document.querySelector('#jobs-table tbody');
-    jt.innerHTML = j.jobs.map(r =>
-      `<tr><td>${r.id}</td><td>${r.state}</td><td>${r.dropbox_path}</td>
-           <td>${fmtBytes(r.dropbox_size)}</td><td>${r.retry_count}</td></tr>`
-    ).join('');
-
-    renderScan(a.scanner);
-    renderWorkers(a);
-    renderLog(lg);
-  } catch (e) {
-    document.getElementById('banner').innerHTML =
-      `<div class="banner">Daemon unreachable: ${e}</div>`;
-  }
-}
-async function post(path) {
-  try {
-    await fetch(path, { method: 'POST' });
-    tick();
-  } catch (e) { alert(e); }
-}
-tick();
-setInterval(tick, 3000);
-</script>
-</body></html>
-"""
+DASHBOARD_HTML = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
 
 
 class ApiServer:
@@ -279,6 +63,11 @@ class ApiServer:
         self.started_at_epoch = started_at_epoch
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
+        # Holds the most recent reorganize-existing run (preview or actual).
+        # Lifecycle: created lazily by /api/reorganize/run, polled by
+        # /api/reorganize/status until done.
+        self._reorganize_run: ReorganizeRun | None = None
+        self._reorganize_lock = threading.Lock()
 
     def start(self) -> None:
         if not self.config.api.enabled:
@@ -338,6 +127,12 @@ def _build_handler(api: ApiServer):
                 return self._send_json(_active_payload(api))
             if route == "/api/log":
                 return self._send_json(_log_payload(api, qs))
+            if route == "/api/stats":
+                return self._send_json(_stats_payload(api))
+            if route == "/api/settings":
+                return self._send_json(_settings_payload(api))
+            if route == "/api/reorganize/status":
+                return self._send_json(_reorganize_status_payload(api))
             if route == "/healthz":
                 return self._send_text("ok")
             self.send_error(404, "not found")
@@ -356,7 +151,37 @@ def _build_handler(api: ApiServer):
             if route == "/api/retry-failed":
                 count = api.db.reset_failed_jobs()
                 return self._send_json({"ok": True, "reset": count})
+            if route == "/api/settings":
+                body = self._read_json_body()
+                try:
+                    result = _apply_settings(api, body)
+                    return self._send_json({"ok": True, **result})
+                except ValueError as e:
+                    return self._send_json({"ok": False, "error": str(e)})
+            if route == "/api/reorganize/preview":
+                body = self._read_json_body() or {}
+                return self._send_json(_reorganize_preview(api, body))
+            if route == "/api/reorganize/run":
+                body = self._read_json_body() or {}
+                return self._send_json(_reorganize_run(api, body))
+            if route == "/api/restart":
+                # Schedule a graceful exit; the Task Scheduler will restart us.
+                threading.Timer(1.0, lambda: os._exit(0)).start()
+                return self._send_json({"ok": True, "restarting_in_sec": 1})
             self.send_error(404, "not found")
+
+        def _read_json_body(self) -> dict:
+            try:
+                length = int(self.headers.get("Content-Length") or "0")
+            except ValueError:
+                length = 0
+            if length <= 0:
+                return {}
+            raw = self.rfile.read(length)
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                return {}
 
         # -------- response helpers
         def _send_json(self, payload: dict) -> None:
@@ -543,6 +368,322 @@ def _log_payload(api: ApiServer, qs: dict[str, list[str]]) -> dict:
         "lines": [ln.rstrip("\n") for ln in lines],
         "count": len(lines),
     }
+
+
+def _stats_payload(api: ApiServer) -> dict:
+    """Today vs. all-time conversion savings, used by the dashboard's stats card."""
+    from datetime import datetime, timezone, timedelta
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    week_start = today_start - timedelta(days=7)
+    return {
+        "ok": True,
+        "today": api.db.get_savings_stats(since=today_start),
+        "week": api.db.get_savings_stats(since=week_start),
+        "all_time": api.db.get_savings_stats(since=None),
+        "as_of": now.isoformat(),
+    }
+
+
+# ----------------------------------------------------------------- settings
+
+# Settings exposed via /api/settings. Keep the surface small and well-typed —
+# every entry knows how to validate and how to write itself back to config.yaml.
+_SETTINGS_KNOBS: dict[str, dict] = {
+    "legacy_reorganize": {
+        "type": "bool",
+        "yaml_key": "legacy_reorganize",
+        "label": "Reorganize after upload (h264/ backup, h265 takes original spot)",
+    },
+    "legacy_reorganize_min_age_days": {
+        "type": "int",
+        "min": 0,
+        "max": 3650,
+        "yaml_key": "legacy_reorganize_min_age_days",
+        "label": "Skip reorganize for folders touched in the last N days",
+    },
+    "cq_value": {
+        "type": "int",
+        "min": 14,
+        "max": 36,
+        "yaml_key": "cq_value",
+        "label": "H.265 quality (lower = higher quality, larger files)",
+    },
+    "min_size_gb": {
+        "type": "float",
+        "min": 0.0,
+        "max": 1000.0,
+        "yaml_key": "min_size_gb",
+        "label": "Skip files smaller than N GB",
+    },
+}
+
+
+def _settings_payload(api: ApiServer) -> dict:
+    """Snapshot of every editable setting plus a few read-only context fields."""
+    cfg = api.config
+    return {
+        "ok": True,
+        "settings": {
+            "legacy_reorganize": cfg.legacy_reorganize,
+            "legacy_reorganize_min_age_days": cfg.legacy_reorganize_min_age_days,
+            "cq_value": cfg.cq_value,
+            "min_size_gb": cfg.min_size_gb,
+        },
+        "knobs": {k: {kk: vv for kk, vv in v.items() if kk != "yaml_key"} for k, v in _SETTINGS_KNOBS.items()},
+        "context": {
+            "encoder_preference": cfg.encoder_preference.value,
+            "profile": cfg.profile.value,
+            "dropbox_root": cfg.dropbox_root,
+            "ffmpeg_path": str(cfg.ffmpeg_path),
+            "config_path": _config_path_hint(api),
+        },
+    }
+
+
+def _config_path_hint(api: ApiServer) -> str | None:
+    """Best-effort guess at where config.yaml lives so /api/settings POST can
+    write back. We mirror the lookup in load_config."""
+    from pathlib import Path
+    candidates = [
+        Path("config.yaml"),
+        Path("config.yml"),
+        Path.home() / ".config" / "transcoder" / "config.yaml",
+        Path("/etc/transcoder/config.yaml"),
+    ]
+    for p in candidates:
+        if p.exists():
+            return str(p.resolve())
+    return None
+
+
+def _apply_settings(api: ApiServer, body: dict) -> dict:
+    """
+    Validate `body`, mutate the in-memory Config so changes take effect on
+    the next job (no restart needed for the knobs we expose), and persist
+    them to config.yaml so they survive restarts.
+
+    Returns {"updated": [...keys...], "config_path": "..."}.
+    """
+    import re
+    from pathlib import Path
+
+    cfg_path = _config_path_hint(api)
+    if cfg_path is None:
+        raise ValueError("config.yaml not found; cannot persist settings")
+
+    cfg = api.config
+    updated: list[str] = []
+
+    for key, raw in body.items():
+        knob = _SETTINGS_KNOBS.get(key)
+        if knob is None:
+            raise ValueError(f"unknown setting: {key}")
+        # Coerce + validate
+        if knob["type"] == "bool":
+            value = bool(raw)
+        elif knob["type"] == "int":
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be an integer")
+            if value < knob["min"] or value > knob["max"]:
+                raise ValueError(f"{key} must be between {knob['min']} and {knob['max']}")
+        elif knob["type"] == "float":
+            try:
+                value = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a number")
+            if value < knob["min"] or value > knob["max"]:
+                raise ValueError(f"{key} must be between {knob['min']} and {knob['max']}")
+        else:
+            raise ValueError(f"unsupported type for {key}")
+
+        # Mutate in-memory config (Pydantic model_validate would re-validate,
+        # but we already validated; setattr keeps it cheap).
+        setattr(cfg, key, value)
+        updated.append(key)
+
+    # Persist to config.yaml using regex line replacement so comments survive.
+    raw = Path(cfg_path).read_text(encoding="utf-8")
+    for key in updated:
+        knob = _SETTINGS_KNOBS[key]
+        yaml_key = knob["yaml_key"]
+        new_value = getattr(cfg, key)
+        if isinstance(new_value, bool):
+            yaml_val = "true" if new_value else "false"
+        else:
+            yaml_val = str(new_value)
+        pattern = re.compile(rf'^{re.escape(yaml_key)}\s*:.*$', re.MULTILINE)
+        line = f"{yaml_key}: {yaml_val}"
+        if pattern.search(raw):
+            raw = pattern.sub(line, raw, count=1)
+        else:
+            if raw and not raw.endswith("\n"):
+                raw += "\n"
+            raw += line + "\n"
+    Path(cfg_path).write_text(raw, encoding="utf-8")
+
+    logger.info("settings updated via API: %s", updated)
+    return {"updated": updated, "config_path": cfg_path}
+
+
+# ------------------------------------------------------- reorganize-existing
+
+
+@dataclass
+class ReorganizeRun:
+    started_at: float
+    threshold_days: int
+    folder_filter: str | None
+    total_pairs: int
+    done_pairs: int = 0
+    failed_pairs: int = 0
+    skipped_folders: int = 0
+    current: str = ""
+    finished: bool = False
+    error: str | None = None
+    log: list[str] = field(default_factory=list)
+
+    def push(self, msg: str) -> None:
+        # Cap to keep memory bounded — the dashboard re-fetches anyway.
+        self.log.append(msg)
+        if len(self.log) > 500:
+            self.log = self.log[-500:]
+
+    def to_dict(self) -> dict:
+        elapsed = max(0.0, time.time() - self.started_at)
+        pct = 0.0
+        if self.total_pairs > 0:
+            pct = 100.0 * (self.done_pairs + self.failed_pairs) / self.total_pairs
+        return {
+            "started_at": self.started_at,
+            "elapsed_sec": elapsed,
+            "threshold_days": self.threshold_days,
+            "folder_filter": self.folder_filter,
+            "total_pairs": self.total_pairs,
+            "done_pairs": self.done_pairs,
+            "failed_pairs": self.failed_pairs,
+            "skipped_folders": self.skipped_folders,
+            "percent": pct,
+            "current": self.current,
+            "finished": self.finished,
+            "error": self.error,
+            "log_tail": self.log[-50:],
+        }
+
+
+def _reorganize_preview(api: ApiServer, body: dict) -> dict:
+    """
+    Synchronously walk the tree and return the list of candidate folders +
+    settled/active classification. Cheap enough to call inline (no Dropbox
+    moves performed).
+    """
+    from .dropbox_client import make_client_from_config
+    from .reorganize import find_unreorganized_pairs, is_folder_settled
+
+    threshold = int(body.get("min_age_days", api.config.legacy_reorganize_min_age_days))
+    folder = body.get("folder") or api.config.dropbox_root
+
+    dropbox = make_client_from_config(api.config)
+    candidates = find_unreorganized_pairs(dropbox, folder)
+
+    rows = []
+    for cand in candidates:
+        activity = is_folder_settled(dropbox, cand.parent, threshold)
+        rows.append({
+            "parent": cand.parent,
+            "pairs": len(cand.pairs),
+            "names": [p.name for p in cand.pairs[:5]],
+            "more": max(0, len(cand.pairs) - 5),
+            "settled": activity.settled,
+            "days_since_newest": activity.days_since_newest,
+        })
+
+    ready = [r for r in rows if r["settled"]]
+    deferred = [r for r in rows if not r["settled"]]
+    return {
+        "ok": True,
+        "threshold_days": threshold,
+        "folder": folder,
+        "ready": ready,
+        "deferred": deferred,
+        "total_ready_pairs": sum(r["pairs"] for r in ready),
+        "total_deferred_pairs": sum(r["pairs"] for r in deferred),
+    }
+
+
+def _reorganize_run(api: ApiServer, body: dict) -> dict:
+    """
+    Kick off a reorganize sweep in a background thread. Status is polled via
+    /api/reorganize/status until finished=true.
+    """
+    from .dropbox_client import make_client_from_config
+    from .reorganize import find_unreorganized_pairs, is_folder_settled, reorganize_pair
+
+    with api._reorganize_lock:
+        if api._reorganize_run is not None and not api._reorganize_run.finished:
+            return {"ok": False, "error": "a reorganize run is already in progress"}
+
+        threshold = int(body.get("min_age_days", api.config.legacy_reorganize_min_age_days))
+        folder = body.get("folder") or api.config.dropbox_root
+
+        run = ReorganizeRun(
+            started_at=time.time(),
+            threshold_days=threshold,
+            folder_filter=folder,
+            total_pairs=0,
+        )
+        api._reorganize_run = run
+
+    def worker() -> None:
+        try:
+            dropbox = make_client_from_config(api.config)
+            run.push(f"Scanning {folder} for unreorganized pairs...")
+            candidates = find_unreorganized_pairs(dropbox, folder)
+            ready = []
+            for cand in candidates:
+                activity = is_folder_settled(dropbox, cand.parent, threshold)
+                if activity.settled:
+                    ready.append(cand)
+                else:
+                    run.skipped_folders += 1
+            run.total_pairs = sum(len(c.pairs) for c in ready)
+            run.push(f"Found {run.total_pairs} pair(s) in {len(ready)} settled folder(s); "
+                     f"{run.skipped_folders} active folder(s) deferred.")
+
+            for cand in ready:
+                run.push(f"--- {cand.parent} ({len(cand.pairs)} pairs) ---")
+                for pair in cand.pairs:
+                    run.current = f"{cand.parent}/{pair.name}"
+                    try:
+                        reorganize_pair(
+                            dropbox, cand.parent, pair.name,
+                            int(pair.original.size or 0),
+                            int(pair.h265.size or 0),
+                        )
+                        run.push(f"  + {pair.name}")
+                        run.done_pairs += 1
+                    except Exception as e:
+                        run.push(f"  x {pair.name}: {e}")
+                        run.failed_pairs += 1
+
+            run.current = ""
+            run.push(f"Done. {run.done_pairs} reorganized, {run.failed_pairs} failed.")
+        except Exception as e:
+            logger.exception("reorganize-existing run crashed")
+            run.error = str(e)
+            run.push(f"ERROR: {e}")
+        finally:
+            run.finished = True
+
+    threading.Thread(target=worker, name="reorganize-runner", daemon=True).start()
+    return {"ok": True, "run": run.to_dict()}
+
+
+def _reorganize_status_payload(api: ApiServer) -> dict:
+    run = api._reorganize_run
+    return {"ok": True, "run": run.to_dict() if run else None}
 
 
 def _human_duration(seconds: float) -> str:

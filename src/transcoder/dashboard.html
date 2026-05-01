@@ -1,0 +1,633 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>HeavyDrops Transcoder</title>
+<style>
+  :root {
+    --bg: #0c0d10;
+    --panel: #16181d;
+    --panel-2: #1c1f26;
+    --border: #2a2e36;
+    --text: #e6e8ee;
+    --muted: #8a909a;
+    --ok: #67d99c;
+    --warn: #f1b561;
+    --err: #f37c7c;
+    --accent: #6cb6ff;
+    --download: #4d8aff;
+    --transcode: #b76dff;
+    --upload: #4dd2a7;
+  }
+  * { box-sizing: border-box; }
+  body { font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+         margin: 0; padding: 1.5em 2em 4em; background: var(--bg); color: var(--text); }
+  h1 { margin: 0 0 .15em 0; font-size: 1.6em; font-weight: 600; }
+  h2 { margin: 1.4em 0 .5em 0; color: var(--muted); font-weight: 500; font-size: .95em;
+       text-transform: uppercase; letter-spacing: .05em; }
+  .row { display: flex; gap: 1em; flex-wrap: wrap; align-items: center; }
+  .health { display: flex; align-items: center; gap: .5em; color: var(--muted); font-size: .9em; }
+  .health .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--err);
+                 box-shadow: 0 0 0 4px rgba(243,124,124,.15); }
+  .health.ok .dot { background: var(--ok); box-shadow: 0 0 0 4px rgba(103,217,156,.15); }
+  .health.warn .dot { background: var(--warn); box-shadow: 0 0 0 4px rgba(241,181,97,.18); }
+  .now { background: linear-gradient(135deg, #1c2230 0%, #20283a 100%);
+         border: 1px solid #2c3445; border-radius: 10px; padding: 1.1em 1.3em;
+         margin: 1em 0 .8em 0; font-size: 1.05em; line-height: 1.45; }
+  .now .what { font-weight: 600; font-size: 1.1em; color: var(--text); }
+  .now .why { color: var(--muted); font-size: .92em; margin-top: .3em; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+          gap: .8em; margin-bottom: 1em; }
+  .card { background: var(--panel); border: 1px solid var(--border);
+          border-radius: 8px; padding: .8em 1em; }
+  .card .k { color: var(--muted); font-size: .8em; text-transform: uppercase; letter-spacing: .04em; }
+  .card .v { font-size: 1.45em; margin-top: .2em; word-break: break-word; font-weight: 600; }
+  .card .sub { color: var(--muted); font-size: .85em; margin-top: .2em; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .err { color: var(--err); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; }
+  button { background: #2a2e36; color: var(--text); border: 1px solid #353a45;
+           border-radius: 6px; padding: .5em 1em; cursor: pointer; font: inherit;
+           margin-right: .4em; transition: background .1s; }
+  button:hover { background: #353b46; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #0c0d10; font-weight: 600; }
+  button.primary:hover { background: #82c2ff; }
+  button.danger { background: #5a2a2a; border-color: #6a3535; }
+  button.danger:hover { background: #6a3535; }
+  .panel { background: var(--panel); border: 1px solid var(--border);
+           border-radius: 8px; padding: 1.1em 1.3em; margin-bottom: 1em; }
+  .panel h3 { margin: 0 0 .8em 0; font-size: 1em; font-weight: 600; }
+  .field { display: flex; align-items: center; gap: 1em; margin-bottom: .8em; flex-wrap: wrap; }
+  .field label { flex: 0 0 240px; color: var(--muted); font-size: .9em; }
+  .field input[type=number], .field input[type=text], .field select {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 5px; padding: .4em .6em; font: inherit; min-width: 120px;
+  }
+  .field .hint { color: var(--muted); font-size: .8em; }
+  .switch { display: inline-flex; align-items: center; gap: .5em; cursor: pointer; }
+  .switch input { position: absolute; opacity: 0; pointer-events: none; }
+  .switch .track { width: 38px; height: 22px; background: #353a45; border-radius: 12px;
+                   position: relative; transition: background .15s; }
+  .switch .track::after { content: ""; position: absolute; top: 3px; left: 3px;
+                          width: 16px; height: 16px; background: var(--text);
+                          border-radius: 50%; transition: transform .15s; }
+  .switch input:checked + .track { background: var(--ok); }
+  .switch input:checked + .track::after { transform: translateX(16px); }
+  .worker { background: var(--panel); border: 1px solid var(--border);
+            border-radius: 8px; padding: .9em 1em; margin-bottom: .6em; }
+  .worker-head { display: flex; justify-content: space-between; align-items: center; gap: 1em; margin-bottom: .35em; }
+  .worker-head .name { color: var(--muted); font-size: .85em; text-transform: uppercase; letter-spacing: .04em; }
+  .worker-head .stage { font-size: .8em; padding: 2px 9px; border-radius: 11px; font-weight: 600; }
+  .stage-download { background: rgba(77,138,255,.15); color: var(--download); }
+  .stage-transcode { background: rgba(183,109,255,.15); color: var(--transcode); }
+  .stage-upload { background: rgba(77,210,167,.15); color: var(--upload); }
+  .worker .path { word-break: break-all; font-size: .92em; color: var(--text); margin-bottom: .4em; }
+  .worker .path .dir { color: var(--muted); }
+  .worker .meta { color: var(--muted); font-size: .82em; }
+  .bar { background: #232730; border-radius: 4px; height: 7px; overflow: hidden; margin: .4em 0 .35em 0; }
+  .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--ok) 0%, #95e8b9 100%);
+                transition: width .25s; }
+  .empty { color: var(--muted); padding: .6em 0; font-style: italic; }
+  pre.log { background: #0a0b0d; border: 1px solid var(--border); border-radius: 8px;
+            padding: .8em 1em; font: 12px/1.45 ui-monospace, "SF Mono", Consolas, monospace;
+            color: #cbe3d3; max-height: 320px; overflow-y: scroll; margin: 0;
+            white-space: pre-wrap; word-break: break-word; }
+  pre.log .err { color: var(--err); } pre.log .warn { color: var(--warn); }
+  .reorg-table { font-size: 12px; }
+  .reorg-table th { font-size: 11px; }
+  .reorg-table .ready { color: var(--ok); } .reorg-table .defer { color: var(--warn); }
+  .toast { position: fixed; bottom: 1.5em; right: 1.5em; background: var(--panel);
+           border: 1px solid var(--border); padding: .7em 1.1em; border-radius: 8px;
+           box-shadow: 0 4px 16px rgba(0,0,0,.4); max-width: 380px; }
+  .toast.err { border-color: var(--err); color: var(--err); }
+  .toast.ok { border-color: var(--ok); color: var(--ok); }
+</style>
+</head>
+<body>
+<div class="row" style="justify-content: space-between; align-items: flex-start;">
+  <div>
+    <h1>HeavyDrops Transcoder</h1>
+    <div class="health" id="health">
+      <span class="dot"></span><span id="health-text">connecting...</span>
+    </div>
+  </div>
+  <div id="banner-area"></div>
+</div>
+
+<div class="now" id="now">
+  <div class="what">Loading...</div>
+  <div class="why">Fetching daemon status...</div>
+</div>
+
+<div class="row" style="margin-bottom: 1em;">
+  <button onclick="post('/api/scan-now')">Scan now</button>
+  <button id="pause-btn" onclick="togglePause()">Pause</button>
+  <button onclick="post('/api/retry-failed')">Retry FAILED</button>
+  <button class="danger" onclick="restartDaemon()">Restart daemon</button>
+</div>
+
+<h2>Today / All time</h2>
+<div class="grid" id="stats-grid"></div>
+
+<h2>Status</h2>
+<div class="grid" id="status-grid"></div>
+
+<h2>Scanner</h2>
+<div id="scan-card"></div>
+
+<h2>Workers — live</h2>
+<div id="workers"></div>
+
+<details class="panel" open>
+  <summary style="cursor:pointer; color: var(--muted); margin-bottom: .8em;"><strong style="color:var(--text)">Settings</strong> — change quality, reorganize threshold, and other knobs</summary>
+  <div id="settings-body" style="margin-top: 1em;"></div>
+</details>
+
+<details class="panel">
+  <summary style="cursor:pointer; color: var(--muted); margin-bottom: .8em;"><strong style="color:var(--text)">Reorganize old conversions</strong> — swap H.265 into the original's spot for files already converted, with folder-age safety</summary>
+  <div id="reorg-body" style="margin-top: 1em;"></div>
+</details>
+
+<details class="panel">
+  <summary style="cursor:pointer; color: var(--muted); margin-bottom: .8em;"><strong style="color:var(--text)">Recent jobs</strong> — last 20 in the queue</summary>
+  <table id="jobs-table" style="margin-top: .8em;">
+    <thead><tr><th>ID</th><th>State</th><th>Path</th><th>Size</th><th>Retries</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</details>
+
+<details class="panel">
+  <summary style="cursor:pointer; color: var(--muted); margin-bottom: .8em;"><strong style="color:var(--text)">Jobs by state</strong></summary>
+  <table id="state-table" style="margin-top: .8em;">
+    <thead><tr><th>State</th><th>Count</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</details>
+
+<h2>Activity log <span style="color:var(--muted);font-weight:normal;font-size:.85em">(last 200 lines, auto-refresh)</span></h2>
+<pre id="log" class="log">loading...</pre>
+
+<div id="toast-area"></div>
+
+<script>
+// ---------- helpers ----------
+function fmtBytes(n) {
+  if (!n) return '0 B';
+  const u = ['B','KB','MB','GB','TB','PB']; let i = 0;
+  while (n >= 1024 && i < u.length-1) { n /= 1024; i++; }
+  return n.toFixed(2) + ' ' + u[i];
+}
+function fmtDuration(sec) {
+  if (sec == null || isNaN(sec)) return '—';
+  sec = Math.max(0, Math.floor(sec));
+  if (sec < 60) return sec + 's';
+  const m = Math.floor(sec / 60), s = sec % 60;
+  if (m < 60) return m + 'm ' + s + 's';
+  const h = Math.floor(m / 60), mm = m % 60;
+  if (h < 24) return h + 'h ' + mm + 'm';
+  const d = Math.floor(h / 24), hh = h % 24;
+  return d + 'd ' + hh + 'h';
+}
+function basename(p) { if (!p) return ''; const i = p.lastIndexOf('/'); return i >= 0 ? p.slice(i+1) : p; }
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/[<&>"']/g, c => ({'<':'&lt;','&':'&amp;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function card(k, v, cls = '', sub = '') {
+  return `<div class="card"><div class="k">${escapeHtml(k)}</div><div class="v ${cls}">${v}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div>`;
+}
+function toast(msg, kind) {
+  const area = document.getElementById('toast-area');
+  const el = document.createElement('div');
+  el.className = 'toast ' + (kind || '');
+  el.textContent = msg;
+  area.appendChild(el);
+  setTimeout(() => el.remove(), 4000);
+}
+
+async function fetchJSON(url, opts) {
+  const r = await fetch(url, opts);
+  if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
+  return r.json();
+}
+async function safeFetch(url, opts) {
+  try { return await fetchJSON(url, opts); } catch (e) { return { _error: e.message }; }
+}
+
+// ---------- live state ----------
+let lastStatusOK = false;
+let pendingRefreshTimer = null;
+
+function setHealth(online, label) {
+  const h = document.getElementById('health');
+  h.classList.toggle('ok', online);
+  h.classList.toggle('warn', !online);
+  document.getElementById('health-text').textContent = label;
+}
+
+function renderNow(s, a) {
+  const el = document.getElementById('now');
+  if (!s || s._error) {
+    el.innerHTML = `<div class="what err">Daemon unreachable</div>
+                    <div class="why">Last error: ${escapeHtml(s ? s._error : 'connection refused')}.
+                    Check that the HeavyDropsDaemon scheduled task is running.</div>`;
+    return;
+  }
+  let what, why;
+  const workers = (a && !a._error && a.workers) || [];
+  const scan = (a && !a._error && a.scanner) || { mode: 'idle' };
+
+  if (workers.length > 0) {
+    const w = workers[0];
+    const stage = (w.stage || '').toLowerCase();
+    const file = basename(w.path);
+    const pct = (w.percent || 0).toFixed(1);
+    let detail = '';
+    if (stage === 'transcode') {
+      detail = `${(w.fps||0).toFixed(1)} fps · ${(w.speed||0).toFixed(2)}x speed`;
+    } else {
+      const elapsed = w.elapsed_sec || 0;
+      const rate = elapsed > 0 ? w.bytes_done / elapsed : 0;
+      detail = `${fmtBytes(w.bytes_done)}/${fmtBytes(w.bytes_total)} at ${fmtBytes(rate)}/s`;
+    }
+    const eta = w.eta_sec != null ? `, ETA ${fmtDuration(w.eta_sec)}` : '';
+    what = `${stage.charAt(0).toUpperCase() + stage.slice(1)}ing <b>${escapeHtml(file)}</b> — ${pct}%`;
+    why = `${detail}${eta}`;
+    if (workers.length > 1) why += ` · plus ${workers.length - 1} other worker${workers.length > 2 ? 's' : ''}`;
+  } else if (scan.mode === 'bulk' || scan.mode === 'delta') {
+    const where = scan.current_path ? ` at <code style="color:var(--muted)">${escapeHtml(scan.current_path)}</code>` : '';
+    what = `Scanning Dropbox <b>(${scan.mode.toUpperCase()})</b>${where}`;
+    why = `${(scan.entries_seen || 0).toLocaleString()} entries seen so far · running for ${fmtDuration(scan.elapsed_sec)}`;
+  } else if (s.dispatcher && s.dispatcher.paused) {
+    what = `Paused`;
+    why = `Click <b>Resume</b> to continue processing.`;
+  } else {
+    what = `Idle — waiting for next scan`;
+    why = `${s.dispatcher.download + s.dispatcher.transcode + s.dispatcher.upload} jobs in queue · ${s.dispatcher.active} active`;
+  }
+  el.innerHTML = `<div class="what">${what}</div><div class="why">${why}</div>`;
+}
+
+function renderStats(stats) {
+  const el = document.getElementById('stats-grid');
+  if (!stats || stats._error) {
+    el.innerHTML = card('Stats', '—', 'warn', 'unavailable');
+    return;
+  }
+  const today = stats.today || {};
+  const all = stats.all_time || {};
+  el.innerHTML = [
+    card('Today — done', (today.jobs || 0).toLocaleString(),
+         today.jobs ? 'ok' : '', today.jobs ? `${today.avg_reduction_pct.toFixed(1)}% avg reduction` : 'no jobs yet'),
+    card('Today — saved', fmtBytes(today.bytes_saved || 0),
+         today.bytes_saved ? 'ok' : '', today.input_bytes ? `${fmtBytes(today.input_bytes)} → ${fmtBytes(today.output_bytes)}` : ''),
+    card('All-time — done', (all.jobs || 0).toLocaleString(), '',
+         all.jobs ? `${all.avg_reduction_pct.toFixed(1)}% avg reduction` : ''),
+    card('All-time — saved', fmtBytes(all.bytes_saved || 0), 'ok',
+         all.input_bytes ? `${fmtBytes(all.input_bytes)} → ${fmtBytes(all.output_bytes)}` : ''),
+  ].join('');
+}
+
+function renderStatus(s) {
+  const g = document.getElementById('status-grid');
+  if (!s || s._error) {
+    g.innerHTML = card('Status', 'unreachable', 'err', s ? s._error : 'no response');
+    return;
+  }
+  g.innerHTML = [
+    card('Version', s.update.current_version),
+    card('Uptime', s.uptime_human),
+    card('Scan mode', s.scan.mode || 'idle', s.scan.mode === 'bulk' ? 'warn' : 'ok',
+         s.scan.bulk_pass_complete ? 'bulk done' : (s.scan.mode === 'bulk' ? 'first pass' : '')),
+    card('Entries seen', (s.scan.entries_seen || 0).toLocaleString()),
+    card('Dispatcher', s.dispatcher.paused ? 'PAUSED' : 'running', s.dispatcher.paused ? 'warn' : 'ok',
+         `D ${s.dispatcher.download} · T ${s.dispatcher.transcode} · U ${s.dispatcher.upload}`),
+    card('Active jobs', s.dispatcher.active),
+    card('Disk reserved', fmtBytes(s.disk.reserved_bytes), '',
+         s.disk.budget_enabled ? `cap ${fmtBytes(s.disk.max_staging_bytes)}` : 'budget off'),
+    card('Disk free', fmtBytes(s.disk.free_bytes)),
+  ].join('');
+  // pause button label reflects state
+  document.getElementById('pause-btn').textContent = s.dispatcher.paused ? 'Resume' : 'Pause';
+  document.getElementById('pause-btn').dataset.paused = s.dispatcher.paused ? '1' : '0';
+}
+
+function renderScan(scan) {
+  const el = document.getElementById('scan-card');
+  if (!scan || scan._error || !scan.mode || scan.mode === 'idle') {
+    el.innerHTML = `<div class="empty">Scanner idle (next pass scheduled).</div>`;
+    return;
+  }
+  const cls = scan.mode === 'bulk' ? 'warn' : 'ok';
+  el.innerHTML = `
+    <div class="worker">
+      <div class="worker-head">
+        <span class="name">Scanner</span>
+        <span class="stage stage-download ${cls}">${scan.mode.toUpperCase()}</span>
+      </div>
+      <div class="path">${escapeHtml(scan.current_path || '—')}</div>
+      <div class="meta">${(scan.entries_seen||0).toLocaleString()} entries seen · running for ${fmtDuration(scan.elapsed_sec)}</div>
+    </div>
+  `;
+}
+
+function renderWorkers(active) {
+  const el = document.getElementById('workers');
+  const ws = (active && !active._error && active.workers) || [];
+  if (ws.length === 0) {
+    el.innerHTML = `<div class="empty">No active jobs right now.</div>`;
+    return;
+  }
+  el.innerHTML = ws.sort((a,b) => a.worker.localeCompare(b.worker)).map(w => {
+    const pct = (w.percent || 0).toFixed(1);
+    let meta = '';
+    if (w.stage === 'transcode') {
+      meta = `${fmtDuration(w.time_sec)} / ${fmtDuration(w.duration_sec)} · ${(w.fps||0).toFixed(1)} fps · ${(w.speed||0).toFixed(2)}x`;
+      if (w.bitrate_kbps) meta += ` · ${(w.bitrate_kbps/1024).toFixed(1)} Mb/s`;
+    } else {
+      meta = `${fmtBytes(w.bytes_done)} / ${fmtBytes(w.bytes_total)}`;
+      if (w.elapsed_sec > 0 && w.bytes_done > 0) {
+        const rate = w.bytes_done / w.elapsed_sec;
+        meta += ` · ${fmtBytes(rate)}/s`;
+      }
+    }
+    if (w.eta_sec != null) meta += ` · ETA ${fmtDuration(w.eta_sec)}`;
+    meta += ` · elapsed ${fmtDuration(w.elapsed_sec)}`;
+    const file = basename(w.path);
+    const dir = w.path.slice(0, w.path.length - file.length);
+    return `
+      <div class="worker">
+        <div class="worker-head">
+          <span class="name">${escapeHtml(w.worker)} · job #${w.job_id}</span>
+          <span class="stage stage-${escapeHtml(w.stage)}">${escapeHtml(w.stage.toUpperCase())} ${pct}%</span>
+        </div>
+        <div class="path"><b>${escapeHtml(file)}</b> <span class="dir">${escapeHtml(dir)}</span></div>
+        <div class="bar"><span style="width:${pct}%"></span></div>
+        <div class="meta">${escapeHtml(meta)}</div>
+      </div>
+    `;
+  }).join('');
+}
+
+function renderJobs(j) {
+  const tb = document.querySelector('#jobs-table tbody');
+  if (!j || j._error || !j.jobs) {
+    tb.innerHTML = `<tr><td colspan="5" class="empty">No jobs yet.</td></tr>`;
+    return;
+  }
+  if (j.jobs.length === 0) {
+    tb.innerHTML = `<tr><td colspan="5" class="empty">No jobs yet.</td></tr>`;
+    return;
+  }
+  tb.innerHTML = j.jobs.map(r =>
+    `<tr><td>${r.id}</td><td>${escapeHtml(r.state)}</td><td>${escapeHtml(r.dropbox_path)}</td>
+         <td>${fmtBytes(r.dropbox_size)}</td><td>${r.retry_count}</td></tr>`
+  ).join('');
+}
+
+function renderStateTable(s) {
+  const tb = document.querySelector('#state-table tbody');
+  if (!s || s._error || !s.jobs) { tb.innerHTML = `<tr><td colspan="2" class="empty">—</td></tr>`; return; }
+  const counts = s.jobs.state_counts || {};
+  const rows = Object.entries(counts).sort((a,b) => b[1] - a[1]);
+  if (rows.length === 0) { tb.innerHTML = `<tr><td colspan="2" class="empty">No jobs.</td></tr>`; return; }
+  tb.innerHTML = rows.map(([k,v]) => `<tr><td>${escapeHtml(k)}</td><td>${v.toLocaleString()}</td></tr>`).join('');
+}
+
+function renderLog(payload) {
+  const el = document.getElementById('log');
+  if (!payload || payload._error) { el.textContent = '(log unavailable)'; return; }
+  const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+  const lines = payload.lines || [];
+  if (lines.length === 0) { el.textContent = '(no log lines yet)'; return; }
+  el.innerHTML = lines.map(ln => {
+    const safe = escapeHtml(ln);
+    if (/\bERROR\b/.test(ln)) return `<span class="err">${safe}</span>`;
+    if (/\bWARNING\b/.test(ln)) return `<span class="warn">${safe}</span>`;
+    return safe;
+  }).join('\n');
+  if (wasAtBottom) el.scrollTop = el.scrollHeight;
+}
+
+// ---------- Settings panel ----------
+let settingsCache = null;
+async function renderSettings() {
+  const sp = await safeFetch('/api/settings');
+  if (sp._error) {
+    document.getElementById('settings-body').innerHTML = `<div class="empty err">Could not load settings: ${escapeHtml(sp._error)}</div>`;
+    return;
+  }
+  settingsCache = sp;
+  const s = sp.settings, k = sp.knobs, ctx = sp.context;
+  document.getElementById('settings-body').innerHTML = `
+    <div class="field">
+      <label for="set-cq">${escapeHtml(k.cq_value.label)}</label>
+      <input id="set-cq" type="number" min="${k.cq_value.min}" max="${k.cq_value.max}" value="${s.cq_value}">
+      <span class="hint">${k.cq_value.min}–${k.cq_value.max}. Default 24.</span>
+    </div>
+    <div class="field">
+      <label for="set-min">${escapeHtml(k.min_size_gb.label)}</label>
+      <input id="set-min" type="number" min="0" max="1000" step="0.1" value="${s.min_size_gb}">
+      <span class="hint">GB. Default 6.</span>
+    </div>
+    <div class="field">
+      <label>${escapeHtml(k.legacy_reorganize.label)}</label>
+      <label class="switch">
+        <input id="set-reorg" type="checkbox" ${s.legacy_reorganize ? 'checked' : ''}>
+        <span class="track"></span>
+        <span style="color: var(--muted); font-size: .9em">${s.legacy_reorganize ? 'on' : 'off'}</span>
+      </label>
+    </div>
+    <div class="field">
+      <label for="set-age">${escapeHtml(k.legacy_reorganize_min_age_days.label)}</label>
+      <select id="set-age">
+        ${[0,30,60,90,180,365].map(v => `<option value="${v}" ${v === s.legacy_reorganize_min_age_days ? 'selected' : ''}>${v === 0 ? 'always' : v + ' days'}</option>`).join('')}
+      </select>
+      <span class="hint">Higher = safer. Folders touched recently are skipped.</span>
+    </div>
+    <div class="field">
+      <label>Encoder · Profile</label>
+      <span class="hint">${escapeHtml(ctx.encoder_preference)} · ${escapeHtml(ctx.profile)} (edit in config.yaml + restart)</span>
+    </div>
+    <div class="field">
+      <label>Dropbox root</label>
+      <span class="hint">${escapeHtml(ctx.dropbox_root)}</span>
+    </div>
+    <button class="primary" onclick="saveSettings()">Save</button>
+    <span style="color: var(--muted); font-size: .85em; margin-left: .8em">Most settings take effect on the next job. No restart needed.</span>
+  `;
+}
+async function saveSettings() {
+  const body = {
+    cq_value: parseInt(document.getElementById('set-cq').value),
+    min_size_gb: parseFloat(document.getElementById('set-min').value),
+    legacy_reorganize: document.getElementById('set-reorg').checked,
+    legacy_reorganize_min_age_days: parseInt(document.getElementById('set-age').value),
+  };
+  try {
+    const r = await fetchJSON('/api/settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (r.ok) {
+      toast(`Saved: ${(r.updated || []).join(', ')}`, 'ok');
+      renderSettings();
+    } else {
+      toast('Save failed: ' + (r.error || 'unknown'), 'err');
+    }
+  } catch (e) { toast('Save failed: ' + e.message, 'err'); }
+}
+
+// ---------- Reorganize panel ----------
+async function loadReorgPanel() {
+  document.getElementById('reorg-body').innerHTML = `
+    <div class="row" style="margin-bottom: .8em;">
+      <button onclick="reorgPreview()">Preview</button>
+      <button class="primary" onclick="reorgRun()" id="reorg-run-btn" disabled>Run all ready</button>
+      <span class="hint" style="color: var(--muted); font-size: .85em;">Click Preview first to see which folders would be touched.</span>
+    </div>
+    <div id="reorg-result"></div>
+  `;
+  // Poll for an in-progress run
+  const r = await safeFetch('/api/reorganize/status');
+  if (!r._error && r.run && !r.run.finished) {
+    pollReorg();
+  } else if (!r._error && r.run && r.run.finished) {
+    renderReorgRun(r.run, true);
+  }
+}
+async function reorgPreview() {
+  document.getElementById('reorg-result').innerHTML = `<div class="empty">Scanning Dropbox...</div>`;
+  try {
+    const p = await fetchJSON('/api/reorganize/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    renderReorgPreview(p);
+    document.getElementById('reorg-run-btn').disabled = (p.total_ready_pairs || 0) === 0;
+  } catch (e) {
+    document.getElementById('reorg-result').innerHTML = `<div class="empty err">Preview failed: ${escapeHtml(e.message)}</div>`;
+  }
+}
+function renderReorgPreview(p) {
+  const ready = p.ready || [], deferred = p.deferred || [];
+  let html = `<div class="row" style="margin-bottom: .6em;">
+    <span><b>${p.total_ready_pairs}</b> pair(s) ready in <b>${ready.length}</b> folder(s)</span>
+    <span class="hint" style="color: var(--muted)">·</span>
+    <span class="warn"><b>${p.total_deferred_pairs}</b> deferred in <b>${deferred.length}</b> folder(s)</span>
+    <span class="hint" style="color: var(--muted)">· threshold ${p.threshold_days} days</span>
+  </div>`;
+  if (ready.length === 0 && deferred.length === 0) {
+    html += `<div class="empty">No unreorganized pairs found.</div>`;
+  } else {
+    html += `<table class="reorg-table">
+      <thead><tr><th>Folder</th><th>Pairs</th><th>Status</th></tr></thead><tbody>`;
+    for (const r of ready) {
+      html += `<tr><td>${escapeHtml(r.parent)}</td><td>${r.pairs}</td><td class="ready">ready</td></tr>`;
+    }
+    for (const r of deferred) {
+      const days = r.days_since_newest != null ? r.days_since_newest.toFixed(1) : '?';
+      html += `<tr><td>${escapeHtml(r.parent)}</td><td>${r.pairs}</td><td class="defer">defer · ${days}d since last edit</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+  document.getElementById('reorg-result').innerHTML = html;
+}
+async function reorgRun() {
+  if (!confirm('Reorganize all "ready" folders? This will move files in your Dropbox.')) return;
+  try {
+    const r = await fetchJSON('/api/reorganize/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+    if (!r.ok) { toast('Could not start: ' + (r.error || 'unknown'), 'err'); return; }
+    toast('Reorganize started', 'ok');
+    pollReorg();
+  } catch (e) { toast('Run failed: ' + e.message, 'err'); }
+}
+let reorgPollTimer = null;
+async function pollReorg() {
+  if (reorgPollTimer) clearTimeout(reorgPollTimer);
+  const r = await safeFetch('/api/reorganize/status');
+  if (r._error || !r.run) { return; }
+  renderReorgRun(r.run, false);
+  if (!r.run.finished) {
+    reorgPollTimer = setTimeout(pollReorg, 1500);
+  } else {
+    renderReorgRun(r.run, true);
+    toast(`Reorganize done: ${r.run.done_pairs} ok, ${r.run.failed_pairs} failed`, r.run.failed_pairs ? 'err' : 'ok');
+  }
+}
+function renderReorgRun(run, finished) {
+  const pct = (run.percent || 0).toFixed(1);
+  const status = finished ? (run.error ? `<span class="err">ERROR: ${escapeHtml(run.error)}</span>` : `<span class="ok">finished</span>`) : 'running';
+  document.getElementById('reorg-result').innerHTML = `
+    <div class="worker">
+      <div class="worker-head"><span class="name">Reorganize ${status}</span><span class="stage stage-upload">${pct}%</span></div>
+      <div class="bar"><span style="width:${pct}%"></span></div>
+      <div class="meta">${run.done_pairs} done · ${run.failed_pairs} failed · ${run.total_pairs} total · ${run.skipped_folders} folders deferred · ${fmtDuration(run.elapsed_sec)}</div>
+      ${run.current ? `<div class="path" style="margin-top: .4em">${escapeHtml(run.current)}</div>` : ''}
+      <pre class="log" style="margin-top: .6em; max-height: 180px;">${(run.log_tail || []).map(escapeHtml).join('\n')}</pre>
+    </div>
+  `;
+}
+
+// ---------- Actions ----------
+async function post(path) {
+  try {
+    await fetchJSON(path, { method: 'POST' });
+    tick();
+  } catch (e) { toast(e.message, 'err'); }
+}
+async function togglePause() {
+  const paused = document.getElementById('pause-btn').dataset.paused === '1';
+  await post(paused ? '/api/resume' : '/api/pause');
+}
+async function restartDaemon() {
+  if (!confirm('Restart the daemon? Active jobs will be paused; the dashboard will reload in ~10 seconds.')) return;
+  try {
+    await fetchJSON('/api/restart', { method: 'POST' });
+    toast('Restarting daemon...', 'ok');
+    setTimeout(() => location.reload(), 12000);
+  } catch (e) { toast('Restart request failed: ' + e.message, 'err'); }
+}
+
+// ---------- main loop ----------
+async function tick() {
+  const [s, j, a, lg, st] = await Promise.all([
+    safeFetch('/api/status'),
+    safeFetch('/api/jobs?limit=20'),
+    safeFetch('/api/active'),
+    safeFetch('/api/log?lines=200'),
+    safeFetch('/api/stats'),
+  ]);
+
+  const online = !s._error;
+  if (online) {
+    setHealth(true, `Daemon online · v${s.update.current_version} · up ${s.uptime_human}`);
+    document.getElementById('banner-area').innerHTML = s.update.update_available
+      ? `<div class="card" style="background:#3a2e15;border-color:#7a5e2a;color:#fcd682;">Update available: <b>${escapeHtml(s.update.latest_tag)}</b>. Run <code>hd update</code>.</div>`
+      : '';
+  } else {
+    setHealth(false, `Daemon unreachable: ${s._error}`);
+    document.getElementById('banner-area').innerHTML = '';
+  }
+
+  renderNow(s, a);
+  renderStats(st);
+  renderStatus(s);
+  renderScan(a && !a._error ? a.scanner : null);
+  renderWorkers(a);
+  renderJobs(j);
+  renderStateTable(s);
+  renderLog(lg);
+}
+
+renderSettings();
+loadReorgPanel();
+tick();
+setInterval(tick, 3000);
+</script>
+</body></html>

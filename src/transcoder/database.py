@@ -283,14 +283,27 @@ class Database:
         return self._local.connection
 
     def initialize(self) -> None:
-        """Initialize database schema."""
+        """Initialize database schema and run idempotent column migrations."""
         with self._init_lock:
             if self._initialized:
                 return
             conn = self._get_connection()
             conn.executescript(SCHEMA)
+            self._migrate_jobs_table(conn)
             conn.commit()
             self._initialized = True
+
+    def _migrate_jobs_table(self, conn: sqlite3.Connection) -> None:
+        """ALTER TABLE … ADD COLUMN for fields that didn't exist in older schemas.
+
+        SQLite ADD COLUMN is non-destructive and cheap. Each column is added
+        only if missing so existing v6.0.x databases pick up the new fields
+        without losing data.
+        """
+        cursor = conn.execute("PRAGMA table_info(jobs)")
+        existing = {row[1] for row in cursor.fetchall()}
+        if 'output_size' not in existing:
+            conn.execute("ALTER TABLE jobs ADD COLUMN output_size INTEGER")
 
     @contextmanager
     def transaction(self) -> Generator[sqlite3.Connection, None, None]:
@@ -442,7 +455,7 @@ class Database:
                 'local_input_path', 'local_output_path', 'input_codec', 'output_codec',
                 'input_duration_sec', 'output_duration_sec', 'input_bitrate_kbps',
                 'output_bitrate_kbps', 'encoder_used', 'transcode_start', 'transcode_end',
-                'retry_count', 'dropbox_rev',
+                'retry_count', 'dropbox_rev', 'output_size', 'output_path',
             ):
                 fields.append(f'{key} = ?')
                 if isinstance(value, datetime):
@@ -646,6 +659,52 @@ class Database:
             'total_bytes_done': total_bytes_done,
             'avg_transcode_seconds': avg_transcode_sec,
             'total_jobs': sum(state_counts.values()),
+        }
+
+    def get_savings_stats(self, since: datetime | None = None) -> dict:
+        """Aggregate input/output bytes and reduction over completed jobs.
+
+        Pass ``since`` (UTC) to scope to recent activity (e.g. today). When
+        ``since`` is None, returns all-time totals. Only DONE jobs with a
+        non-null output_size contribute (older v6.0.x rows lacking the
+        column are excluded automatically).
+        """
+        conn = self._get_connection()
+        where = "state = ? AND output_size IS NOT NULL"
+        params: list = [JobState.DONE.value]
+        if since is not None:
+            where += " AND updated_at >= ?"
+            params.append(since.strftime('%Y-%m-%d %H:%M:%S'))
+
+        cursor = conn.execute(
+            f"""
+            SELECT
+                COUNT(*) AS jobs,
+                COALESCE(SUM(dropbox_size), 0) AS input_bytes,
+                COALESCE(SUM(output_size), 0) AS output_bytes,
+                COALESCE(SUM(dropbox_size - output_size), 0) AS bytes_saved,
+                COALESCE(SUM(input_duration_sec), 0) AS video_seconds,
+                COALESCE(
+                    SUM(julianday(transcode_end) - julianday(transcode_start)) * 86400,
+                    0
+                ) AS transcode_seconds
+            FROM jobs
+            WHERE {where}
+            """,
+            params,
+        )
+        row = cursor.fetchone()
+        input_bytes = row['input_bytes'] or 0
+        output_bytes = row['output_bytes'] or 0
+        reduction = (1 - output_bytes / input_bytes) * 100 if input_bytes else 0.0
+        return {
+            'jobs': row['jobs'] or 0,
+            'input_bytes': input_bytes,
+            'output_bytes': output_bytes,
+            'bytes_saved': row['bytes_saved'] or 0,
+            'avg_reduction_pct': round(reduction, 1),
+            'video_seconds': row['video_seconds'] or 0,
+            'transcode_seconds': row['transcode_seconds'] or 0,
         }
 
     # =========================================================================
