@@ -116,10 +116,20 @@ class FFmpegCommandBuilder:
         # Input file
         args.extend(["-i", str(input_path)])
 
-        # Mapping: copy all streams, preserve metadata (R6)
+        # Mapping: copy video + audio + subtitles, but drop data streams.
+        # MP4 muxer chokes on tmcd (timecode) and other "data" streams when
+        # asked to copy them, even though ffmpeg's stream-mapping plan looks
+        # fine. Specifically, BMUCC/Blackmagic outputs include a tmcd track
+        # that fails with:
+        #   "Could not find tag for codec none in stream #1"
+        # `-dn` strips them; the timecode is preserved as track-level
+        # metadata via -map_metadata 0 anyway.
         args.extend([
-            "-map", "0",              # Map all streams
-            "-map_metadata", "0",     # Copy all metadata from input
+            "-map", "0:v?",            # video tracks (none ok)
+            "-map", "0:a?",            # audio tracks (none ok)
+            "-map", "0:s?",            # subtitle tracks (none ok)
+            "-map_metadata", "0",      # copy container-level metadata
+            "-dn",                     # drop data streams (tmcd, etc)
         ])
 
         # Video encoder settings
