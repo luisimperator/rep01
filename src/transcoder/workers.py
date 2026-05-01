@@ -339,7 +339,10 @@ class TranscodeWorker(BaseWorker):
         )
 
         logger.info(f"[{self.name}] {cmd.description}")
-        logger.debug(f"[{self.name}] Command: {cmd.as_string()}")
+        # Promote the full command to INFO so empty-stderr failures are
+        # actionable: if the command is malformed in some Windows-specific
+        # way the args themselves are the diagnostic.
+        logger.info(f"[{self.name}] ffmpeg cmd: {cmd.as_string()}")
 
         # Update state
         self.db.update_job_state(
@@ -474,24 +477,35 @@ class TranscodeWorker(BaseWorker):
             # On Windows the console code page (cp1252) will choke on any
             # non-ASCII char in a filename; force UTF-8 end-to-end and
             # tolerate the rare invalid byte so the transcode still proceeds.
+            #
+            # We merge stdout into stderr (stderr=PIPE, stdout=STDOUT) so the
+            # per-job log file captures whichever stream ffmpeg uses for its
+            # error messages. Some early-exit failures (bad arg, missing
+            # codec, plugin load failure) print only to stdout and were
+            # silently dropped before.
             with open(log_file, 'w', encoding='utf-8', errors='replace') as log_f:
+                # Pre-pend the actual command line so post-mortem readers can
+                # see exactly what was launched.
+                log_f.write("# command: " + " ".join(repr(a) for a in cmd.args) + "\n\n")
+                log_f.flush()
                 self._ffmpeg_process = subprocess.Popen(
                     cmd.args,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     text=True,
                     encoding='utf-8',
                     errors='replace',
                 )
 
-                # Monitor stderr for progress
+                # Monitor merged output for progress (and capture everything
+                # to disk so failures can be diagnosed after the fact).
                 last_progress = time.time()
                 while True:
                     if self.should_stop():
                         self._kill_ffmpeg()
                         raise WorkerStop("Worker stopping")
 
-                    line = self._ffmpeg_process.stderr.readline()
+                    line = self._ffmpeg_process.stdout.readline()
                     if not line:
                         break
 

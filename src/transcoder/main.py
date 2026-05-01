@@ -211,6 +211,24 @@ class Daemon:
         encoder = select_best_encoder(self.config, verify=False)
         self._selected_encoder = encoder
         logger.info(f"Using encoder: {encoder.value}")
+        # Log which ffmpeg binary will be used so empty-stderr failures
+        # don't leave us guessing whether it's the bootstrap-installed copy
+        # or some other one inherited via PATH.
+        try:
+            import subprocess as _sp
+            ffmpeg_path = str(self.config.ffmpeg_path)
+            r = _sp.run(
+                [ffmpeg_path, "-version"],
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=10,
+            )
+            first_line = (r.stdout or r.stderr or "").splitlines()[0:1]
+            logger.info(
+                f"ffmpeg path: {ffmpeg_path} | "
+                f"{first_line[0] if first_line else '(no version output)'}"
+            )
+        except Exception as e:
+            logger.warning(f"could not probe ffmpeg at startup: {e}")
 
         # Fire-and-forget GitHub release check; the HTTP API surfaces the result
         # once it lands in the settings table.
@@ -226,15 +244,23 @@ class Daemon:
         # sees them without manual log copying. Disabled if no token.
         from .incidents import IncidentReporter
         from . import __version__
-        token = (self.config.incidents.github_token or "").strip() or os.environ.get("GITHUB_TOKEN", "")
-        if self.config.incidents.enabled and token:
+        inc = self.config.incidents
+        token = (inc.github_token or "").strip() or os.environ.get("GITHUB_TOKEN", "")
+        # Diagnostic: dump exactly what we read so 'OFF' surprises are
+        # debuggable without inspecting config.yaml on the user's box.
+        logger.info(
+            f"incidents config: enabled={inc.enabled}, repo={inc.github_repo!r}, "
+            f"token_present={bool(token)} (yaml={bool((inc.github_token or '').strip())}, "
+            f"env={bool(os.environ.get('GITHUB_TOKEN'))}), throttle_sec={inc.throttle_sec}"
+        )
+        if inc.enabled and token:
             self.incident_reporter = IncidentReporter(
-                repo=self.config.incidents.github_repo,
+                repo=inc.github_repo,
                 token=token,
-                throttle_sec=self.config.incidents.throttle_sec,
+                throttle_sec=inc.throttle_sec,
                 version=__version__,
             )
-            logger.info(f"incident reporter: ON (repo={self.config.incidents.github_repo})")
+            logger.info(f"incident reporter: ON (repo={inc.github_repo})")
         else:
             logger.info("incident reporter: OFF (set incidents.enabled + github_token to turn on)")
 
