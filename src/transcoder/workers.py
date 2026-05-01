@@ -400,6 +400,7 @@ class TranscodeWorker(BaseWorker):
             transcode_start=datetime.now(timezone.utc),
             encoder_used=encoder.value,
         )
+        REGISTRY.update(self.name, encoder=encoder.value)
 
         # Run FFmpeg
         success = self._run_ffmpeg(cmd, job)
@@ -425,6 +426,7 @@ class TranscodeWorker(BaseWorker):
             )
             encoder = EncoderType.CPU
             self.db.update_job_state(job.id, JobState.TRANSCODING, encoder_used=encoder.value)
+            REGISTRY.update(self.name, encoder=encoder.value)
             cmd = self.command_builder.build_transcode_command(
                 input_path,
                 output_path,

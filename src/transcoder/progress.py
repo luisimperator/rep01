@@ -33,6 +33,7 @@ class WorkerActivity:
     fps: float = 0.0
     speed: float = 0.0       # transcode: ffmpeg "speed" multiplier
     bitrate_kbps: float = 0.0
+    encoder: str = ""        # "hevc_qsv" | "hevc_nvenc" | "libx265" | ""
     last_update: float = field(default_factory=time.time)
 
     def to_dict(self) -> dict:
@@ -63,6 +64,7 @@ class WorkerActivity:
             "fps": self.fps,
             "speed": self.speed,
             "bitrate_kbps": self.bitrate_kbps,
+            "encoder": self.encoder,
             "percent": pct,
             "eta_sec": eta_sec,
             "last_update": self.last_update,

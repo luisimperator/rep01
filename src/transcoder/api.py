@@ -135,6 +135,8 @@ def _build_handler(api: ApiServer):
                 return self._send_json(_reorganize_status_payload(api))
             if route == "/api/dropbox/list":
                 return self._send_json(_dropbox_list_payload(api, qs))
+            if route == "/api/health":
+                return self._send_json(_health_payload(api))
             if route == "/healthz":
                 return self._send_text("ok")
             self.send_error(404, "not found")
@@ -149,6 +151,12 @@ def _build_handler(api: ApiServer):
                 return self._send_json({"ok": True, "paused": False})
             if route == "/api/scan-now":
                 api.scan_trigger.set()
+                return self._send_json({"ok": True, "triggered": True})
+            if route == "/api/health/run-now":
+                agent = getattr(getattr(api, "daemon", None), "self_health", None)
+                if agent is None:
+                    return self._send_json({"ok": False, "error": "self-health agent not running"})
+                agent.trigger_now()
                 return self._send_json({"ok": True, "triggered": True})
             if route == "/api/retry-failed":
                 count = api.db.reset_failed_jobs()
@@ -769,6 +777,14 @@ def _dropbox_list_payload(api: ApiServer, qs: dict[str, list[str]]) -> dict:
         }
     except Exception as e:
         return {"ok": False, "error": str(e), "path": requested}
+
+
+def _health_payload(api: ApiServer) -> dict:
+    """Self-health agent state for the dashboard."""
+    agent = getattr(getattr(api, "daemon", None), "self_health", None)
+    if agent is None:
+        return {"ok": True, "agent": None}
+    return {"ok": True, "agent": agent.status()}
 
 
 def _reorganize_status_payload(api: ApiServer) -> dict:

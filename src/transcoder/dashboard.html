@@ -87,8 +87,12 @@
   .worker .path .dir { color: var(--muted); }
   .worker .meta { color: var(--muted); font-size: .82em; }
   .bar { background: #232730; border-radius: 4px; height: 7px; overflow: hidden; margin: .4em 0 .35em 0; }
-  .bar > span { display: block; height: 100%; background: linear-gradient(90deg, var(--ok) 0%, #95e8b9 100%);
+  .bar > span { display: block; height: 100%;
+                background: linear-gradient(90deg, var(--ok) 0%, #95e8b9 100%);
                 transition: width .25s; }
+  .bar-download > span { background: linear-gradient(90deg, var(--download) 0%, #82c2ff 100%); }
+  .bar-transcode > span { background: linear-gradient(90deg, var(--transcode) 0%, #d9aaff 100%); }
+  .bar-upload > span { background: linear-gradient(90deg, var(--upload) 0%, #95e8b9 100%); }
   .empty { color: var(--muted); padding: .6em 0; font-style: italic; }
   pre.log { background: #0a0b0d; border: 1px solid var(--border); border-radius: 8px;
             padding: .8em 1em; font: 12px/1.45 ui-monospace, "SF Mono", Consolas, monospace;
@@ -150,20 +154,23 @@
   <button class="danger" onclick="restartDaemon()">Restart daemon</button>
 </div>
 
+<h2>Self-health agent <span style="color:var(--muted);font-weight:normal;font-size:.85em">(autonomous monitoring)</span></h2>
+<div id="health-card" class="panel" style="margin-bottom: 1em;"></div>
+
 <h2>Today / All time</h2>
 <div class="grid" id="stats-grid"></div>
 
 <h2>Status</h2>
 <div class="grid" id="status-grid"></div>
 
+<h2>Workers — live</h2>
+<div id="workers"></div>
+
 <h2>Storage <span style="color:var(--muted);font-weight:normal;font-size:.85em">(local paths the daemon writes to)</span></h2>
 <div id="storage-card" class="panel" style="margin-bottom: 1em;"></div>
 
 <h2>Scanner</h2>
 <div id="scan-card"></div>
-
-<h2>Workers — live</h2>
-<div id="workers"></div>
 
 <details class="panel" open>
   <summary style="cursor:pointer; color: var(--muted); margin-bottom: .8em;"><strong style="color:var(--text)">Settings</strong> — change quality, reorganize threshold, and other knobs</summary>
@@ -375,7 +382,8 @@ function renderWorkers(active) {
     const pct = (w.percent || 0).toFixed(1);
     let meta = '';
     if (w.stage === 'transcode') {
-      meta = `${fmtDuration(w.time_sec)} / ${fmtDuration(w.duration_sec)} · ${(w.fps||0).toFixed(1)} fps · ${(w.speed||0).toFixed(2)}x`;
+      const enc = w.encoder ? `${w.encoder} · ` : '';
+      meta = enc + `${fmtDuration(w.time_sec)} / ${fmtDuration(w.duration_sec)} · ${(w.fps||0).toFixed(1)} fps · ${(w.speed||0).toFixed(2)}x`;
       if (w.bitrate_kbps) meta += ` · ${(w.bitrate_kbps/1024).toFixed(1)} Mb/s`;
     } else {
       meta = `${fmtBytes(w.bytes_done)} / ${fmtBytes(w.bytes_total)}`;
@@ -395,7 +403,7 @@ function renderWorkers(active) {
           <span class="stage stage-${escapeHtml(w.stage)}">${escapeHtml(w.stage.toUpperCase())} ${pct}%</span>
         </div>
         <div class="path"><b>${escapeHtml(file)}</b> <span class="dir">${escapeHtml(dir)}</span></div>
-        <div class="bar"><span style="width:${pct}%"></span></div>
+        <div class="bar bar-${escapeHtml(w.stage)}"><span style="width:${pct}%"></span></div>
         <div class="meta">${escapeHtml(meta)}</div>
       </div>
     `;
@@ -752,7 +760,9 @@ async function tick() {
     document.getElementById('banner-area').innerHTML = '';
   }
 
+  const h = await safeFetch('/api/health');
   renderNow(s, a);
+  renderHealth(h);
   renderStats(st);
   renderStatus(s);
   renderStorage(s);
@@ -761,6 +771,95 @@ async function tick() {
   renderJobs(j);
   renderStateTable(s);
   renderLog(lg);
+}
+
+function renderHealth(payload) {
+  const el = document.getElementById('health-card');
+  if (!payload || payload._error) {
+    el.innerHTML = `<div class="empty err">Agent state unavailable: ${escapeHtml(payload && payload._error || 'no response')}</div>`;
+    return;
+  }
+  const ag = payload.agent;
+  if (!ag) {
+    el.innerHTML = `<div class="empty">Self-health agent is not running.</div>`;
+    return;
+  }
+  const last = ag.last_summary;
+  const interval = Math.round(ag.interval_sec / 60);
+  const nextIn = ag.next_check_in_sec != null ? fmtDuration(ag.next_check_in_sec) : '—';
+  const lastAge = ag.last_check_age_sec != null ? fmtDuration(ag.last_check_age_sec) + ' ago' : 'never';
+
+  let statusBadge;
+  if (ag.running_check) {
+    statusBadge = `<span class="stage stage-transcode">RUNNING NOW</span>`;
+  } else if (last && last.escalations > 0) {
+    statusBadge = `<span class="stage" style="background:rgba(243,124,124,.15);color:var(--err)">${last.escalations} ESCALATION(S)</span>`;
+  } else if (last && last.actions && last.actions.length > 0) {
+    statusBadge = `<span class="stage" style="background:rgba(241,181,97,.15);color:var(--warn)">FIXED ${last.actions.length}</span>`;
+  } else if (last) {
+    statusBadge = `<span class="stage stage-upload">OK</span>`;
+  } else {
+    statusBadge = `<span class="stage" style="background:#2a2e36;color:var(--muted)">PENDING FIRST CHECK</span>`;
+  }
+
+  let html = `
+    <div class="worker-head" style="margin-bottom: .8em;">
+      <span class="name">Self-health agent · every ${interval}min · checks run: ${ag.checks_run}</span>
+      ${statusBadge}
+    </div>
+    <div class="field" style="margin-bottom: .4em;">
+      <label>Last check</label>
+      <span>${lastAge}${last ? ` · ${escapeHtml(last.headline)}` : ''}</span>
+    </div>
+    <div class="field" style="margin-bottom: .4em;">
+      <label>Next check in</label>
+      <span>${nextIn} ${ag.running_check ? '<span class="hint" style="color:var(--ok)">(running now)</span>' : ''}</span>
+    </div>
+  `;
+
+  if (last && last.results) {
+    html += `<div style="margin-top: .6em;"><b>Last check breakdown:</b></div>`;
+    html += `<table style="margin-top: .3em;"><thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>`;
+    for (const r of last.results) {
+      let cls, label;
+      if (r.needs_human) { cls = 'err'; label = 'needs human'; }
+      else if (r.actions && r.actions.length) { cls = 'warn'; label = 'fixed'; }
+      else if (r.ok) { cls = 'ok'; label = 'ok'; }
+      else { cls = 'warn'; label = 'warn'; }
+      html += `<tr><td>${escapeHtml(r.name)}</td><td class="${cls}">${label}</td><td>${escapeHtml(r.detail)}</td></tr>`;
+    }
+    html += `</tbody></table>`;
+  }
+
+  if (last && last.actions && last.actions.length) {
+    html += `<div style="margin-top: .6em;"><b>Auto-fixes applied:</b></div><ul style="margin-top: .2em;">`;
+    for (const a of last.actions) {
+      html += `<li style="font-size: .85em;">${escapeHtml(a)}</li>`;
+    }
+    html += `</ul>`;
+  }
+
+  html += `
+    <div style="margin-top: .8em;">
+      <button onclick="runHealthNow()" ${ag.running_check ? 'disabled' : ''}>Run check now</button>
+      <span class="hint" style="color:var(--muted);font-size:.85em;margin-left:.6em;">
+        Reports live to <a href="https://github.com/luisimperator/rep01/issues" target="_blank" style="color:var(--accent);">GitHub Issues</a>
+      </span>
+    </div>
+  `;
+  el.innerHTML = html;
+}
+
+async function runHealthNow() {
+  try {
+    const r = await fetchJSON('/api/health/run-now', { method: 'POST' });
+    if (r.ok) {
+      toast('Health check triggered', 'ok');
+      setTimeout(tick, 500);
+    } else {
+      toast('Could not trigger: ' + (r.error || 'unknown'), 'err');
+    }
+  } catch (e) { toast('Failed: ' + e.message, 'err'); }
 }
 
 function renderStorage(s) {

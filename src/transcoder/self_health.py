@@ -69,25 +69,82 @@ class SelfHealthAgent(threading.Thread):
         self.stop_event = stop_event
         self.interval_sec = interval_sec
         self._last_summary: dict | None = None
+        # Visibility surface for /api/health and the dashboard.
+        self._wake = threading.Event()
+        self._running_check = False
+        self._started_at = time.time()
+        self._last_check_at: float | None = None
+        self._next_check_at: float | None = None
+        self._check_count = 0
+
+    # --------------------------------------------------------- public state
+
+    def trigger_now(self) -> None:
+        """Wake the agent to run a check on the next loop iteration."""
+        self._wake.set()
+
+    def status(self) -> dict:
+        """Snapshot of agent state for /api/health and the dashboard."""
+        now = time.time()
+        next_at = self._next_check_at
+        next_in = max(0.0, next_at - now) if next_at else None
+        return {
+            "running": self.is_alive(),
+            "running_check": self._running_check,
+            "interval_sec": self.interval_sec,
+            "started_at": self._started_at,
+            "uptime_sec": max(0.0, now - self._started_at),
+            "checks_run": self._check_count,
+            "last_check_at": self._last_check_at,
+            "last_check_age_sec": (
+                max(0.0, now - self._last_check_at) if self._last_check_at else None
+            ),
+            "next_check_at": next_at,
+            "next_check_in_sec": next_in,
+            "last_summary": self._last_summary,
+        }
 
     # ----------------------------------------------------------------- loop
 
     def run(self) -> None:
         logger.info(f"self-health agent started (interval={self.interval_sec}s)")
         # Wait briefly so the first check sees real telemetry, not a fresh boot.
-        if self.stop_event.wait(self.INITIAL_DELAY_SEC):
+        self._next_check_at = time.time() + self.INITIAL_DELAY_SEC
+        if self._sleep(self.INITIAL_DELAY_SEC):
             return
 
         while not self.stop_event.is_set():
+            self._last_check_at = time.time()
+            self._running_check = True
             try:
                 self.run_once()
+                self._check_count += 1
             except Exception:
                 logger.exception("self-health check crashed")
+            finally:
+                self._running_check = False
 
-            if self.stop_event.wait(self.interval_sec):
+            self._next_check_at = time.time() + self.interval_sec
+            if self._sleep(self.interval_sec):
                 return
 
         logger.info("self-health agent stopped")
+
+    def _sleep(self, sec: float) -> bool:
+        """Wait up to `sec` seconds. Returns True if stop_event fired (caller
+        should exit). Wakes early if trigger_now() was called."""
+        deadline = time.monotonic() + sec
+        while True:
+            if self.stop_event.is_set():
+                return True
+            if self._wake.is_set():
+                self._wake.clear()
+                return False
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            # Poll every 0.5s so trigger_now() and stop_event are responsive.
+            self.stop_event.wait(min(0.5, remaining))
 
     def run_once(self) -> dict:
         """Run one round of checks + fixes; return the summary dict."""
