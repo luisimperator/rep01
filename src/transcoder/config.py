@@ -242,9 +242,29 @@ class Config(BaseModel):
     """Main configuration model."""
 
     # Dropbox settings
+    # Auth supports two modes:
+    #   1) Short-lived access token (legacy):  dropbox_token only.
+    #      App Console "Generate access token" button. Expires in ~4h, so the
+    #      daemon will die when the token expires. Useful for ad-hoc testing.
+    #   2) Refresh token (recommended for daemon):
+    #      dropbox_app_key + dropbox_refresh_token. The SDK refreshes the
+    #      access token automatically; the daemon runs for months unattended.
+    #      Run `hd auth` to obtain a refresh token via PKCE OAuth.
     dropbox_token: str = Field(
         default="",
-        description="Dropbox API access token (can use env DROPBOX_TOKEN)"
+        description="Dropbox short-lived access token (env DROPBOX_TOKEN)"
+    )
+    dropbox_app_key: str = Field(
+        default="",
+        description="Dropbox app key (for refresh-token auth)"
+    )
+    dropbox_app_secret: str = Field(
+        default="",
+        description="Dropbox app secret (optional; PKCE flow does not need it)"
+    )
+    dropbox_refresh_token: str = Field(
+        default="",
+        description="Dropbox long-lived refresh token (env DROPBOX_REFRESH_TOKEN)"
     )
     dropbox_root: str = Field(
         default="/Videos",
@@ -420,6 +440,36 @@ class Config(BaseModel):
             return os.environ.get('DROPBOX_TOKEN', '')
         return v
 
+    @field_validator('dropbox_refresh_token', mode='before')
+    @classmethod
+    def get_refresh_token_from_env(cls, v: str) -> str:
+        """Get Dropbox refresh token from environment if not set."""
+        if not v:
+            return os.environ.get('DROPBOX_REFRESH_TOKEN', '')
+        return v
+
+    @field_validator('dropbox_app_key', mode='before')
+    @classmethod
+    def get_app_key_from_env(cls, v: str) -> str:
+        if not v:
+            return os.environ.get('DROPBOX_APP_KEY', '')
+        return v
+
+    @field_validator('dropbox_app_secret', mode='before')
+    @classmethod
+    def get_app_secret_from_env(cls, v: str) -> str:
+        if not v:
+            return os.environ.get('DROPBOX_APP_SECRET', '')
+        return v
+
+    def has_dropbox_auth(self) -> bool:
+        """True if either auth mode is configured."""
+        if self.dropbox_refresh_token and self.dropbox_app_key:
+            return True
+        if self.dropbox_token:
+            return True
+        return False
+
     @field_validator('local_staging_dir', 'local_output_dir', 'database_path',
                      'lockfile_path', 'log_dir', mode='before')
     @classmethod
@@ -486,6 +536,9 @@ def save_example_config(path: Path) -> None:
     """Save an example configuration file."""
     example = {
         'dropbox_token': '${DROPBOX_TOKEN}',
+        'dropbox_app_key': '',
+        'dropbox_app_secret': '',
+        'dropbox_refresh_token': '${DROPBOX_REFRESH_TOKEN}',
         'dropbox_root': '/Videos',
         'local_staging_dir': '/data/transcoder/staging',
         'local_output_dir': '/data/transcoder/output',

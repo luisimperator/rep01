@@ -2,6 +2,39 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.1
+Data: 01/05/2026
+--------------------------------------------------------------------------------
+
+CORREÇÃO URGENTE - AUTENTICAÇÃO DROPBOX
+
+  [BUGFIX] Tokens do Dropbox expiravam em 4h e travavam o daemon
+  --------------------------------------------------------------
+  ANTES: o daemon usava só "access token" (curta duração). Quando o Dropbox
+         expirava o token (~4h), o daemon caía com "expired_access_token"
+         e não voltava sozinho.
+  AGORA: suporte a refresh token (tempo indeterminado). O cliente Dropbox
+         renova o access token sozinho. Daemon roda 24/7 por meses.
+
+  [NOVO COMANDO] hd auth
+  ----------------------
+  Configura a autenticação permanente em 1 minuto:
+    1. Você cola o "app key" do seu app no Dropbox.
+    2. O comando abre o navegador no Dropbox pra você clicar em "Allow".
+    3. Você cola o código que o Dropbox mostra de volta no terminal.
+    4. O comando salva app_key + refresh_token no config.yaml. Pronto.
+
+  [CONFIG] Novos campos no config.yaml (todos opcionais)
+  ------------------------------------------------------
+    dropbox_app_key:        chave do app no Dropbox
+    dropbox_app_secret:     opcional (PKCE não precisa)
+    dropbox_refresh_token:  token longo gerado pelo "hd auth"
+
+  Compatibilidade: dropbox_token (legado, curta duração) continua funcionando
+  pra uso pontual. O daemon prefere refresh token quando disponível.
+
+================================================================================
+
 Versão: 6.0.0
 Data: 01/05/2026
 --------------------------------------------------------------------------------

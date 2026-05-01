@@ -36,7 +36,7 @@ from .config import Config, EncoderPreference, TranscodeProfile, load_config, sa
 from .database import ACTIVE_STATES, Database, Job, JobState, TERMINAL_STATES
 from .disk_budget import DiskBudget
 from .dispatcher import JobDispatcher
-from .dropbox_client import DropboxClient
+from .dropbox_client import DropboxClient, make_client_from_config
 from .encoder_detect import (
     EncoderType,
     detect_available_encoders,
@@ -168,13 +168,18 @@ class Daemon:
             name="dropbox",
         )
 
-        # Dropbox client
-        self.dropbox = DropboxClient(
-            self.config.dropbox_token,
-            rate_limiter=self.rate_limiter,
-        )
+        # Dropbox client (refresh-token mode if configured, else short-lived)
+        if not self.config.has_dropbox_auth():
+            raise RuntimeError(
+                "Dropbox auth missing. Run `hd auth` to set up a refresh "
+                "token, or set dropbox_token in config.yaml."
+            )
+        self.dropbox = make_client_from_config(self.config, rate_limiter=self.rate_limiter)
         if not self.dropbox.check_connection():
-            raise RuntimeError("Failed to connect to Dropbox")
+            raise RuntimeError(
+                "Failed to connect to Dropbox. If your token expired, "
+                "run `hd auth` to set up a long-lived refresh token."
+            )
 
         # Scanner (shares the daemon stop_event so bulk passes bail cleanly)
         self.scanner = Scanner(self.config, self.db, self.dropbox, self.stop_event)
@@ -395,7 +400,7 @@ def run_once(ctx: click.Context) -> None:
     db = Database(config.database_path)
     db.initialize()
 
-    dropbox = DropboxClient(config.dropbox_token)
+    dropbox = make_client_from_config(config)
     scanner = Scanner(config, db, dropbox)
 
     # Scan
@@ -428,7 +433,7 @@ def scan_now(ctx: click.Context, dry_run: bool) -> None:
     db = Database(config.database_path)
     db.initialize()
 
-    dropbox = DropboxClient(config.dropbox_token)
+    dropbox = make_client_from_config(config)
     scanner = Scanner(config, db, dropbox)
 
     mode = "[yellow](dry run)[/yellow]" if dry_run else ""
@@ -600,8 +605,8 @@ def dry_run(ctx: click.Context, dropbox_path: str) -> None:
     console.print(f"  In h265 folder: {is_in_h265_folder(dropbox_path, mirror_root)}")
 
     # Check Dropbox
-    if config.dropbox_token:
-        dropbox = DropboxClient(config.dropbox_token)
+    if config.has_dropbox_auth():
+        dropbox = make_client_from_config(config)
         metadata = dropbox.get_metadata(dropbox_path)
 
         if metadata:
@@ -649,6 +654,155 @@ def init_config(path: str) -> None:
     save_example_config(config_path)
     console.print(f"[green]Created example config at: {config_path}[/green]")
     console.print("\nEdit the file and set your DROPBOX_TOKEN environment variable.")
+
+
+@cli.command()
+@click.option('--app-key', default=None, help='Dropbox app key. Defaults to the value in config.yaml or prompts for one.')
+@click.option('--no-write', is_flag=True, help='Print the refresh token instead of writing it to config.yaml.')
+@click.pass_context
+def auth(ctx: click.Context, app_key: str | None, no_write: bool) -> None:
+    """
+    Obtain a long-lived Dropbox refresh token via PKCE OAuth.
+
+    Run this once. The daemon then refreshes its access token automatically
+    and runs unattended for months. Steps:
+
+      1. You provide a Dropbox app key (from https://www.dropbox.com/developers/apps).
+      2. This command opens an authorize URL in your browser.
+      3. You click "Allow", Dropbox shows an authorization code.
+      4. You paste the code back here.
+      5. The refresh token is saved into config.yaml.
+    """
+    import base64
+    import hashlib
+    import json
+    import re
+    import secrets
+    import urllib.parse
+    import urllib.request
+    import webbrowser
+
+    config_path_str = ctx.obj.get('config_path')
+    config = load_config(config_path_str)
+
+    if app_key is None:
+        app_key = config.dropbox_app_key
+
+    if not app_key:
+        console.print("[yellow]No Dropbox app key found in config.[/yellow]")
+        console.print("Create or open an app at https://www.dropbox.com/developers/apps")
+        console.print("Use 'Scoped access' + 'Full Dropbox' permissions including:")
+        console.print("  files.content.read, files.content.write,")
+        console.print("  files.metadata.read, files.metadata.write")
+        app_key = click.prompt('Paste your Dropbox app key', type=str).strip()
+
+    if not app_key:
+        console.print("[red]App key is required.[/red]")
+        sys.exit(1)
+
+    # Generate PKCE code verifier (43-128 chars) and S256 challenge
+    verifier = base64.urlsafe_b64encode(secrets.token_bytes(64)).rstrip(b'=').decode('ascii')
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode('ascii')).digest()
+    ).rstrip(b'=').decode('ascii')
+
+    authorize_url = (
+        'https://www.dropbox.com/oauth2/authorize?'
+        + urllib.parse.urlencode({
+            'client_id': app_key,
+            'response_type': 'code',
+            'token_access_type': 'offline',
+            'code_challenge': challenge,
+            'code_challenge_method': 'S256',
+        })
+    )
+
+    console.print("\n[cyan]Open this URL in your browser:[/cyan]")
+    console.print(authorize_url)
+    console.print()
+    try:
+        webbrowser.open(authorize_url)
+    except Exception:
+        pass
+
+    auth_code = click.prompt('Paste the authorization code shown by Dropbox', type=str).strip()
+    if not auth_code:
+        console.print("[red]Authorization code is required.[/red]")
+        sys.exit(1)
+
+    # Exchange the code for a refresh token (PKCE: no app_secret needed)
+    token_url = 'https://api.dropbox.com/oauth2/token'
+    body = urllib.parse.urlencode({
+        'code': auth_code,
+        'grant_type': 'authorization_code',
+        'code_verifier': verifier,
+        'client_id': app_key,
+    }).encode('ascii')
+
+    req = urllib.request.Request(
+        token_url,
+        data=body,
+        headers={'Content-Type': 'application/x-www-form-urlencoded'},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode('utf-8', errors='replace')
+        console.print(f"[red]Token exchange failed: HTTP {e.code} {e.reason}[/red]")
+        console.print(f"[red]{err_body}[/red]")
+        sys.exit(1)
+    except Exception as e:
+        console.print(f"[red]Token exchange failed: {e}[/red]")
+        sys.exit(1)
+
+    refresh_token = payload.get('refresh_token')
+    if not refresh_token:
+        console.print(f"[red]Dropbox response did not include a refresh_token: {payload}[/red]")
+        sys.exit(1)
+
+    console.print("[green]Got refresh token.[/green]")
+
+    if no_write:
+        console.print(f"\napp_key:       {app_key}")
+        console.print(f"refresh_token: {refresh_token}")
+        return
+
+    # Locate the config.yaml to update
+    if config_path_str:
+        cfg_path = Path(config_path_str)
+    else:
+        for candidate in [Path('config.yaml'), Path('config.yml')]:
+            if candidate.exists():
+                cfg_path = candidate
+                break
+        else:
+            cfg_path = Path('config.yaml')
+
+    if cfg_path.exists():
+        raw = cfg_path.read_text(encoding='utf-8')
+    else:
+        raw = ''
+
+    def _set_yaml_key(text: str, key: str, value: str) -> str:
+        """Update or insert a top-level scalar key in YAML preserving comments."""
+        pattern = re.compile(rf'^{re.escape(key)}\s*:.*$', re.MULTILINE)
+        line = f'{key}: "{value}"'
+        if pattern.search(text):
+            return pattern.sub(line, text, count=1)
+        if text and not text.endswith('\n'):
+            text += '\n'
+        return text + line + '\n'
+
+    raw = _set_yaml_key(raw, 'dropbox_app_key', app_key)
+    raw = _set_yaml_key(raw, 'dropbox_refresh_token', refresh_token)
+    cfg_path.write_text(raw, encoding='utf-8')
+
+    console.print(f"[green]Saved app_key and refresh_token to {cfg_path}.[/green]")
+    console.print("\nThe daemon will now refresh its access token automatically.")
+    console.print("Restart it to apply:")
+    console.print("  schtasks /End /TN HeavyDropsDaemon")
+    console.print("  schtasks /Run /TN HeavyDropsDaemon")
 
 
 @cli.command('show-encoders')
@@ -770,14 +924,14 @@ def inventory(
     config = load_config(config_path)
     setup_logging(verbose)
 
-    if not config.dropbox_token:
-        console.print("[red]Error: DROPBOX_TOKEN environment variable not set[/red]")
+    if not config.has_dropbox_auth():
+        console.print("[red]Error: Dropbox auth not configured. Run `hd auth` or set dropbox_token.[/red]")
         return
 
-    dropbox = DropboxClient(config.dropbox_token)
+    dropbox = make_client_from_config(config)
 
     if not dropbox.check_connection():
-        console.print("[red]Error: Could not connect to Dropbox[/red]")
+        console.print("[red]Error: Could not connect to Dropbox. Run `hd auth` if your token expired.[/red]")
         return
 
     scanner = InventoryScanner(config, dropbox)

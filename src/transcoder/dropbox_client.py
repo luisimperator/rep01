@@ -71,6 +71,23 @@ class DropboxRevChangedError(DropboxClientError):
     pass
 
 
+def make_client_from_config(config, rate_limiter: TokenBucket | None = None) -> "DropboxClient":
+    """
+    Build a DropboxClient from a Config object, picking the right auth mode.
+
+    Prefers refresh-token auth (app_key + refresh_token) over short-lived
+    access tokens. Used by every entry point so the auth wiring lives in
+    exactly one place.
+    """
+    return DropboxClient(
+        token=config.dropbox_token,
+        app_key=config.dropbox_app_key,
+        app_secret=config.dropbox_app_secret,
+        refresh_token=config.dropbox_refresh_token,
+        rate_limiter=rate_limiter,
+    )
+
+
 class DropboxClient:
     """
     Wrapper for Dropbox API operations.
@@ -83,28 +100,57 @@ class DropboxClient:
 
     def __init__(
         self,
-        token: str,
+        token: str = "",
         max_retries: int = 5,
         retry_delay: float = 2.0,
         rate_limiter: TokenBucket | None = None,
+        app_key: str = "",
+        app_secret: str = "",
+        refresh_token: str = "",
     ):
         """
         Initialize Dropbox client.
 
+        Two auth modes are supported:
+
+        1) Refresh token (recommended for long-running daemons): pass
+           `app_key` + `refresh_token` (and optionally `app_secret` for
+           confidential clients). The SDK refreshes the short-lived access
+           token automatically, so the daemon runs for months unattended.
+        2) Short-lived access token (legacy / ad-hoc): pass `token` only.
+           Modern Dropbox tokens generated in the App Console expire in
+           around 4 hours.
+
         Args:
-            token: Dropbox API access token.
+            token: Dropbox short-lived access token.
             max_retries: Maximum number of retries for transient errors.
             retry_delay: Base delay between retries (exponential backoff).
             rate_limiter: Optional token bucket. If provided, every retried
                 operation acquires `weight` tokens before issuing a request.
+            app_key: Dropbox app key (refresh-token mode).
+            app_secret: Dropbox app secret (optional; PKCE clients omit it).
+            refresh_token: Dropbox long-lived refresh token.
         """
-        if not token:
-            raise DropboxAuthError("Dropbox token is required")
-
         self.max_retries = max_retries
         self.retry_delay = retry_delay
         self.rate_limiter = rate_limiter
-        self._dbx = dropbox.Dropbox(token)
+
+        if refresh_token and app_key:
+            kwargs = {
+                'oauth2_refresh_token': refresh_token,
+                'app_key': app_key,
+            }
+            if app_secret:
+                kwargs['app_secret'] = app_secret
+            self._dbx = dropbox.Dropbox(**kwargs)
+        elif token:
+            self._dbx = dropbox.Dropbox(token)
+        else:
+            raise DropboxAuthError(
+                "Dropbox auth missing: provide either dropbox_token "
+                "or dropbox_app_key + dropbox_refresh_token. "
+                "Run `hd auth` to set up a refresh token."
+            )
 
     def _normalize_path(self, path: str) -> str:
         """Normalize Dropbox path (lowercase, leading slash)."""

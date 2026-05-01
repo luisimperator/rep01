@@ -1,8 +1,16 @@
 # HeavyDrops Transcoder — example configuration.
 #
-# Copy this file to config.yaml and edit. Only dropbox_token is required.
+# Copy this file to config.yaml and edit. Either short-lived or refresh-token
+# auth is required (see below).
 #
-# dropbox_token:  your Dropbox API access token (from developers.dropbox.com).
+# Auth, two modes:
+#   1) Refresh token (recommended for the daemon — runs forever, never expires):
+#      Run `hd auth` once. It walks you through Dropbox OAuth and writes
+#      dropbox_app_key + dropbox_refresh_token here.
+#   2) Short-lived access token (legacy / ad-hoc, ~4h lifetime):
+#      Generate one at https://www.dropbox.com/developers/apps and paste it
+#      into dropbox_token. The daemon will die when the token expires.
+#
 # dropbox_root:   a VIRTUAL path inside your Dropbox account (starts with "/").
 #                 Use "/" to process your entire Dropbox, or "/Videos" etc.
 #                 This is NOT your local Dropbox folder on disk.
@@ -17,6 +25,9 @@
 #                 few TB local disk pointed at a huge Dropbox).
 
 dropbox_token: ${DROPBOX_TOKEN}
+dropbox_app_key: ''
+dropbox_app_secret: ''
+dropbox_refresh_token: ${DROPBOX_REFRESH_TOKEN}
 dropbox_root: /Videos
 local_staging_dir: /data/transcoder/staging
 local_output_dir: /data/transcoder/output
