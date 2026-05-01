@@ -166,7 +166,13 @@
   </table>
 </details>
 
-<h2>Activity log <span style="color:var(--muted);font-weight:normal;font-size:.85em">(last 200 lines, auto-refresh)</span></h2>
+<div class="row" style="justify-content: space-between; align-items: baseline; margin-top: 1.4em; margin-bottom: .5em;">
+  <h2 style="margin: 0;">Activity log <span style="color:var(--muted);font-weight:normal;font-size:.85em">(last 200 lines, auto-refresh)</span></h2>
+  <div>
+    <button onclick="copyLog()" id="copy-log-btn">Copy log</button>
+    <button onclick="copyLog(2000)">Copy last 2000 lines</button>
+  </div>
+</div>
 <pre id="log" class="log">loading...</pre>
 
 <div id="toast-area"></div>
@@ -253,6 +259,9 @@ function renderNow(s, a) {
     what = `${stage.charAt(0).toUpperCase() + stage.slice(1)}ing <b>${escapeHtml(file)}</b> — ${pct}%`;
     why = `${detail}${eta}`;
     if (workers.length > 1) why += ` · plus ${workers.length - 1} other worker${workers.length > 2 ? 's' : ''}`;
+  } else if (s.scan && s.scan.last_error) {
+    what = `<span class="err">Scan failing</span> — ${escapeHtml(s.scan.last_error)}`;
+    why = `dropbox_root = <code>${escapeHtml(s.scan.dropbox_root)}</code>. Edit it under Settings (no trailing slash) and Save.`;
   } else if (scan.mode === 'bulk' || scan.mode === 'delta') {
     const where = scan.current_path ? ` at <code style="color:var(--muted)">${escapeHtml(scan.current_path)}</code>` : '';
     what = `Scanning Dropbox <b>(${scan.mode.toUpperCase()})</b>${where}`;
@@ -420,6 +429,11 @@ async function renderSettings() {
   const s = sp.settings, k = sp.knobs, ctx = sp.context;
   document.getElementById('settings-body').innerHTML = `
     <div class="field">
+      <label for="set-root">${escapeHtml(k.dropbox_root.label)}</label>
+      <input id="set-root" type="text" value="${escapeHtml(s.dropbox_root)}" style="min-width: 280px;">
+      <span class="hint">e.g. <code>/Videos</code>. Use <code>/</code> for everything. No trailing slash.</span>
+    </div>
+    <div class="field">
       <label for="set-cq">${escapeHtml(k.cq_value.label)}</label>
       <input id="set-cq" type="number" min="${k.cq_value.min}" max="${k.cq_value.max}" value="${s.cq_value}">
       <span class="hint">${k.cq_value.min}–${k.cq_value.max}. Default 24.</span>
@@ -458,6 +472,7 @@ async function renderSettings() {
 }
 async function saveSettings() {
   const body = {
+    dropbox_root: document.getElementById('set-root').value,
     cq_value: parseInt(document.getElementById('set-cq').value),
     min_size_gb: parseFloat(document.getElementById('set-min').value),
     legacy_reorganize: document.getElementById('set-reorg').checked,
@@ -585,6 +600,27 @@ async function togglePause() {
   const paused = document.getElementById('pause-btn').dataset.paused === '1';
   await post(paused ? '/api/resume' : '/api/pause');
 }
+async function copyLog(n) {
+  const lines = n || 200;
+  try {
+    const r = await fetchJSON('/api/log?lines=' + lines);
+    const text = (r.lines || []).join('\n');
+    if (!navigator.clipboard) {
+      // Fallback: select the visible <pre> and let user Ctrl+C
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(document.getElementById('log'));
+      sel.removeAllRanges(); sel.addRange(range);
+      toast('Selected log — press Ctrl+C', 'ok');
+      return;
+    }
+    await navigator.clipboard.writeText(text);
+    toast(`Copied ${(r.lines || []).length} log lines to clipboard`, 'ok');
+  } catch (e) {
+    toast('Copy failed: ' + e.message, 'err');
+  }
+}
+
 async function restartDaemon() {
   if (!confirm('Restart the daemon? Active jobs will be paused; the dashboard will reload in ~10 seconds.')) return;
   try {

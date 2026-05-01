@@ -153,11 +153,19 @@ class DropboxClient:
             )
 
     def _normalize_path(self, path: str) -> str:
-        """Normalize Dropbox path (lowercase, leading slash)."""
+        """Normalize Dropbox path: leading slash, no trailing slash, root → ''.
+
+        files_list_folder rejects paths that end in '/' with "not_found", so we
+        strip them defensively. Empty paths and '/' are mapped to '' which is
+        the form the SDK wants for the account root.
+        """
         path = path.strip()
         if not path.startswith('/'):
             path = '/' + path
-        # Dropbox API wants empty string for root
+        # Strip trailing slashes, but never let the path become empty before
+        # the root check.
+        while len(path) > 1 and path.endswith('/'):
+            path = path[:-1]
         if path == '/':
             return ''
         return path

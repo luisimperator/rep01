@@ -112,6 +112,10 @@ class Daemon:
         self.started_at = time.time()
         self.workers: list[threading.Thread] = []
         self._lock_fd: int | None = None
+        # Surface the last scan error so the dashboard can flag a stuck scan
+        # rather than silently showing entries_seen=0 forever.
+        self.last_scan_error: str | None = None
+        self.last_scan_error_at: float | None = None
 
     def acquire_lock(self) -> bool:
         """Acquire exclusive lock to prevent multiple instances."""
@@ -198,8 +202,13 @@ class Daemon:
             enabled=self.config.disk_budget.enabled,
         )
 
-        # Select encoder
-        encoder = select_best_encoder(self.config)
+        # Select encoder once. We pass verify=False because the synthetic
+        # 64x64 testsrc clip in verify_encoder_works trips up some hardware
+        # encoders (notably hevc_qsv with non-standard input formats) even
+        # when they encode real footage fine; using the detection result
+        # alone is more reliable in practice.
+        encoder = select_best_encoder(self.config, verify=False)
+        self._selected_encoder = encoder
         logger.info(f"Using encoder: {encoder.value}")
 
         # Fire-and-forget GitHub release check; the HTTP API surfaces the result
@@ -230,6 +239,8 @@ class Daemon:
             scan_trigger=self.scan_trigger,
             started_at_epoch=self.started_at,
         )
+        # Expose the daemon back to the API so /api/status can read scan errors.
+        self.api_server.daemon = self
         self.api_server.start()
 
         # Download workers
@@ -247,8 +258,10 @@ class Daemon:
             worker.start()
             self.workers.append(worker)
 
-        # Transcode workers
-        encoder = select_best_encoder(self.config, verify=False)
+        # Transcode workers — reuse the encoder picked above so log + behavior
+        # agree. Workers still hold a fallback path via select_best_encoder
+        # inside _transcode_job for jobs created before encoder detection.
+        encoder = self._selected_encoder
         for i in range(self.config.concurrency.transcode_workers):
             worker = TranscodeWorker(
                 i,
@@ -301,8 +314,11 @@ class Daemon:
                     f"{stats['waiting_stable']} waiting, "
                     f"{stats['skipped_small']} too small"
                 )
+                self.last_scan_error = None
             except Exception as e:
                 logger.error(f"Scan error: {e}")
+                self.last_scan_error = str(e)
+                self.last_scan_error_at = time.time()
 
             # Sleep until either stop or scan-now trigger fires
             self.scan_trigger.clear()

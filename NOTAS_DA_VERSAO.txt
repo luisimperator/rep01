@@ -2,6 +2,65 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.6
+Data: 01/05/2026
+--------------------------------------------------------------------------------
+
+CORRECOES IMPORTANTES NO LOG E NO DROPBOX_ROOT
+
+  [BUGFIX] dropbox_root com barra no final dava "Path not found"
+  --------------------------------------------------------------
+  ANTES: Se voce configurasse dropbox_root: /Videos/, o scan dava erro
+         "Path not found" em loop pra sempre. A API do Dropbox nao aceita
+         barra no final. O daemon ficava com entries_seen=0 sem nunca
+         processar nada.
+  AGORA: O cliente Dropbox tira barras finais automaticamente. Nao
+         importa se voce digita "/Videos", "/Videos/", ou "/Videos///",
+         tudo funciona.
+
+  [BUGFIX] "Conversion failed!" assustando no log sem motivo
+  ----------------------------------------------------------
+  ANTES: Na inicializacao, o daemon testa cada encoder (QSV, NVENC, CPU)
+         com um clipe sintetico de 1 segundo 64x64. Esse clipe e muito
+         pequeno e tem formato esquisito que faz QSV e NVENC reclamarem.
+         O log dumpava o stderr inteiro do ffmpeg incluindo
+         "Conversion failed!" - parecia que arquivos seus tinham falhado
+         na transcodificacao, mas era so a verificacao sintetica.
+  AGORA: Verificacao sintetica removida. O daemon usa direto a deteccao
+         de encoders do ffmpeg ("ffmpeg -encoders") que e confiavel.
+         Logs antigos eram falso-positivo - seu QSV sempre funcionou
+         pra arquivos reais.
+
+  [BUGFIX] "Using encoder: libx265" mentindo
+  ------------------------------------------
+  ANTES: Daemon logava "Using encoder: libx265" no startup mas os
+         workers transcodavam com hevc_qsv (Intel QuickSync). A primeira
+         selecao verificava com clipe sintetico (falhava), a segunda
+         selecao (a usada de verdade) nao verificava (escolhia QSV).
+  AGORA: Selecao unica. O log "Using encoder: hevc_qsv" agora bate com
+         o que os workers usam. Se voce tem QSV, ele e usado.
+
+  [NOVO] Erro de scan visivel no painel
+  --------------------------------------
+  Quando o scan falha (caminho invalido, problema de auth, etc), o
+  banner AGORA mostra o erro em vermelho com hint pra editar o
+  dropbox_root nos Settings. Antes, voce so descobria abrindo o log.
+
+  [NOVO] dropbox_root editavel no painel
+  ---------------------------------------
+  Settings agora tem campo de texto pra dropbox_root. Salvar atualiza
+  config.yaml e a config rodando, sem restart. Proximo scan ja usa
+  o caminho novo.
+
+  [NOVO] Botoes "Copy log"
+  ------------------------
+  Ao lado do "Activity log" no painel:
+    - "Copy log": ultimas 200 linhas pra clipboard
+    - "Copy last 2000 lines": pra mandar pra mim quando tiver bug
+  Toast verde confirma quando copiou.
+
+================================================================================
+
 Versão: 6.0.5
 Data: 01/05/2026
 --------------------------------------------------------------------------------

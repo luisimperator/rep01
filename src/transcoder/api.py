@@ -241,6 +241,8 @@ def _status_payload(api: ApiServer) -> dict:
             "bulk_started_at": scan_state.bulk_started_at,
             "bulk_completed_at": scan_state.bulk_completed_at,
             "last_delta_at": scan_state.last_delta_at,
+            "last_error": getattr(getattr(api, "daemon", None), "last_scan_error", None),
+            "last_error_at": getattr(getattr(api, "daemon", None), "last_scan_error_at", None),
         },
         "dispatcher": {
             "paused": api.dispatcher.is_paused(),
@@ -416,6 +418,11 @@ _SETTINGS_KNOBS: dict[str, dict] = {
         "yaml_key": "min_size_gb",
         "label": "Skip files smaller than N GB",
     },
+    "dropbox_root": {
+        "type": "path",
+        "yaml_key": "dropbox_root",
+        "label": "Dropbox folder to monitor (must start with /)",
+    },
 }
 
 
@@ -427,6 +434,7 @@ def _settings_payload(api: ApiServer) -> dict:
         "settings": {
             "legacy_reorganize": cfg.legacy_reorganize,
             "legacy_reorganize_min_age_days": cfg.legacy_reorganize_min_age_days,
+            "dropbox_root": cfg.dropbox_root,
             "cq_value": cfg.cq_value,
             "min_size_gb": cfg.min_size_gb,
         },
@@ -496,6 +504,15 @@ def _apply_settings(api: ApiServer, body: dict) -> dict:
                 raise ValueError(f"{key} must be a number")
             if value < knob["min"] or value > knob["max"]:
                 raise ValueError(f"{key} must be between {knob['min']} and {knob['max']}")
+        elif knob["type"] == "path":
+            value = str(raw or "").strip()
+            if not value:
+                raise ValueError(f"{key} cannot be empty")
+            if not value.startswith("/"):
+                value = "/" + value
+            # Strip trailing slashes — files_list_folder rejects them.
+            while len(value) > 1 and value.endswith("/"):
+                value = value[:-1]
         else:
             raise ValueError(f"unsupported type for {key}")
 

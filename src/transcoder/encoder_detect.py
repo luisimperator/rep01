@@ -19,6 +19,26 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _short_reason(stderr: str) -> str:
+    """Pull the first informative-looking line out of multi-line ffmpeg stderr
+    so the daemon log stays readable. Skips banners, cuts to ~120 chars.
+    """
+    if not stderr:
+        return "no output"
+    skip_prefixes = ("Press", "Stream mapping", "Stream #", "Input #", "  ",
+                     "Duration:", "Output #", "frame=", "encoder ")
+    for raw in stderr.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if any(line.startswith(p) for p in skip_prefixes):
+            continue
+        if len(line) > 120:
+            line = line[:117] + "..."
+        return line
+    return "verification failed"
+
+
 class EncoderType(str, Enum):
     """Available encoder types."""
     QSV = "hevc_qsv"
@@ -173,7 +193,15 @@ def verify_encoder_works(
             logger.info(f"Encoder {encoder_type.value} verified working")
             return True
         else:
-            logger.warning(f"Encoder {encoder_type.value} failed verification: {result.stderr}")
+            # The verification clip is synthetic and several encoders fail to
+            # accept it even when they encode real footage fine — log a one-
+            # line reason at INFO so the daemon log doesn't fill up with
+            # multi-line ffmpeg traces that look like real conversion errors.
+            short = _short_reason(result.stderr)
+            logger.info(
+                f"Encoder {encoder_type.value} synthetic verification failed "
+                f"({short}); will fall back if a real conversion also fails."
+            )
             return False
 
     except subprocess.TimeoutExpired:
