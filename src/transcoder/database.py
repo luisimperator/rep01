@@ -531,6 +531,59 @@ class Database:
             )
             return cursor.rowcount
 
+    def list_jobs_by_state_since(
+        self,
+        state: "JobState",
+        since: datetime | None = None,
+        path_prefix: str | None = None,
+    ) -> list[Job]:
+        """List jobs in `state` whose updated_at >= `since`, optionally
+        filtered by dropbox_path prefix. Used by hd reconvert."""
+        clauses = ["state = ?"]
+        params: list = [state.value]
+        if since is not None:
+            clauses.append("updated_at >= ?")
+            params.append(since.strftime('%Y-%m-%d %H:%M:%S'))
+        if path_prefix:
+            clauses.append("dropbox_path LIKE ?")
+            params.append(path_prefix.rstrip('/') + '/%')
+        sql = (
+            "SELECT * FROM jobs WHERE " + " AND ".join(clauses)
+            + " ORDER BY updated_at DESC"
+        )
+        conn = self._get_connection()
+        cursor = conn.execute(sql, params)
+        return [Job.from_row(r) for r in cursor.fetchall()]
+
+    def reset_jobs_to_new(
+        self,
+        state: "JobState",
+        since: datetime | None = None,
+        path_prefix: str | None = None,
+    ) -> int:
+        """Reset matching jobs back to NEW so the dispatcher reprocesses
+        them. Clears retry_count and the local_*_path fields so a fresh
+        download/transcode/upload cycle runs."""
+        clauses = ["state = ?"]
+        params: list = [state.value]
+        if since is not None:
+            clauses.append("updated_at >= ?")
+            params.append(since.strftime('%Y-%m-%d %H:%M:%S'))
+        if path_prefix:
+            clauses.append("dropbox_path LIKE ?")
+            params.append(path_prefix.rstrip('/') + '/%')
+        sql = (
+            "UPDATE jobs SET state = ?, retry_count = 0, "
+            "local_input_path = NULL, local_output_path = NULL, "
+            "transcode_start = NULL, transcode_end = NULL "
+            "WHERE " + " AND ".join(clauses)
+        )
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                sql, [JobState.NEW.value] + params,
+            )
+            return cursor.rowcount
+
     def check_output_exists(self, output_path: str) -> bool:
         """Check if a DONE job exists for the output path."""
         conn = self._get_connection()

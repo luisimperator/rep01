@@ -924,6 +924,95 @@ def auth(ctx: click.Context, app_key: str | None, no_write: bool) -> None:
     console.print("  schtasks /Run /TN HeavyDropsDaemon")
 
 
+@cli.command('reconvert')
+@click.option('--since', default=None,
+              help='Only re-do jobs updated after this date. Format: '
+                   '"YYYY-MM-DD" or "YYYY-MM-DD HH:MM:SS". '
+                   'Default: re-do every DONE job.')
+@click.option('--folder', default=None,
+              help='Only re-do jobs whose dropbox_path starts with this prefix.')
+@click.option('--state', default='DONE',
+              type=click.Choice(['DONE', 'FAILED', 'SKIPPED_HEVC',
+                                 'SKIPPED_ALREADY_EXISTS', 'SKIPPED_TOO_SMALL']),
+              help='Which terminal state to reset back to NEW. Default DONE.')
+@click.option('--dry-run', is_flag=True, help='Show what would happen without changing anything.')
+@click.pass_context
+def reconvert(ctx, since, folder, state, dry_run):
+    """
+    Reset already-completed jobs back to NEW so they re-download and
+    re-transcode. Useful after a code change (e.g. timecode preservation
+    in v6.0.20) when you want to redo recent files with the new behavior.
+
+    The H.265 outputs in Dropbox at /<parent>/h265/<name> will be
+    OVERWRITTEN on the next upload. The H.264 originals are not touched.
+    """
+    from datetime import datetime as _dt
+    from .database import JobState
+
+    config_path = ctx.obj.get('config_path')
+    verbose = ctx.obj.get('verbose', False)
+    config = load_config(config_path)
+    setup_logging(verbose)
+    config.ensure_directories()
+
+    parsed_since = None
+    if since:
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try:
+                parsed_since = _dt.strptime(since, fmt)
+                break
+            except ValueError:
+                continue
+        if parsed_since is None:
+            console.print(f"[red]Could not parse --since={since!r}. Use YYYY-MM-DD or YYYY-MM-DD HH:MM:SS.[/red]")
+            sys.exit(1)
+
+    db = Database(config.database_path); db.initialize()
+
+    target_state = JobState(state)
+    matching = db.list_jobs_by_state_since(
+        state=target_state,
+        since=parsed_since,
+        path_prefix=folder,
+    )
+
+    if not matching:
+        console.print(f"[yellow]No {state} jobs match the filter.[/yellow]")
+        return
+
+    table = Table(title=f"Jobs to reset ({state} → NEW)")
+    table.add_column("ID", style="cyan", justify="right")
+    table.add_column("Updated", style="dim")
+    table.add_column("Path", overflow="fold")
+    table.add_column("Size", justify="right")
+    for job in matching[:50]:
+        table.add_row(
+            str(job.id),
+            job.updated_at.strftime('%Y-%m-%d %H:%M') if job.updated_at else '',
+            job.dropbox_path,
+            f"{(job.dropbox_size or 0)/(1024**3):.2f} GB",
+        )
+    console.print(table)
+    if len(matching) > 50:
+        console.print(f"[dim]... and {len(matching) - 50} more[/dim]")
+    console.print(f"\n[blue]Total: {len(matching)} job(s) to reset[/blue]")
+
+    if dry_run:
+        console.print("[yellow]Dry run — no changes made.[/yellow]")
+        return
+
+    if not click.confirm(f"\nReset these {len(matching)} job(s) back to NEW for reprocessing?"):
+        console.print("[yellow]Cancelled.[/yellow]")
+        return
+
+    n = db.reset_jobs_to_new(
+        state=target_state, since=parsed_since, path_prefix=folder,
+    )
+    console.print(f"[green]Reset {n} job(s). Next scan picks them up.[/green]")
+    console.print("Trigger an immediate scan with the daemon's 'Scan now' button or:")
+    console.print("  curl -X POST http://127.0.0.1:9123/api/scan-now")
+
+
 @cli.command('reorganize-existing')
 @click.option(
     '--min-age-days',
