@@ -805,6 +805,153 @@ def auth(ctx: click.Context, app_key: str | None, no_write: bool) -> None:
     console.print("  schtasks /Run /TN HeavyDropsDaemon")
 
 
+@cli.command('reorganize-existing')
+@click.option(
+    '--min-age-days',
+    type=int,
+    default=None,
+    help='Skip folders with any user activity in the last N days. '
+         'Default: legacy_reorganize_min_age_days from config.yaml.',
+)
+@click.option('--dry-run', is_flag=True, help='Show what would happen without changing anything.')
+@click.option(
+    '--folder',
+    default=None,
+    help='Only consider this Dropbox subfolder (default: dropbox_root from config).',
+)
+@click.option(
+    '--limit',
+    type=int,
+    default=None,
+    help='Process at most N folders (useful for testing).',
+)
+@click.pass_context
+def reorganize_existing(
+    ctx: click.Context,
+    min_age_days: int | None,
+    dry_run: bool,
+    folder: str | None,
+    limit: int | None,
+) -> None:
+    """
+    Retroactively apply the legacy reorganization to files already converted.
+
+    Walks the Dropbox tree (or a single --folder), finds every pair of:
+        /<parent>/<name>            (presumed H.264 original)
+        /<parent>/h265/<name>       (H.265 output, e.g. from v6.0.2)
+    where /<parent>/h264/<name> does NOT yet exist, and applies the swap so:
+        /<parent>/<name>            -> H.265 (in original's place)
+        /<parent>/h264/<name>       -> H.264 backup
+        /<parent>/h265/h265 feito.txt updated
+
+    Folders with recent user activity (any file modified within
+    --min-age-days days) are SKIPPED so active projects aren't disturbed.
+    """
+    from .reorganize import find_unreorganized_pairs, is_folder_settled, reorganize_pair
+
+    config_path = ctx.obj.get('config_path')
+    verbose = ctx.obj.get('verbose', False)
+
+    config = load_config(config_path)
+    setup_logging(verbose)
+
+    if not config.has_dropbox_auth():
+        console.print("[red]Error: Dropbox auth not configured. Run `hd auth`.[/red]")
+        sys.exit(1)
+
+    threshold = config.legacy_reorganize_min_age_days if min_age_days is None else min_age_days
+    root = folder or config.dropbox_root
+
+    console.print(
+        f"[blue]Scanning {root} for unreorganized H.264/H.265 pairs...[/blue]"
+    )
+    console.print(
+        f"[blue]Threshold: {threshold} days "
+        f"({'always reorganize' if threshold == 0 else f'skip folders with activity in the last {threshold} days'})[/blue]"
+    )
+
+    from .dropbox_client import make_client_from_config
+    dropbox = make_client_from_config(config)
+
+    if not dropbox.check_connection():
+        console.print("[red]Error: Could not connect to Dropbox.[/red]")
+        sys.exit(1)
+
+    candidates = find_unreorganized_pairs(dropbox, root)
+    if not candidates:
+        console.print("[green]No unreorganized pairs found.[/green]")
+        return
+
+    console.print(f"[blue]Found {len(candidates)} folder(s) with H.265 outputs to consider.[/blue]\n")
+
+    ready: list = []
+    deferred: list = []
+
+    for cand in candidates:
+        activity = is_folder_settled(dropbox, cand.parent, threshold)
+        cand.activity = activity
+        if not activity.settled:
+            cand.skip_reason = (
+                f"active ({activity.days_since_newest:.1f}d "
+                f"since last modify, < threshold {threshold}d)"
+            )
+            deferred.append(cand)
+        else:
+            ready.append(cand)
+
+    table = Table(title="Reorganize plan")
+    table.add_column("Folder", style="cyan", overflow="fold")
+    table.add_column("Pairs", justify="right", style="green")
+    table.add_column("Status", style="yellow")
+    for cand in ready:
+        table.add_row(cand.parent, str(len(cand.pairs)), "ready")
+    for cand in deferred:
+        table.add_row(cand.parent, str(len(cand.pairs)), f"defer: {cand.skip_reason}")
+    console.print(table)
+
+    if not ready:
+        console.print("[yellow]No folders are settled enough to reorganize. Done.[/yellow]")
+        return
+
+    total_pairs = sum(len(c.pairs) for c in ready)
+    console.print(
+        f"\n[blue]{len(ready)} folder(s), {total_pairs} pair(s) ready to reorganize.[/blue]"
+    )
+
+    if dry_run:
+        console.print("[yellow]Dry run — no changes made.[/yellow]")
+        return
+
+    if limit is not None:
+        ready = ready[:limit]
+        console.print(f"[yellow]--limit set: processing first {len(ready)} folder(s) only.[/yellow]")
+
+    reorganized = 0
+    failed = 0
+    for cand in ready:
+        console.print(f"\n[cyan]{cand.parent}[/cyan]  ({len(cand.pairs)} pair(s))")
+        for pair in cand.pairs:
+            try:
+                reorganize_pair(
+                    dropbox,
+                    cand.parent,
+                    pair.name,
+                    int(pair.original.size or 0),
+                    int(pair.h265.size or 0),
+                )
+                console.print(f"  [green]+[/green] {pair.name}")
+                reorganized += 1
+            except Exception as e:
+                console.print(f"  [red]x[/red] {pair.name}: {e}")
+                failed += 1
+
+    console.print()
+    console.print(f"[green]Reorganized: {reorganized}[/green]")
+    if failed:
+        console.print(f"[red]Failed: {failed}[/red]")
+    console.print(f"[yellow]Deferred (active folders): {sum(len(c.pairs) for c in deferred)}[/yellow]")
+
+
 @cli.command('show-encoders')
 def show_encoders() -> None:
     """Show available hardware encoders."""

@@ -2,6 +2,51 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.4
+Data: 01/05/2026
+--------------------------------------------------------------------------------
+
+REORGANIZAÇÃO RETROATIVA + FILTRO DE PASTAS ATIVAS
+
+  [NOVO] Comando hd reorganize-existing
+  --------------------------------------
+  Aplica o swap H.264/H.265 retroativamente em conversões já feitas (de
+  v6.0.2 ou de qualquer estado em que /Pasta/clip.MP4 exista junto com
+  /Pasta/h265/clip.MP4 sem /Pasta/h264/clip.MP4).
+
+    hd reorganize-existing             # usa o threshold do config (default 60d)
+    hd reorganize-existing --dry-run   # so mostra o plano, nao mexe em nada
+    hd reorganize-existing --min-age-days 90
+    hd reorganize-existing --folder /Videos/Projetos2023
+    hd reorganize-existing --limit 5   # processa so as 5 primeiras pastas
+
+  Antes de tocar em qualquer arquivo, imprime uma tabela "Reorganize plan"
+  com cada pasta candidata, quantos pares serao mexidos, e se a pasta esta
+  pronta ou foi adiada por atividade recente.
+
+  [NOVO] Filtro por atividade da pasta (config: legacy_reorganize_min_age_days)
+  ---------------------------------------------------------------------------
+  Default: 60 dias. Pastas onde QUALQUER arquivo foi modificado nos ultimos
+  N dias sao consideradas "ativas" e o swap NAO acontece, nem na conversao
+  ao vivo nem no comando retroativo. Resolve o problema de mexer em pastas
+  de projetos que voce ainda esta editando.
+
+  Esse filtro vale pra:
+    1. Conversoes ao vivo no daemon (se a pasta tiver atividade, o H.265
+       fica em /h265/ ate a pasta ficar quieta).
+    2. hd reorganize-existing (pula pastas ativas no plano e na execucao).
+
+  Pra desligar o filtro completamente: legacy_reorganize_min_age_days: 0
+  Pra reorganizar apenas pastas bem antigas: legacy_reorganize_min_age_days: 180
+
+  [REFACTOR] Modulo src/transcoder/reorganize.py
+  -----------------------------------------------
+  Toda a logica de swap atomico (move original -> h264/, swap h265 ->
+  spot original, append em feito.txt, rollback em caso de falha) agora
+  vive num modulo unico, compartilhado entre o UploadWorker e o CLI.
+
+================================================================================
+
 Versão: 6.0.3
 Data: 01/05/2026
 --------------------------------------------------------------------------------

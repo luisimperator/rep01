@@ -396,6 +396,15 @@ class Config(BaseModel):
             "place. Also appends to <parent>/h265/h265 feito.txt."
         ),
     )
+    legacy_reorganize_min_age_days: int = Field(
+        default=60,
+        ge=0,
+        description=(
+            "Skip reorganization for folders that have any user activity in the "
+            "last N days. Set to 0 to always reorganize. Used both at upload "
+            "time and by `hd reorganize-existing`."
+        ),
+    )
     allow_delete_original: bool = Field(
         default=False,
         description="DANGEROUS: Allow deleting original after successful transcode"

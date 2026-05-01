@@ -108,6 +108,11 @@ delete_staging_after_upload: true
 # so the H.265 takes the original's place. Replicates the legacy GUI workflow.
 # Also appends to <parent>/h265/h265 feito.txt.
 legacy_reorganize: false
+# Skip reorganization for folders with any user activity in the last N days.
+# Files modified more recently than this are assumed to be in active projects;
+# the H.265 stays in /h265/ subfolder until the project goes quiet, and a future
+# `hd reorganize-existing` pass picks it up. 0 = always reorganize, no filter.
+legacy_reorganize_min_age_days: 60
 allow_delete_original: false
 delete_original_delay_hours: 168
 allow_mkv_fallback: false

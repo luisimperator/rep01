@@ -621,81 +621,40 @@ class UploadWorker(BaseWorker):
 
     def _legacy_reorganize(self, job: Job, h265_size: int) -> str:
         """
-        Replicate the legacy GUI's post-upload reorganization in Dropbox:
-          1. Ensure /<parent>/h264/ exists.
-          2. Move the original H.264 to /<parent>/h264/<name>.
-          3. Move the H.265 from /<parent>/h265/<name> to /<parent>/<name>,
-             so the H.265 takes the original's place.
-          4. Append a line to /<parent>/h265/h265 feito.txt in the format
-             produced by the legacy GUI (timestamp | name | sizes).
-
-        Returns the final Dropbox path of the H.265 file.
-        On step 3 failure, rolls back step 2 to keep the original reachable
-        at its canonical path.
+        Honor the legacy_reorganize_min_age_days threshold, then delegate the
+        actual swap to reorganize.reorganize_pair so the same code path is
+        shared with `hd reorganize-existing`.
         """
-        from datetime import datetime
         from pathlib import PurePosixPath
 
-        original = job.dropbox_path
-        h265_temp = job.output_path
-        original_p = PurePosixPath(original)
+        from .reorganize import is_folder_settled, reorganize_pair
+
+        original_p = PurePosixPath(job.dropbox_path)
         parent = str(original_p.parent)
         name = original_p.name
-        h264_dir = parent.rstrip('/') + '/h264'
-        h264_backup = h264_dir + '/' + name
-        feito_path = parent.rstrip('/') + '/h265/h265 feito.txt'
 
-        logger.info(f"[{self.name}] Reorganize: backing original up to {h264_backup}")
-        self.dropbox.create_folder(h264_dir)
-        self.dropbox.move_file(original, h264_backup, allow_overwrite=True)
-
-        try:
-            logger.info(f"[{self.name}] Reorganize: swapping H.265 into {original}")
-            self.dropbox.move_file(h265_temp, original, allow_overwrite=False)
-        except Exception:
-            # Swap failed mid-flight: put the original back where it was so
-            # the user's references aren't broken. Re-raise so the caller logs.
-            logger.warning(
-                f"[{self.name}] Reorganize: swap failed; rolling back backup "
-                f"from {h264_backup} to {original}"
-            )
-            try:
-                self.dropbox.move_file(h264_backup, original, allow_overwrite=False)
-            except Exception as rollback_err:
-                logger.error(
-                    f"[{self.name}] Reorganize: rollback also failed: {rollback_err}. "
-                    f"Original is at {h264_backup}; H.265 at {h265_temp}."
-                )
-            raise
-
-        # Append to h265 feito.txt with the legacy line format. We read the
-        # existing log (if any), append, and overwrite — Dropbox has no
-        # native append, but the file is small so this is cheap.
-        try:
-            input_size = int(job.dropbox_size or 0)
-            input_mb = input_size / (1024 ** 2)
-            output_mb = h265_size / (1024 ** 2)
-            reduction = (1 - h265_size / input_size) * 100 if input_size > 0 else 0.0
-            line = (
-                f"{datetime.now().strftime('%Y-%m-%d %H:%M:%S')} | "
-                f"{name} | "
-                f"{input_mb:.1f}MB -> {output_mb:.1f}MB ({reduction:.1f}% menor)\n"
-            )
-            existing = self.dropbox.read_text_file(feito_path) or ""
-            if existing and not existing.endswith("\n"):
-                existing += "\n"
-            self.dropbox.write_text_file(feito_path, existing + line)
-        except Exception as log_err:
-            # The reorganization itself succeeded — the log is just a journal.
-            logger.warning(
-                f"[{self.name}] Could not append to {feito_path}: {log_err}"
-            )
-
-        logger.info(
-            f"[{self.name}] Reorganize complete: original at {h264_backup}, "
-            f"H.265 at {original}"
+        activity = is_folder_settled(
+            self.dropbox,
+            parent,
+            self.config.legacy_reorganize_min_age_days,
         )
-        return original
+        if not activity.settled:
+            days = (f"{activity.days_since_newest:.1f}" if activity.days_since_newest is not None else "?")
+            logger.info(
+                f"[{self.name}] Reorganize deferred: {parent} has activity "
+                f"{days}d old (< threshold {activity.threshold_days}d). "
+                f"H.265 stays at {job.output_path}; future "
+                f"`hd reorganize-existing` will swap when the folder goes quiet."
+            )
+            return job.output_path
+
+        return reorganize_pair(
+            self.dropbox,
+            parent,
+            name,
+            int(job.dropbox_size or 0),
+            h265_size,
+        )
 
     def _make_progress_callback(
         self,
