@@ -88,11 +88,11 @@
   .worker .meta { color: var(--muted); font-size: .82em; }
   .bar { background: #232730; border-radius: 4px; height: 7px; overflow: hidden; margin: .4em 0 .35em 0; }
   .bar > span { display: block; height: 100%;
-                background: linear-gradient(90deg, var(--ok) 0%, #95e8b9 100%);
+                background: var(--ok);
                 transition: width .25s; }
-  .bar-download > span { background: linear-gradient(90deg, var(--download) 0%, #82c2ff 100%); }
-  .bar-transcode > span { background: linear-gradient(90deg, var(--transcode) 0%, #d9aaff 100%); }
-  .bar-upload > span { background: linear-gradient(90deg, var(--upload) 0%, #95e8b9 100%); }
+  .bar.bar-download > span { background: #4d8aff !important; }
+  .bar.bar-transcode > span { background: #b76dff !important; }
+  .bar.bar-upload > span { background: #4dd2a7 !important; }
   .empty { color: var(--muted); padding: .6em 0; font-style: italic; }
   pre.log { background: #0a0b0d; border: 1px solid var(--border); border-radius: 8px;
             padding: .8em 1em; font: 12px/1.45 ui-monospace, "SF Mono", Consolas, monospace;

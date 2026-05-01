@@ -342,7 +342,7 @@ class Config(BaseModel):
 
     # Quality settings (R6)
     cq_value: int = Field(
-        default=24,
+        default=25,
         ge=15,
         le=35,
         description="CQ/CRF value for quality profile"
@@ -426,7 +426,7 @@ class Config(BaseModel):
         description="Delete local staging files after successful upload"
     )
     legacy_reorganize: bool = Field(
-        default=False,
+        default=True,
         description=(
             "Replicate the legacy GUI's post-upload reorganization: move the "
             "original H.264 to <parent>/h264/<name>, then move the H.265 from "
@@ -604,7 +604,7 @@ def save_example_config(path: Path) -> None:
         'log_dir': '/var/log/transcoder',
         'encoder_preference': 'auto',
         'profile': 'quality',
-        'cq_value': 24,
+        'cq_value': 25,
         'cpu_crf_equivalent': 23,
         'min_size_gb': 6.0,
         'bitrate': {

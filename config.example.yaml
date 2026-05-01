@@ -36,7 +36,7 @@ lockfile_path: /var/run/transcoder.lock
 log_dir: /var/log/transcoder
 encoder_preference: auto
 profile: quality
-cq_value: 24
+cq_value: 25
 cpu_crf_equivalent: 23
 min_size_gb: 6.0
 bitrate:
@@ -107,7 +107,7 @@ delete_staging_after_upload: true
 # the original H.264 to <parent>/h264/<name> and moves the H.265 to <parent>/<name>
 # so the H.265 takes the original's place. Replicates the legacy GUI workflow.
 # Also appends to <parent>/h265/h265 feito.txt.
-legacy_reorganize: false
+legacy_reorganize: true
 # Skip reorganization for folders with any user activity in the last N days.
 # Files modified more recently than this are assumed to be in active projects;
 # the H.265 stays in /h265/ subfolder until the project goes quiet, and a future
