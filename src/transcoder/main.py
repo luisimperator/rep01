@@ -230,6 +230,33 @@ class Daemon:
         except Exception as e:
             logger.warning(f"could not probe ffmpeg at startup: {e}")
 
+        # Synthetic transcode sanity check: encode 1s of color source via
+        # libx265 to /null. If THIS fails, ffmpeg itself is broken (missing
+        # DLL, AV blocking, wrong cwd, etc) and every job will fail too.
+        try:
+            import subprocess as _sp
+            sanity = _sp.run(
+                [
+                    str(self.config.ffmpeg_path), "-hide_banner", "-y",
+                    "-f", "lavfi", "-i", "color=size=320x240:rate=30:duration=1",
+                    "-c:v", "libx265", "-preset", "ultrafast",
+                    "-f", "null", "-",
+                ],
+                capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=30,
+            )
+            if sanity.returncode == 0:
+                logger.info("ffmpeg sanity transcode: PASS (libx265 works on this machine)")
+            else:
+                tail = (sanity.stderr or sanity.stdout or "(no output)").strip().splitlines()[-10:]
+                logger.error(
+                    f"ffmpeg sanity transcode FAILED with code {sanity.returncode}. "
+                    f"This means real transcodes will also fail. Last lines:\n"
+                    + "\n".join("  | " + ln for ln in tail)
+                )
+        except Exception as e:
+            logger.warning(f"could not run ffmpeg sanity transcode: {e}")
+
         # Fire-and-forget GitHub release check; the HTTP API surfaces the result
         # once it lands in the settings table.
         if self.config.updater.enabled:
@@ -286,6 +313,22 @@ class Daemon:
         # Expose the daemon back to the API so /api/status can read scan errors.
         self.api_server.daemon = self
         self.api_server.start()
+
+        # Self-health agent: 3-hour autonomous loop that detects + fixes
+        # known failure patterns and posts a recurring status report so
+        # the operator (and any AI assistant subscribed to the repo) sees
+        # what's happening without having to copy log files by hand.
+        from .self_health import SelfHealthAgent
+        self.self_health = SelfHealthAgent(
+            config=self.config,
+            db=self.db,
+            dispatcher=self.dispatcher,
+            dropbox=self.dropbox,
+            reporter=self.incident_reporter,
+            stop_event=self.stop_event,
+        )
+        self.self_health.start()
+        logger.info("self-health agent armed (3h autonomous check loop)")
 
         # Download workers
         for i in range(self.config.concurrency.download_workers):

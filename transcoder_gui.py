@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HeavyDrops Transcoder v6.0.14
+HeavyDrops Transcoder v6.0.15
 
 Dropbox Video Transcoder - GUI Version
 Simple graphical interface for local folder transcoding.
@@ -16,7 +16,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "6.0.14"
+VERSION = "6.0.15"
 
 import socket
 import subprocess
