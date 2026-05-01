@@ -156,9 +156,6 @@
 
 <div id="lan-card"></div>
 
-<h2>Self-health agent <span style="color:var(--muted);font-weight:normal;font-size:.85em">(autonomous monitoring)</span></h2>
-<div id="health-card" class="panel" style="margin-bottom: 1em;"></div>
-
 <h2>Today / All time</h2>
 <div class="grid" id="stats-grid"></div>
 
@@ -807,10 +804,8 @@ async function tick() {
     document.getElementById('banner-area').innerHTML = '';
   }
 
-  const h = await safeFetch('/api/health');
   renderNow(s, a);
   renderLanCard(s);
-  renderHealth(h);
   renderStats(st);
   renderStatus(s);
   renderStorage(s);
@@ -858,94 +853,6 @@ function renderLanCard(s) {
   el.innerHTML = body;
 }
 
-function renderHealth(payload) {
-  const el = document.getElementById('health-card');
-  if (!payload || payload._error) {
-    el.innerHTML = `<div class="empty err">Agent state unavailable: ${escapeHtml(payload && payload._error || 'no response')}</div>`;
-    return;
-  }
-  const ag = payload.agent;
-  if (!ag) {
-    el.innerHTML = `<div class="empty">Self-health agent is not running.</div>`;
-    return;
-  }
-  const last = ag.last_summary;
-  const interval = Math.round(ag.interval_sec / 60);
-  const nextIn = ag.next_check_in_sec != null ? fmtDuration(ag.next_check_in_sec) : '—';
-  const lastAge = ag.last_check_age_sec != null ? fmtDuration(ag.last_check_age_sec) + ' ago' : 'never';
-
-  let statusBadge;
-  if (ag.running_check) {
-    statusBadge = `<span class="stage stage-transcode">RUNNING NOW</span>`;
-  } else if (last && last.escalations > 0) {
-    statusBadge = `<span class="stage" style="background:rgba(243,124,124,.15);color:var(--err)">${last.escalations} ESCALATION(S)</span>`;
-  } else if (last && last.actions && last.actions.length > 0) {
-    statusBadge = `<span class="stage" style="background:rgba(241,181,97,.15);color:var(--warn)">FIXED ${last.actions.length}</span>`;
-  } else if (last) {
-    statusBadge = `<span class="stage stage-upload">OK</span>`;
-  } else {
-    statusBadge = `<span class="stage" style="background:#2a2e36;color:var(--muted)">PENDING FIRST CHECK</span>`;
-  }
-
-  let html = `
-    <div class="worker-head" style="margin-bottom: .8em;">
-      <span class="name">Self-health agent · every ${interval}min · checks run: ${ag.checks_run}</span>
-      ${statusBadge}
-    </div>
-    <div class="field" style="margin-bottom: .4em;">
-      <label>Last check</label>
-      <span>${lastAge}${last ? ` · ${escapeHtml(last.headline)}` : ''}</span>
-    </div>
-    <div class="field" style="margin-bottom: .4em;">
-      <label>Next check in</label>
-      <span>${nextIn} ${ag.running_check ? '<span class="hint" style="color:var(--ok)">(running now)</span>' : ''}</span>
-    </div>
-  `;
-
-  if (last && last.results) {
-    html += `<div style="margin-top: .6em;"><b>Last check breakdown:</b></div>`;
-    html += `<table style="margin-top: .3em;"><thead><tr><th>Check</th><th>Status</th><th>Detail</th></tr></thead><tbody>`;
-    for (const r of last.results) {
-      let cls, label;
-      if (r.needs_human) { cls = 'err'; label = 'needs human'; }
-      else if (r.actions && r.actions.length) { cls = 'warn'; label = 'fixed'; }
-      else if (r.ok) { cls = 'ok'; label = 'ok'; }
-      else { cls = 'warn'; label = 'warn'; }
-      html += `<tr><td>${escapeHtml(r.name)}</td><td class="${cls}">${label}</td><td>${escapeHtml(r.detail)}</td></tr>`;
-    }
-    html += `</tbody></table>`;
-  }
-
-  if (last && last.actions && last.actions.length) {
-    html += `<div style="margin-top: .6em;"><b>Auto-fixes applied:</b></div><ul style="margin-top: .2em;">`;
-    for (const a of last.actions) {
-      html += `<li style="font-size: .85em;">${escapeHtml(a)}</li>`;
-    }
-    html += `</ul>`;
-  }
-
-  html += `
-    <div style="margin-top: .8em;">
-      <button onclick="runHealthNow()" ${ag.running_check ? 'disabled' : ''}>Run check now</button>
-      <span class="hint" style="color:var(--muted);font-size:.85em;margin-left:.6em;">
-        Reports live to <a href="https://github.com/luisimperator/rep01/issues" target="_blank" style="color:var(--accent);">GitHub Issues</a>
-      </span>
-    </div>
-  `;
-  el.innerHTML = html;
-}
-
-async function runHealthNow() {
-  try {
-    const r = await fetchJSON('/api/health/run-now', { method: 'POST' });
-    if (r.ok) {
-      toast('Health check triggered', 'ok');
-      setTimeout(tick, 500);
-    } else {
-      toast('Could not trigger: ' + (r.error || 'unknown'), 'err');
-    }
-  } catch (e) { toast('Failed: ' + e.message, 'err'); }
-}
 
 function renderStorage(s) {
   const el = document.getElementById('storage-card');
