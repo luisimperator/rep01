@@ -241,10 +241,14 @@ class FFmpegCommandBuilder:
         args.extend(["-preset", "medium"])
 
         if profile == TranscodeProfile.QUALITY:
-            # CQ mode with global_quality (R6)
+            # CQ mode with global_quality (R6).
+            # NOTE: -look_ahead 1 was here previously. On older Intel iGPUs
+            # (anything pre-11th gen Tiger Lake) the lookahead path falls
+            # back to a software/hybrid implementation that drops hevc_qsv
+            # throughput from ~200 fps to ~20 fps (0.6x real-time).
+            # Removing it lets the pure-hardware fast path kick in.
             args.extend([
                 "-global_quality:v", str(self.config.cq_value),
-                "-look_ahead", "1",
             ])
         else:  # BALANCED
             # Bitrate mode

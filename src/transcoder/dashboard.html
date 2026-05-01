@@ -151,6 +151,7 @@
   <button onclick="post('/api/scan-now')">Scan now</button>
   <button id="pause-btn" onclick="togglePause()">Pause</button>
   <button onclick="post('/api/retry-failed')">Retry FAILED</button>
+  <button class="danger" onclick="killFfmpeg()">Kill all ffmpeg</button>
   <button class="danger" onclick="restartDaemon()">Restart daemon</button>
 </div>
 
@@ -772,6 +773,15 @@ async function copyLog(n) {
   } catch (e) {
     toast('Copy failed: ' + e.message, 'err');
   }
+}
+
+async function killFfmpeg() {
+  if (!confirm('Kill ALL ffmpeg.exe processes (including ones the daemon spawned)? Current transcodes will fail and retry. Use this when you suspect orphaned ffmpeg are hogging the GPU.')) return;
+  try {
+    const r = await fetchJSON('/api/kill-ffmpeg', { method: 'POST' });
+    toast(`Killed ${r.killed || 0} ffmpeg process(es)`, 'ok');
+    setTimeout(tick, 1000);
+  } catch (e) { toast('Kill failed: ' + e.message, 'err'); }
 }
 
 async function restartDaemon() {

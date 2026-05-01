@@ -160,6 +160,22 @@ class Daemon:
         if recovered:
             logger.info(f"Recovered {recovered} interrupted jobs")
 
+        # Kill any orphan ffmpeg.exe left behind by a previous daemon instance
+        # that was terminated abruptly (Task Scheduler restart, manual kill,
+        # etc). Orphans keep grinding on the GPU/CPU and tank the new
+        # daemon's transcode throughput. This is a startup-only sweep — once
+        # the new workers spawn ffmpeg they're tracked properly via Popen.
+        try:
+            from .api import _kill_all_ffmpeg
+            killed = _kill_all_ffmpeg()
+            if killed:
+                logger.warning(
+                    f"killed {killed} orphan ffmpeg.exe process(es) from previous "
+                    f"daemon instance(s) — they would have starved the new transcodes"
+                )
+        except Exception as e:
+            logger.warning(f"orphan ffmpeg sweep failed: {e}")
+
         # Drop disk reservations for jobs that are no longer in flight after
         # recovery, so the staging budget doesn't leak across restarts.
         pruned = self.db.prune_stale_disk_reservations(ACTIVE_STATES)

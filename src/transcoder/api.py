@@ -219,6 +219,9 @@ def _build_handler(api: ApiServer):
                     return self._send_json({"ok": False, "error": "self-health agent not running"})
                 agent.trigger_now()
                 return self._send_json({"ok": True, "triggered": True})
+            if route == "/api/kill-ffmpeg":
+                killed = _kill_all_ffmpeg()
+                return self._send_json({"ok": True, "killed": killed})
             if route == "/api/retry-failed":
                 count = api.db.reset_failed_jobs()
                 return self._send_json({"ok": True, "reset": count})
@@ -986,6 +989,49 @@ def _enumerate_lan_addresses(port: int) -> list[str]:
         pass
     # Build URLs
     return [f"http://{ip}:{port}/" for ip in addrs]
+
+
+def _kill_all_ffmpeg() -> int:
+    """Terminate every ffmpeg.exe process on the host.
+
+    Used by the dashboard's 'Kill all ffmpeg' button and at daemon startup
+    to clean up orphans left behind when the previous instance was killed
+    abruptly (e.g. by Task Scheduler restart) — orphan ffmpeg.exe keep
+    grinding on the GPU/CPU and starve the new daemon's transcodes.
+
+    Cross-platform: uses taskkill on Windows, pkill/killall elsewhere.
+    Returns the number of processes targeted (best-effort count).
+    """
+    import sys as _sys
+    import subprocess as _sp
+    if _sys.platform == "win32":
+        try:
+            r = _sp.run(
+                ["taskkill", "/F", "/IM", "ffmpeg.exe"],
+                capture_output=True, text=True, timeout=10,
+            )
+            # taskkill prints "SUCCESS: ..." per process killed
+            return r.stdout.count("SUCCESS")
+        except Exception as e:
+            logger.warning(f"taskkill failed: {e}")
+            return 0
+    else:
+        try:
+            r = _sp.run(
+                ["pkill", "-9", "-x", "ffmpeg"],
+                capture_output=True, timeout=5,
+            )
+            # pkill returncode 0 = killed something, 1 = nothing matched
+            return 1 if r.returncode == 0 else 0
+        except FileNotFoundError:
+            try:
+                _sp.run(["killall", "-9", "ffmpeg"], capture_output=True, timeout=5)
+                return 1
+            except Exception:
+                return 0
+        except Exception as e:
+            logger.warning(f"pkill failed: {e}")
+            return 0
 
 
 def _human_duration(seconds: float) -> str:
