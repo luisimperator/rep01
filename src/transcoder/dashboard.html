@@ -103,6 +103,28 @@
            box-shadow: 0 4px 16px rgba(0,0,0,.4); max-width: 380px; }
   .toast.err { border-color: var(--err); color: var(--err); }
   .toast.ok { border-color: var(--ok); color: var(--ok); }
+  .modal-back { position: fixed; inset: 0; background: rgba(0,0,0,.6); z-index: 100;
+                display: flex; align-items: center; justify-content: center; }
+  .modal { background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+           padding: 1.2em 1.4em; width: min(560px, 90vw); max-height: 80vh; display: flex;
+           flex-direction: column; }
+  .modal h3 { margin: 0 0 .5em 0; font-size: 1.1em; }
+  .modal .pathbar { color: var(--muted); font-size: .85em; word-break: break-all;
+                    background: var(--panel-2); padding: .5em .7em; border-radius: 5px;
+                    margin-bottom: .8em; }
+  .modal .list { overflow-y: auto; flex: 1; border: 1px solid var(--border);
+                 border-radius: 6px; min-height: 200px; }
+  .modal .list .row { padding: .55em .8em; border-bottom: 1px solid #232730;
+                      cursor: pointer; display: flex; align-items: center; gap: .6em;
+                      transition: background .08s; flex-wrap: nowrap; margin: 0; }
+  .modal .list .row:hover { background: #232730; }
+  .modal .list .row .icon { color: var(--accent); font-size: 1em; flex: 0 0 1.2em; }
+  .modal .list .row.file { color: var(--muted); cursor: default; }
+  .modal .list .row.file .icon { color: #555; }
+  .modal .actions { display: flex; gap: .5em; margin-top: 1em; justify-content: flex-end; }
+  .modal .err-hint { background: rgba(243,124,124,.1); border: 1px solid rgba(243,124,124,.3);
+                     color: var(--err); padding: .6em .8em; border-radius: 5px;
+                     margin-bottom: .8em; font-size: .9em; }
 </style>
 </head>
 <body>
@@ -431,7 +453,8 @@ async function renderSettings() {
     <div class="field">
       <label for="set-root">${escapeHtml(k.dropbox_root.label)}</label>
       <input id="set-root" type="text" value="${escapeHtml(s.dropbox_root)}" style="min-width: 280px;">
-      <span class="hint">e.g. <code>/Videos</code>. Use <code>/</code> for everything. No trailing slash.</span>
+      <button type="button" onclick="openBrowse()">Browse...</button>
+      <span class="hint">Click Browse to navigate your Dropbox.</span>
     </div>
     <div class="field">
       <label for="set-cq">${escapeHtml(k.cq_value.label)}</label>
@@ -600,6 +623,76 @@ async function togglePause() {
   const paused = document.getElementById('pause-btn').dataset.paused === '1';
   await post(paused ? '/api/resume' : '/api/pause');
 }
+// ---------- Dropbox folder browser modal ----------
+let browseCurrent = '/';
+async function openBrowse() {
+  // seed from the input if it looks like a path
+  const seed = document.getElementById('set-root').value.trim() || '/';
+  browseCurrent = seed;
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="modal-back" id="browse-modal" onclick="if(event.target===this) closeBrowse()">
+      <div class="modal">
+        <h3>Browse Dropbox</h3>
+        <div id="browse-pathbar" class="pathbar"></div>
+        <div id="browse-list" class="list"><div class="empty" style="padding: 1em">Loading...</div></div>
+        <div class="actions">
+          <button onclick="closeBrowse()">Cancel</button>
+          <button class="primary" onclick="confirmBrowse()">Use this folder</button>
+        </div>
+      </div>
+    </div>
+  `);
+  loadBrowse(seed);
+}
+function closeBrowse() {
+  const el = document.getElementById('browse-modal');
+  if (el) el.remove();
+}
+async function loadBrowse(path) {
+  const list = document.getElementById('browse-list');
+  if (!list) return;
+  list.innerHTML = `<div class="empty" style="padding: 1em">Loading ${escapeHtml(path)}...</div>`;
+  document.getElementById('browse-pathbar').textContent = path;
+  let r;
+  try { r = await fetchJSON('/api/dropbox/list?path=' + encodeURIComponent(path)); }
+  catch (e) { list.innerHTML = `<div class="err-hint">${escapeHtml(e.message)}</div>`; return; }
+  if (!r.ok) {
+    list.innerHTML = `<div class="err-hint">${escapeHtml(r.error || 'unknown error')}</div>`;
+    return;
+  }
+  browseCurrent = r.path;
+  document.getElementById('browse-pathbar').textContent = r.path;
+  let html = '';
+  if (r.fallback) {
+    html += `<div class="err-hint" style="margin: .6em">Path <code>${escapeHtml(r.missing)}</code> not found. Showing <code>${escapeHtml(r.path)}</code> instead — pick the right folder below.</div>`;
+  }
+  if (r.path !== '/' && r.path !== '') {
+    html += `<div class="row" onclick="loadBrowse('${escapeHtml(r.path.split('/').slice(0,-1).join('/') || '/')}')">
+      <span class="icon">⮤</span><span><i>up one level</i></span>
+    </div>`;
+  }
+  if (r.entries.length === 0) {
+    html += `<div class="empty" style="padding: .8em">(empty folder)</div>`;
+  } else {
+    for (const e of r.entries) {
+      if (e.is_folder) {
+        html += `<div class="row" onclick="loadBrowse('${escapeHtml(e.path)}')">
+          <span class="icon">📁</span><span>${escapeHtml(e.name)}</span>
+        </div>`;
+      } else {
+        html += `<div class="row file"><span class="icon">📄</span><span>${escapeHtml(e.name)}</span>
+          <span style="margin-left: auto; font-size: .8em;">${fmtBytes(e.size||0)}</span></div>`;
+      }
+    }
+  }
+  list.innerHTML = html;
+}
+function confirmBrowse() {
+  document.getElementById('set-root').value = browseCurrent;
+  closeBrowse();
+  toast(`Selected: ${browseCurrent}. Click Save to apply.`, 'ok');
+}
+
 async function copyLog(n) {
   const lines = n || 200;
   try {

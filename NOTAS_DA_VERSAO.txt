@@ -2,6 +2,37 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.7
+Data: 01/05/2026
+--------------------------------------------------------------------------------
+
+NAVEGADOR DE PASTAS DO DROPBOX NO PAINEL
+
+  [NOVO] Botao "Browse..." em Settings -> Dropbox folder
+  ------------------------------------------------------
+  Em vez de adivinhar o caminho exato no Dropbox (que e diferente do
+  caminho local no Windows), agora voce clica em "Browse...", abre um
+  modal com a arvore do seu Dropbox, navega como se fosse um Explorer,
+  e clica em "Use this folder" pra preencher o campo. Salva normal.
+
+  Isso resolve o caso comum de erro "Path not found": o caminho do
+  Dropbox visto pela API e diferente do que aparece no Windows
+  Explorer. Por exemplo:
+    Local Windows:  C:\\Users\\X\\HeavyDrops Dropbox\\HeavyDrops\\h265test
+    API Dropbox:    /h265test  (ou /HeavyDrops/h265test em team space)
+
+  Quando voce digita um caminho que nao existe, o Browse cai
+  automaticamente na pasta-mae mais proxima e mostra um aviso amarelo
+  pra voce reconhecer o nome correto.
+
+  [API] Novo endpoint
+  -------------------
+    GET /api/dropbox/list?path=/Videos
+    Retorna pastas e arquivos imediatos. Em caso de path not found, faz
+    fallback pra pasta-mae existente mais proxima.
+
+================================================================================
+
 Versão: 6.0.6
 Data: 01/05/2026
 --------------------------------------------------------------------------------

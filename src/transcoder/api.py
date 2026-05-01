@@ -133,6 +133,8 @@ def _build_handler(api: ApiServer):
                 return self._send_json(_settings_payload(api))
             if route == "/api/reorganize/status":
                 return self._send_json(_reorganize_status_payload(api))
+            if route == "/api/dropbox/list":
+                return self._send_json(_dropbox_list_payload(api, qs))
             if route == "/healthz":
                 return self._send_text("ok")
             self.send_error(404, "not found")
@@ -696,6 +698,65 @@ def _reorganize_run(api: ApiServer, body: dict) -> dict:
 
     threading.Thread(target=worker, name="reorganize-runner", daemon=True).start()
     return {"ok": True, "run": run.to_dict()}
+
+
+def _dropbox_list_payload(api: ApiServer, qs: dict[str, list[str]]) -> dict:
+    """List Dropbox folders/files at a path so the dashboard can let the user
+    browse instead of typing dropbox_root by hand. Falls back to the parent
+    folder when the requested path doesn't exist, so a typo'd config still
+    surfaces something useful."""
+    from pathlib import PurePosixPath
+    from .dropbox_client import (
+        make_client_from_config,
+        DropboxNotFoundError,
+        DropboxAuthError,
+    )
+
+    requested = (qs.get("path") or [""])[0] or "/"
+    if not api.config.has_dropbox_auth():
+        return {"ok": False, "error": "dropbox auth not configured. Run hd auth."}
+
+    try:
+        dropbox = make_client_from_config(api.config)
+    except DropboxAuthError as e:
+        return {"ok": False, "error": str(e)}
+
+    def _list(p: str) -> list[dict]:
+        return dropbox.list_subfolders(p)
+
+    try:
+        entries = _list(requested)
+        return {"ok": True, "path": requested, "entries": entries, "fallback": False}
+    except DropboxNotFoundError:
+        # Try the closest existing parent so the user sees neighbors and can
+        # spot the right name.
+        candidate = requested.rstrip("/")
+        while candidate and candidate != "/":
+            candidate = str(PurePosixPath(candidate).parent)
+            if candidate == ".":
+                candidate = "/"
+            try:
+                entries = _list(candidate)
+                return {
+                    "ok": True,
+                    "path": candidate,
+                    "entries": entries,
+                    "fallback": True,
+                    "missing": requested,
+                }
+            except DropboxNotFoundError:
+                continue
+        # Last resort: list the account root
+        entries = _list("/")
+        return {
+            "ok": True,
+            "path": "/",
+            "entries": entries,
+            "fallback": True,
+            "missing": requested,
+        }
+    except Exception as e:
+        return {"ok": False, "error": str(e), "path": requested}
 
 
 def _reorganize_status_payload(api: ApiServer) -> dict:

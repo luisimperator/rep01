@@ -644,6 +644,45 @@ class DropboxClient:
 
         raise DropboxClientError("Upload failed: unexpected end of file")
 
+    def list_subfolders(self, path: str) -> list[dict]:
+        """List immediate subfolders + files under `path` for the dashboard browser.
+
+        Returns a list of {"name": str, "is_folder": bool, "path": str} sorted
+        with folders first, then alphabetical. `path` may be '/' or '' for the
+        account root. Raises DropboxNotFoundError if the path doesn't exist.
+        """
+        norm_path = self._normalize_path(path)
+
+        def operation() -> list[dict]:
+            entries: list[dict] = []
+            cursor: str | None = None
+            while True:
+                if cursor:
+                    result = self._dbx.files_list_folder_continue(cursor)
+                else:
+                    result = self._dbx.files_list_folder(norm_path, recursive=False)
+                for e in result.entries:
+                    if isinstance(e, FolderMetadata):
+                        entries.append({
+                            "name": e.name,
+                            "is_folder": True,
+                            "path": e.path_display or e.path_lower or "",
+                        })
+                    elif isinstance(e, FileMetadata):
+                        entries.append({
+                            "name": e.name,
+                            "is_folder": False,
+                            "path": e.path_display or e.path_lower or "",
+                            "size": e.size,
+                        })
+                if not result.has_more:
+                    break
+                cursor = result.cursor
+            entries.sort(key=lambda x: (not x["is_folder"], x["name"].lower()))
+            return entries
+
+        return self._retry_operation(operation, f"list_subfolders({path})")
+
     def file_exists(self, path: str) -> bool:
         """Check if file exists."""
         metadata = self.get_metadata(path)
