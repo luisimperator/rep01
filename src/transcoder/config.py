@@ -257,6 +257,13 @@ class IncidentsSettings(BaseModel):
         ge=10,
         description="Identical errors within this window are coalesced into comments on the same issue."
     )
+    health_check_interval_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=1440,
+        description="How often the self-health agent runs its checks. 10min for "
+                    "setup/debug, 180min (=3h) is the long-term default."
+    )
 
 
 class Config(BaseModel):

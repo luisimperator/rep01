@@ -319,6 +319,7 @@ class Daemon:
         # the operator (and any AI assistant subscribed to the repo) sees
         # what's happening without having to copy log files by hand.
         from .self_health import SelfHealthAgent
+        interval_sec = max(60, int(self.config.incidents.health_check_interval_minutes) * 60)
         self.self_health = SelfHealthAgent(
             config=self.config,
             db=self.db,
@@ -326,9 +327,13 @@ class Daemon:
             dropbox=self.dropbox,
             reporter=self.incident_reporter,
             stop_event=self.stop_event,
+            interval_sec=interval_sec,
         )
         self.self_health.start()
-        logger.info("self-health agent armed (3h autonomous check loop)")
+        logger.info(
+            f"self-health agent armed "
+            f"(interval={self.config.incidents.health_check_interval_minutes}min)"
+        )
 
         # Download workers
         for i in range(self.config.concurrency.download_workers):
