@@ -363,6 +363,34 @@ class TranscodeWorker(BaseWorker):
             )
             success = self._run_ffmpeg(cmd, job)
 
+        if not success and encoder != EncoderType.CPU:
+            # Hardware encoder couldn't handle this file (driver missing,
+            # unsupported pixel format, decoder mismatch, etc). Fall back to
+            # libx265 so the job actually completes — slower but reliable.
+            logger.warning(
+                f"[{self.name}] {encoder.value} failed twice; "
+                f"falling back to libx265 (CPU)."
+            )
+            encoder = EncoderType.CPU
+            self.db.update_job_state(job.id, JobState.TRANSCODING, encoder_used=encoder.value)
+            cmd = self.command_builder.build_transcode_command(
+                input_path,
+                output_path,
+                probe_result.video_info,
+                encoder,
+            )
+            logger.info(f"[{self.name}] {cmd.description}")
+            success = self._run_ffmpeg(cmd, job)
+            if not success:
+                logger.warning(f"[{self.name}] CPU retry with audio re-encode")
+                cmd = self.command_builder.build_audio_fallback_command(
+                    input_path,
+                    output_path,
+                    probe_result.video_info,
+                    encoder,
+                )
+                success = self._run_ffmpeg(cmd, job)
+
         if not success:
             raise ValueError("FFmpeg transcode failed")
 
@@ -469,7 +497,16 @@ class TranscodeWorker(BaseWorker):
                 return_code = self._ffmpeg_process.returncode
 
                 if return_code != 0:
-                    logger.error(f"[{self.name}] FFmpeg failed with code {return_code}")
+                    # Surface the actual ffmpeg stderr so the operator can see
+                    # why it bailed (codec init error, missing nvcuda.dll, bad
+                    # input dimension for the HW encoder, etc). Code on its
+                    # own is opaque — 4294967274 is just unsigned -22.
+                    tail = self._tail_ffmpeg_log(log_file, lines=15)
+                    logger.error(
+                        f"[{self.name}] FFmpeg failed with code {return_code} "
+                        f"(unsigned form of {(return_code - 0x100000000) if return_code > 0x7fffffff else return_code}). "
+                        f"Last lines of ffmpeg stderr:\n{tail}"
+                    )
                     return False
 
                 return True
@@ -478,6 +515,20 @@ class TranscodeWorker(BaseWorker):
             logger.error(f"[{self.name}] FFmpeg error: {e}")
             self._kill_ffmpeg()
             return False
+
+    def _tail_ffmpeg_log(self, log_file: Path, lines: int = 15) -> str:
+        """Read the last `lines` lines of the per-job ffmpeg log (or as many
+        as exist). Returns a printable indented string, or '<empty>' if the
+        file is empty / missing."""
+        try:
+            with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
+                content = f.read()
+            if not content.strip():
+                return "  <empty>"
+            tail = content.splitlines()[-lines:]
+            return "\n".join("  | " + ln for ln in tail)
+        except OSError as e:
+            return f"  <could not read {log_file}: {e}>"
 
     def _kill_ffmpeg(self) -> None:
         """Kill running FFmpeg process."""

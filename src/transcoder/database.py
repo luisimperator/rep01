@@ -135,13 +135,23 @@ class StabilityCheck:
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
-    """Parse ISO format datetime string."""
+    """Parse ISO format datetime string.
+
+    SQLite's CURRENT_TIMESTAMP / datetime('now') stores naive UTC strings
+    ('2026-05-01 10:51:48'). The watchdog compares these against
+    datetime.now(timezone.utc), so we attach UTC tzinfo on parse to keep
+    every datetime timezone-aware. Without this, watchdog crashes with
+    "can't subtract offset-naive and offset-aware datetimes" on every tick.
+    """
     if not value:
         return None
     try:
-        return datetime.fromisoformat(value.replace('Z', '+00:00'))
+        dt = datetime.fromisoformat(value.replace('Z', '+00:00'))
     except ValueError:
         return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _now_iso() -> str:
