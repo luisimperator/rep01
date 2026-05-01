@@ -1,8 +1,10 @@
-# HeavyDrops Transcoder
+# HeavyDrops Transcoder v6.0.0
 
 A robust, idempotent daemon that monitors a Dropbox folder, downloads videos, transcodes H.264 to H.265 (HEVC) using FFmpeg with hardware acceleration support, and uploads the results back to Dropbox.
 
 Designed for processing massive video archives (hundreds of TB) with minimal intervention, running 24/7 for months.
+
+**v6 highlights**: incremental scanner with Dropbox cursor (BULK then DELTA), central dispatcher with bounded queues (no more double-pickup), opt-in disk budget, optional mirror output layout, token-bucket rate limiter, loopback HTTP dashboard at <http://127.0.0.1:9123/>, no-admin one-command installer, GitHub release notify, `hd update`. See `NOTAS_DA_VERSAO.txt` for the full changelog.
 
 ## Quick install on Windows (one command, no admin)
 
