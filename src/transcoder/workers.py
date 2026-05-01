@@ -513,22 +513,26 @@ class TranscodeWorker(BaseWorker):
         )
 
     def _run_ffmpeg(self, cmd: FFmpegCommand, job: Job) -> bool:
-        """Run FFmpeg command with progress tracking."""
+        """Run FFmpeg command with progress tracking.
+
+        Subprocess stdout/stderr are redirected DIRECTLY to the per-job log
+        file at the OS level (no Popen pipes). The previous PIPE+readline
+        approach silently dropped all ffmpeg output on Windows for
+        fast-failing invocations — every transcode failure looked empty,
+        and we only learned the real error by reproducing the command in a
+        terminal. Direct file redirect is dumb but reliable: whatever
+        ffmpeg writes to either stream lands in ffmpeg.log.
+
+        Live progress parsing is preserved via a tail thread that reads
+        the same file as ffmpeg writes, so the dashboard's REGISTRY
+        keeps updating in real time.
+        """
         log_dir = self.config.log_dir / f"job_{job.id}"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_file = log_dir / "ffmpeg.log"
         self._last_ffmpeg_log = log_file
 
         try:
-            # On Windows the console code page (cp1252) will choke on any
-            # non-ASCII char in a filename; force UTF-8 end-to-end and
-            # tolerate the rare invalid byte so the transcode still proceeds.
-            #
-            # We merge stdout into stderr (stderr=PIPE, stdout=STDOUT) so the
-            # per-job log file captures whichever stream ffmpeg uses for its
-            # error messages. Some early-exit failures (bad arg, missing
-            # codec, plugin load failure) print only to stdout and were
-            # silently dropped before.
             with open(log_file, 'w', encoding='utf-8', errors='replace') as log_f:
                 # Pre-pend the actual command line so post-mortem readers can
                 # see exactly what was launched.
@@ -536,73 +540,103 @@ class TranscodeWorker(BaseWorker):
                 log_f.flush()
                 self._ffmpeg_process = subprocess.Popen(
                     cmd.args,
-                    stdout=subprocess.PIPE,
+                    stdout=log_f,
                     stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding='utf-8',
-                    errors='replace',
                 )
 
-                # Monitor merged output for progress (and capture everything
-                # to disk so failures can be diagnosed after the fact).
-                last_progress = time.time()
+            # Spawn a tail thread that reads the log file as it grows and
+            # parses ffmpeg's progress lines. Stops when the main loop
+            # signals via `tail_stop`.
+            tail_stop = threading.Event()
+            tail_thread = threading.Thread(
+                target=self._tail_progress,
+                args=(log_file, cmd.expected_duration_sec or 0.0, tail_stop),
+                name=f"{self.name}-progress",
+                daemon=True,
+            )
+            tail_thread.start()
+
+            try:
+                # Poll stop_event every second so daemon shutdown is responsive.
                 while True:
                     if self.should_stop():
                         self._kill_ffmpeg()
                         raise WorkerStop("Worker stopping")
-
-                    line = self._ffmpeg_process.stdout.readline()
-                    if not line:
+                    try:
+                        return_code = self._ffmpeg_process.wait(timeout=1.0)
                         break
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                tail_stop.set()
+                tail_thread.join(timeout=3)
 
-                    log_f.write(line)
+            if return_code != 0:
+                # Surface the actual ffmpeg stderr so the operator can see
+                # why it bailed (codec init error, missing nvcuda.dll, bad
+                # input dimension for the HW encoder, etc). Code on its
+                # own is opaque — 4294967274 is just unsigned -22.
+                tail = self._tail_ffmpeg_log(log_file, lines=20)
+                logger.error(
+                    f"[{self.name}] FFmpeg failed with code {return_code} "
+                    f"(unsigned form of {(return_code - 0x100000000) if return_code > 0x7fffffff else return_code}). "
+                    f"Last lines of ffmpeg stderr:\n{tail}"
+                )
+                return False
 
-                    # Parse progress
-                    progress = parse_ffmpeg_progress(line)
-                    if progress and 'time_sec' in progress:
-                        REGISTRY.update(
-                            self.name,
-                            time_sec=progress.get('time_sec', 0.0),
-                            duration_sec=cmd.expected_duration_sec or 0.0,
-                            fps=progress.get('fps', 0.0),
-                            speed=progress.get('speed', 0.0),
-                            bitrate_kbps=progress.get('bitrate_kbps', 0.0),
-                        )
-                        now = time.time()
-                        if now - last_progress > 30:  # Log every 30s
-                            pct = (progress['time_sec'] / cmd.expected_duration_sec * 100
-                                   if cmd.expected_duration_sec else 0)
-                            speed = progress.get('speed', 0)
-                            logger.info(
-                                f"[{self.name}] Progress: {pct:.1f}% "
-                                f"({format_duration(progress['time_sec'])}/"
-                                f"{format_duration(cmd.expected_duration_sec)}) "
-                                f"speed={speed:.2f}x"
-                            )
-                            last_progress = now
+            return True
 
-                self._ffmpeg_process.wait()
-                return_code = self._ffmpeg_process.returncode
-
-                if return_code != 0:
-                    # Surface the actual ffmpeg stderr so the operator can see
-                    # why it bailed (codec init error, missing nvcuda.dll, bad
-                    # input dimension for the HW encoder, etc). Code on its
-                    # own is opaque — 4294967274 is just unsigned -22.
-                    tail = self._tail_ffmpeg_log(log_file, lines=15)
-                    logger.error(
-                        f"[{self.name}] FFmpeg failed with code {return_code} "
-                        f"(unsigned form of {(return_code - 0x100000000) if return_code > 0x7fffffff else return_code}). "
-                        f"Last lines of ffmpeg stderr:\n{tail}"
-                    )
-                    return False
-
-                return True
-
+        except WorkerStop:
+            raise
         except Exception as e:
             logger.error(f"[{self.name}] FFmpeg error: {e}")
             self._kill_ffmpeg()
             return False
+
+    def _tail_progress(
+        self,
+        log_file: Path,
+        expected_duration_sec: float,
+        stop: threading.Event,
+    ) -> None:
+        """Read log_file as ffmpeg writes to it; parse progress lines and
+        update REGISTRY. Polls every 2 seconds. Cheap on cold cache because
+        ffmpeg writes ~1KB/s of progress data."""
+        last_pos = 0
+        last_logged = time.time()
+        while not stop.is_set():
+            try:
+                with open(log_file, 'r', encoding='utf-8', errors='replace') as f:
+                    f.seek(last_pos)
+                    chunk = f.read()
+                    last_pos = f.tell()
+                for line in chunk.splitlines():
+                    progress = parse_ffmpeg_progress(line)
+                    if not progress or 'time_sec' not in progress:
+                        continue
+                    REGISTRY.update(
+                        self.name,
+                        time_sec=progress.get('time_sec', 0.0),
+                        duration_sec=expected_duration_sec,
+                        fps=progress.get('fps', 0.0),
+                        speed=progress.get('speed', 0.0),
+                        bitrate_kbps=progress.get('bitrate_kbps', 0.0),
+                    )
+                    now = time.time()
+                    if now - last_logged > 30:
+                        pct = (progress['time_sec'] / expected_duration_sec * 100
+                               if expected_duration_sec else 0)
+                        speed = progress.get('speed', 0)
+                        logger.info(
+                            f"[{self.name}] Progress: {pct:.1f}% "
+                            f"({format_duration(progress['time_sec'])}/"
+                            f"{format_duration(expected_duration_sec)}) "
+                            f"speed={speed:.2f}x"
+                        )
+                        last_logged = now
+            except OSError:
+                pass
+            stop.wait(2.0)
 
     def _tail_ffmpeg_log(self, log_file: Path, lines: int = 15) -> str:
         """Read the last `lines` lines of the per-job ffmpeg log (or as many
