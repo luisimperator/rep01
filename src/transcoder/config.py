@@ -155,13 +155,22 @@ class ApiSettings(BaseModel):
     )
     bind: str = Field(
         default="127.0.0.1",
-        description="Interface to bind; loopback by default so no auth is needed"
+        description="Interface to bind. 127.0.0.1 = local PC only (no auth needed). "
+                    "0.0.0.0 = anyone on the LAN can reach it (auth REQUIRED, set "
+                    "access_token below)."
     )
     port: int = Field(
         default=9123,
         ge=1,
         le=65535,
         description="TCP port for the status API"
+    )
+    access_token: str = Field(
+        default="",
+        description="If non-empty, every request must carry this token via "
+                    "?token=X query param, Authorization: Bearer X header, or "
+                    "the hd_token cookie set by a prior visit. Auto-generated "
+                    "on first bind=0.0.0.0 startup if left blank."
     )
 
 

@@ -154,6 +154,8 @@
   <button class="danger" onclick="restartDaemon()">Restart daemon</button>
 </div>
 
+<div id="lan-card"></div>
+
 <h2>Self-health agent <span style="color:var(--muted);font-weight:normal;font-size:.85em">(autonomous monitoring)</span></h2>
 <div id="health-card" class="panel" style="margin-bottom: 1em;"></div>
 
@@ -508,6 +510,14 @@ async function renderSettings() {
       <span class="hint">Lower = faster feedback. Default 10.</span>
     </div>
     <div class="field">
+      <label for="set-bind">${lbl('api_bind', 'Dashboard access')}</label>
+      <select id="set-bind">
+        <option value="127.0.0.1" ${(s.api_bind || '127.0.0.1') === '127.0.0.1' ? 'selected' : ''}>Local PC only (no token needed)</option>
+        <option value="0.0.0.0" ${s.api_bind === '0.0.0.0' ? 'selected' : ''}>LAN — other devices on this network (token required)</option>
+      </select>
+      <span class="hint">Daemon restart needed after change.</span>
+    </div>
+    <div class="field">
       <label>Encoder · Profile</label>
       <span class="hint">${escapeHtml(ctx.encoder_preference || '')} · ${escapeHtml(ctx.profile || '')} (edit in config.yaml + restart)</span>
     </div>
@@ -531,6 +541,7 @@ async function saveSettings() {
     legacy_reorganize: document.getElementById('set-reorg').checked,
     legacy_reorganize_min_age_days: parseInt(document.getElementById('set-age').value),
     health_check_interval_minutes: parseInt(document.getElementById('set-health').value),
+    api_bind: document.getElementById('set-bind').value,
   };
   try {
     const r = await fetchJSON('/api/settings', {
@@ -782,6 +793,7 @@ async function tick() {
 
   const h = await safeFetch('/api/health');
   renderNow(s, a);
+  renderLanCard(s);
   renderHealth(h);
   renderStats(st);
   renderStatus(s);
@@ -791,6 +803,43 @@ async function tick() {
   renderJobs(j);
   renderStateTable(s);
   renderLog(lg);
+}
+
+function renderLanCard(s) {
+  const el = document.getElementById('lan-card');
+  if (!el) return;
+  if (!s || s._error || !s.api || !s.api.lan_accessible) {
+    el.innerHTML = '';
+    return;
+  }
+  const tok = s.api.access_token || '';
+  const addrs = s.api.lan_addresses || [];
+  const link = (url) => {
+    const sep = url.includes('?') ? '&' : '?';
+    return tok ? `${url}${sep}token=${encodeURIComponent(tok)}` : url;
+  };
+  let body = `<div style="background:#1c2230;border:1px solid #2c3445;border-radius:8px;padding:.9em 1.2em;margin:1em 0 1.5em 0;">
+    <div style="font-size:.85em;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.4em;">Open this dashboard from another device</div>`;
+  if (addrs.length === 0) {
+    body += `<div class="hint">No LAN address detected. Try <code>ipconfig</code> on the daemon's PC and use that IP with port ${s.api.port || 9123}.</div>`;
+  } else {
+    body += `<div style="display:flex;flex-direction:column;gap:.4em;">`;
+    for (const url of addrs) {
+      const full = link(url);
+      body += `<div style="display:flex;gap:.6em;align-items:center;flex-wrap:wrap;">
+        <code style="background:var(--panel-2);padding:.3em .6em;border-radius:4px;flex:1;min-width:0;word-break:break-all;">${escapeHtml(full)}</code>
+        <button onclick="navigator.clipboard.writeText('${escapeHtml(full)}').then(()=>toast('Copied','ok'))">Copy</button>
+      </div>`;
+    }
+    body += `</div>`;
+  }
+  if (!s.api.auth_required) {
+    body += `<div style="margin-top:.7em;color:var(--err);font-size:.9em;">⚠ No access token configured — anyone on your network can pause/restart the daemon. Set <code>api.access_token</code> in config.yaml or restart so it auto-generates.</div>`;
+  } else {
+    body += `<div style="margin-top:.5em;font-size:.82em;color:var(--muted);">First visit logs in via <code>?token=...</code> and stamps a 30-day cookie; later visits work without the token in the URL.</div>`;
+  }
+  body += `</div>`;
+  el.innerHTML = body;
 }
 
 function renderHealth(payload) {

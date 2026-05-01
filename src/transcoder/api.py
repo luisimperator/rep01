@@ -113,8 +113,67 @@ def _build_handler(api: ApiServer):
         def log_message(self, fmt: str, *args: Any) -> None:
             return
 
+        # Allow do_GET / do_POST to inject Set-Cookie on the next response.
+        _set_cookie_value: str | None = None
+
+        # ---------------- auth ----------------
+
+        def _is_authorized(self, route: str, qs: dict[str, list[str]]) -> bool:
+            """Token check. No-op when no token is configured (local-only
+            mode). When a token is set, every route except /healthz needs
+            one of: Bearer header / ?token=X / hd_token cookie."""
+            token = (api.config.api.access_token or "").strip()
+            if not token:
+                return True
+            if route == "/healthz":
+                return True
+            # Bearer header
+            auth = self.headers.get("Authorization", "")
+            if auth == f"Bearer {token}":
+                return True
+            # Query param (also stamps a cookie so the user doesn't need to
+            # keep ?token=X in the URL after the first visit).
+            given = (qs.get("token") or [""])[0]
+            if given and given == token:
+                self._set_cookie_value = token
+                return True
+            # Cookie
+            cookies = self.headers.get("Cookie", "") or ""
+            for crumb in cookies.split(";"):
+                k, _, v = crumb.strip().partition("=")
+                if k == "hd_token" and v == token:
+                    return True
+            return False
+
+        def _send_unauthorized(self) -> None:
+            """Tiny HTML page with a token paste box. Survives GET/POST."""
+            body = (
+                b"<!doctype html><meta charset=utf-8>"
+                b"<title>HeavyDrops \xe2\x80\x94 token required</title>"
+                b"<style>body{font:14px system-ui;margin:3em auto;max-width:420px;background:#0c0d10;color:#e6e8ee}"
+                b"input{font:inherit;padding:.5em;width:100%;background:#16181d;color:#eee;border:1px solid #2a2e36;border-radius:5px}"
+                b"button{margin-top:.6em;padding:.5em 1em;background:#6cb6ff;border:0;border-radius:5px;cursor:pointer;color:#000;font-weight:600}"
+                b"</style>"
+                b"<h2>Access token required</h2>"
+                b"<p>This daemon is bound to a non-local address. Paste the access token from <code>config.yaml</code> "
+                b"(<code>api.access_token</code>) to continue.</p>"
+                b"<form method=GET>"
+                b"<input name=token autofocus placeholder='access token'>"
+                b"<button type=submit>Sign in</button>"
+                b"</form>"
+            )
+            self.send_response(401)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        # ---------------- routing ----------------
+
         def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
             route, qs = _split(self.path)
+            if not self._is_authorized(route, qs):
+                return self._send_unauthorized()
             if route == "/":
                 return self._send_html(DASHBOARD_HTML)
             if route == "/api/status":
@@ -142,7 +201,9 @@ def _build_handler(api: ApiServer):
             self.send_error(404, "not found")
 
         def do_POST(self) -> None:  # noqa: N802
-            route, _ = _split(self.path)
+            route, qs = _split(self.path)
+            if not self._is_authorized(route, qs):
+                return self._send_unauthorized()
             if route == "/api/pause":
                 api.dispatcher.pause()
                 return self._send_json({"ok": True, "paused": True})
@@ -194,11 +255,26 @@ def _build_handler(api: ApiServer):
                 return {}
 
         # -------- response helpers
+        def _stamp_token_cookie(self) -> None:
+            """If a query-param login just happened, send a cookie so the
+            user doesn't need ?token=X in every URL."""
+            if self._set_cookie_value:
+                # 30-day cookie, HttpOnly so JS can't read it. Path=/ so it
+                # covers /api/* too. SameSite=Lax keeps it from being sent
+                # on cross-site requests.
+                self.send_header(
+                    "Set-Cookie",
+                    f"hd_token={self._set_cookie_value}; Path=/; Max-Age=2592000; "
+                    f"HttpOnly; SameSite=Lax",
+                )
+                self._set_cookie_value = None
+
         def _send_json(self, payload: dict) -> None:
             body = json.dumps(payload, default=str).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self._stamp_token_cookie()
             self.end_headers()
             self.wfile.write(body)
 
@@ -207,6 +283,7 @@ def _build_handler(api: ApiServer):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self._stamp_token_cookie()
             self.end_headers()
             self.wfile.write(body)
 
@@ -215,6 +292,7 @@ def _build_handler(api: ApiServer):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self._stamp_token_cookie()
             self.end_headers()
             self.wfile.write(body)
 
@@ -243,6 +321,17 @@ def _status_payload(api: ApiServer) -> dict:
         "pid": os.getpid(),
         "uptime_sec": uptime_sec,
         "uptime_human": _human_duration(uptime_sec),
+        "api": {
+            "bind": api.config.api.bind,
+            "port": api.config.api.port,
+            "lan_accessible": api.config.api.bind not in ("127.0.0.1", "localhost", "::1"),
+            "auth_required": bool((api.config.api.access_token or "").strip()),
+            # The token is needed to assemble the share URL. Only surfaced
+            # to authorized callers — by the time they're hitting this
+            # payload they've already passed the auth check.
+            "access_token": api.config.api.access_token or None,
+            "lan_addresses": _enumerate_lan_addresses(api.config.api.port),
+        },
         "scan": {
             "dropbox_root": scan_state.dropbox_root,
             "mode": "delta" if scan_state.bulk_pass_complete else "bulk",
@@ -444,6 +533,11 @@ _SETTINGS_KNOBS: dict[str, dict] = {
         "yaml_key": "incidents.health_check_interval_minutes",
         "label": "Self-health agent: minutes between checks",
     },
+    "api_bind": {
+        "type": "bind",
+        "yaml_key": "api.bind",
+        "label": "Dashboard access (127.0.0.1 = local only, 0.0.0.0 = LAN)",
+    },
 }
 
 
@@ -457,6 +551,7 @@ def _settings_payload(api: ApiServer) -> dict:
             "legacy_reorganize_min_age_days": cfg.legacy_reorganize_min_age_days,
             "dropbox_root": cfg.dropbox_root,
             "health_check_interval_minutes": cfg.incidents.health_check_interval_minutes,
+            "api_bind": cfg.api.bind,
             "cq_value": cfg.cq_value,
             "min_size_gb": cfg.min_size_gb,
         },
@@ -535,6 +630,10 @@ def _apply_settings(api: ApiServer, body: dict) -> dict:
             # Strip trailing slashes — files_list_folder rejects them.
             while len(value) > 1 and value.endswith("/"):
                 value = value[:-1]
+        elif knob["type"] == "bind":
+            value = str(raw or "").strip()
+            if value not in ("127.0.0.1", "0.0.0.0"):
+                raise ValueError(f"{key} must be '127.0.0.1' or '0.0.0.0'")
         else:
             raise ValueError(f"unsupported type for {key}")
 
@@ -850,6 +949,27 @@ def _health_payload(api: ApiServer) -> dict:
 def _reorganize_status_payload(api: ApiServer) -> dict:
     run = api._reorganize_run
     return {"ok": True, "run": run.to_dict() if run else None}
+
+
+def _enumerate_lan_addresses(port: int) -> list[str]:
+    """Enumerate the IPv4 LAN addresses for this host so the dashboard can
+    show 'http://192.168.x.y:9123/' to copy on another device. Filters out
+    loopback. Returns a list, possibly empty if the host has no usable
+    LAN-facing NIC."""
+    import socket
+    addrs: list[str] = []
+    try:
+        hostname = socket.gethostname()
+        # getaddrinfo returns IPv4+IPv6; we filter to AF_INET (v4) since
+        # the average user types LAN URLs in v4 form.
+        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
+            ip = info[4][0]
+            if ip and not ip.startswith("127.") and ip not in addrs:
+                addrs.append(ip)
+    except OSError:
+        pass
+    # Build URLs
+    return [f"http://{ip}:{port}/" for ip in addrs]
 
 
 def _human_duration(seconds: float) -> str:

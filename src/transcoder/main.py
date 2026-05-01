@@ -312,6 +312,37 @@ class Daemon:
         )
         # Expose the daemon back to the API so /api/status can read scan errors.
         self.api_server.daemon = self
+        # Auto-generate an access token if the user opted into LAN access
+        # (bind != loopback) and didn't set one. Persist it to config.yaml so
+        # they can copy it from there on demand.
+        if self.config.api.bind not in ("127.0.0.1", "localhost", "::1") and \
+                not self.config.api.access_token.strip():
+            import secrets as _secrets
+            new_token = _secrets.token_urlsafe(24)
+            self.config.api.access_token = new_token
+            try:
+                from .self_health import _persist_yaml_kv
+                cfg_path = Path("config.yaml")
+                if not cfg_path.exists():
+                    # Try the user's HeavyDrops install dir
+                    cfg_path = Path.home() / "HeavyDrops" / "config.yaml"
+                if cfg_path.exists():
+                    _persist_yaml_kv(cfg_path, "api", {
+                        "enabled": self.config.api.enabled,
+                        "bind": self.config.api.bind,
+                        "port": self.config.api.port,
+                        "access_token": new_token,
+                    })
+                    logger.info(f"generated api.access_token and saved to {cfg_path}")
+                else:
+                    logger.warning(
+                        "generated api.access_token but could not locate config.yaml "
+                        "to persist it; copy this token to api.access_token: %s",
+                        new_token,
+                    )
+            except Exception as e:
+                logger.warning(f"could not persist api.access_token: {e}")
+
         self.api_server.start()
 
         # Self-health agent: 3-hour autonomous loop that detects + fixes
