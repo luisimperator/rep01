@@ -2,8 +2,112 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
-Versão: 1.4.4
-Data: 04/02/2026
+Versão: 6.0.0
+Data: 01/05/2026
+--------------------------------------------------------------------------------
+
+NOVA ARQUITETURA - "TRANSCODER 6"
+
+Esta versão é uma reorganização completa pensada para arquivos massivos
+(centenas de TB) rodando sem intervenção por meses. O app antigo
+(transcoder_gui.py) continua funcionando para uso pontual em pastas locais,
+mas o produto principal agora é um daemon de fundo com dashboard no navegador.
+
+  [INSTALAÇÃO] Um comando, sem admin
+  ----------------------------------
+  Cole no PowerShell:
+      iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
+
+  Instala em %USERPROFILE%\HeavyDrops, baixa Python/Git/FFmpeg se faltarem,
+  pede o token do Dropbox uma vez, registra Task Scheduler para auto-iniciar
+  no logon e reiniciar em caso de falha. Atalho "HeavyDrops" no Desktop abre
+  o dashboard. Não precisa de admin.
+
+  [DASHBOARD] http://127.0.0.1:9123/
+  ----------------------------------
+  Página simples no navegador, atualiza a cada 3s:
+    - Versão instalada e tempo de uptime
+    - Modo de scan (BULK na 1ª passada, DELTA depois)
+    - Filas de download / transcode / upload
+    - Disco reservado vs. livre
+    - Lista dos 20 jobs mais recentes
+    - Botões: Scan now, Pause, Resume, Retry FAILED
+    - Banner se houver release nova no GitHub
+
+  Fechar o navegador NÃO para o daemon.
+
+  [SCANNER] Bulk + Delta com cursor
+  ---------------------------------
+  ANTES: cada scan re-listava todo o Dropbox.
+  AGORA: 1ª passada (BULK) salva um cursor a cada 500 entradas e resume após
+         crash. Passadas seguintes (DELTA) só trazem mudanças desde o cursor.
+         Reinicia automaticamente se você mudar dropbox_root no config.
+
+  [SCANNER] Stability dual-profile
+  --------------------------------
+  ANTES: todo arquivo esperava 45min de "min_age" antes de processar, mesmo
+         em arquivo antigo que está estático faz meses.
+  AGORA: BULK usa profile {checks=1, min_age=0} (o arquivo já está estático).
+         DELTA usa o profile antigo {checks=3, min_age=900} para proteger
+         de uploads em andamento. Reduz drasticamente o tempo da 1ª passada.
+
+  [DISPATCHER] Filas centralizadas (fim do double-pickup)
+  -------------------------------------------------------
+  ANTES: cada worker fazia polling no SQLite com LIMIT 1 e disputava jobs.
+  AGORA: uma thread só lê o DB e enche 3 filas bounded (download / transcode /
+         upload). Workers consomem das filas com active_set central. Fim de
+         duplicação em escala. Pause/resume sem matar jobs em andamento.
+
+  [DISCO] Budget de staging (opt-in)
+  ----------------------------------
+  Para um disco local de 2TB apontando para 200TB de Dropbox, agora tem teto.
+  O downloader pede slot antes de baixar; se não tem espaço (max_staging_bytes
+  ou min_free_bytes), espera com log a cada 5min em vez de quebrar com ENOSPC.
+  Reservas órfãs (crash com staging cheio) são limpas no startup.
+
+  [LAYOUT] Mirror opcional
+  ------------------------
+  ANTES: saída sempre em /A/B/h265/clip.MP4 ao lado do original.
+  AGORA: layout: sibling (legado, padrão) ou layout: mirror que coloca tudo
+         em /_h265_output/A/B/clip.MP4 sob uma raiz única. Útil quando
+         múltiplas pastas-irmãs têm arquivos com mesmo nome.
+
+  [API] Rate limit do Dropbox
+  ---------------------------
+  Token bucket configurável (default 600/min, burst 50). O cliente espera em
+  vez de levar 429. Em 429 honra o backoff retornado pelo Dropbox.
+
+  [UPDATE] Notify-only com 1 comando
+  ----------------------------------
+  Daemon checa GitHub Releases no startup. Se tem versão nova, mostra banner
+  no dashboard. "hd update" faz git pull + pip install -e . Aplicar continua
+  sendo decisão sua.
+
+  [DB] Índice unique parcial
+  --------------------------
+  jobs(dropbox_path) único restrito a estados não-terminais. Bloqueia jobs
+  ativos duplicados para o mesmo path entre rev bumps, sem afetar histórico.
+
+  [HOTFIX] UTF-8 forçado em Windows
+  ---------------------------------
+  Reads/writes de arquivo com encoding="utf-8" e errors="replace" para
+  sobreviver a bytes não-ASCII em nomes de arquivo / paths do Dropbox.
+
+COMPATIBILIDADE:
+  - O GUI legado (transcoder_gui.py) continua incluído no zip e instalável
+    via installer/install.ps1 para uso pontual em pastas locais.
+  - O instalador novo (bootstrap.ps1) instala o daemon, não o GUI legado.
+
+ENTRY POINTS NOVOS:
+  hd          - CLI / daemon (alias curto)
+  hd-daemon   - mesmo daemon, nome usado pelo Task Scheduler
+  hd-gui      - abre o dashboard no navegador padrão
+
+================================================================================
+
+VERSÃO 1.4.4 (04/02/2026):
+
+NOVIDADES DESTA VERSÃO:
 --------------------------------------------------------------------------------
 
 NOVIDADES DESTA VERSÃO:
