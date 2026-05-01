@@ -156,6 +156,9 @@
 <h2>Status</h2>
 <div class="grid" id="status-grid"></div>
 
+<h2>Storage <span style="color:var(--muted);font-weight:normal;font-size:.85em">(local paths the daemon writes to)</span></h2>
+<div id="storage-card" class="panel" style="margin-bottom: 1em;"></div>
+
 <h2>Scanner</h2>
 <div id="scan-card"></div>
 
@@ -752,11 +755,37 @@ async function tick() {
   renderNow(s, a);
   renderStats(st);
   renderStatus(s);
+  renderStorage(s);
   renderScan(a && !a._error ? a.scanner : null);
   renderWorkers(a);
   renderJobs(j);
   renderStateTable(s);
   renderLog(lg);
+}
+
+function renderStorage(s) {
+  const el = document.getElementById('storage-card');
+  if (!s || s._error || !s.disk) {
+    el.innerHTML = `<div class="empty">unavailable</div>`;
+    return;
+  }
+  const d = s.disk;
+  const pctUsed = d.total_bytes ? (1 - d.free_bytes / d.total_bytes) * 100 : 0;
+  el.innerHTML = `
+    <div class="field"><label>Staging (downloads + transcode work)</label>
+      <code style="word-break:break-all;color:var(--text)">${escapeHtml(d.staging_dir)}</code></div>
+    <div class="field"><label>Output</label>
+      <code style="word-break:break-all;color:var(--text)">${escapeHtml(d.output_dir || '(same as staging)')}</code></div>
+    <div class="field"><label>Logs</label>
+      <code style="word-break:break-all;color:var(--text)">${escapeHtml(d.log_dir)}</code></div>
+    <div class="field"><label>Database</label>
+      <code style="word-break:break-all;color:var(--text)">${escapeHtml(d.database_path)}</code></div>
+    <div class="field"><label>Disk on staging volume</label>
+      <span>${fmtBytes(d.free_bytes)} free / ${fmtBytes(d.total_bytes)} total
+        <span class="hint" style="color:var(--muted)">(${pctUsed.toFixed(1)}% used)</span></span></div>
+    <div class="field"><label>Currently reserved</label>
+      <span>${fmtBytes(d.reserved_bytes)} ${d.budget_enabled ? `<span class="hint">cap ${fmtBytes(d.max_staging_bytes)}</span>` : '<span class="hint">budget off</span>'}</span></div>
+  `;
 }
 
 renderSettings();

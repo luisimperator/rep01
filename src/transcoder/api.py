@@ -331,6 +331,9 @@ def _disk_snapshot(api: ApiServer) -> dict:
 
     return {
         "staging_dir": str(api.config.local_staging_dir),
+        "output_dir": str(api.config.local_output_dir),
+        "log_dir": str(api.config.log_dir),
+        "database_path": str(api.config.database_path),
         "reserved_bytes": api.db.total_reserved_bytes(),
         "budget_enabled": api.config.disk_budget.enabled,
         "max_staging_bytes": api.config.disk_budget.max_staging_bytes,
