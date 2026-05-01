@@ -493,6 +493,13 @@ async function renderSettings() {
       <span class="hint">Higher = safer. Folders touched recently are skipped.</span>
     </div>
     <div class="field">
+      <label for="set-health">${escapeHtml(k.health_check_interval_minutes.label)}</label>
+      <select id="set-health">
+        ${[1,5,10,30,60,180,360].map(v => `<option value="${v}" ${v === s.health_check_interval_minutes ? 'selected' : ''}>${v === 1 ? '1 minute' : v + ' minutes'}</option>`).join('')}
+      </select>
+      <span class="hint">Lower = faster feedback (use 1-5 min for setup). Default 10.</span>
+    </div>
+    <div class="field">
       <label>Encoder · Profile</label>
       <span class="hint">${escapeHtml(ctx.encoder_preference)} · ${escapeHtml(ctx.profile)} (edit in config.yaml + restart)</span>
     </div>
@@ -511,6 +518,7 @@ async function saveSettings() {
     min_size_gb: parseFloat(document.getElementById('set-min').value),
     legacy_reorganize: document.getElementById('set-reorg').checked,
     legacy_reorganize_min_age_days: parseInt(document.getElementById('set-age').value),
+    health_check_interval_minutes: parseInt(document.getElementById('set-health').value),
   };
   try {
     const r = await fetchJSON('/api/settings', {

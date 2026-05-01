@@ -129,6 +129,18 @@ def probe_video(
     # Audio codec
     audio_codec = audio_stream.get('codec_name') if audio_stream else None
 
+    # Timecode: try the video stream's tags first (BMD/Apple cameras put it
+    # there as e.g. "timecode": "14:39:32;17"), then fall back to a tmcd
+    # data stream's tags. Premiere/Resolve read this when the H.265 lands
+    # in a project — without it the multi-cam sync is gone.
+    timecode = None
+    for s in data.get('streams', []):
+        tags = s.get('tags') or {}
+        tc = tags.get('timecode') or tags.get('TIMECODE')
+        if tc:
+            timecode = tc
+            break
+
     video_info = VideoInfo(
         codec_name=codec_name,
         width=width,
@@ -141,6 +153,7 @@ def probe_video(
         has_audio=audio_stream is not None,
         has_subtitles=has_subtitles,
         audio_codec=audio_codec,
+        timecode=timecode,
     )
 
     # Check if already HEVC (R1)

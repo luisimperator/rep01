@@ -34,6 +34,11 @@ class VideoInfo:
     has_audio: bool = True
     has_subtitles: bool = False
     audio_codec: str | None = None
+    # Timecode preserved from input (e.g. "14:39:32;17"). When present we
+    # pass it as `-timecode` so Premiere/Resolve etc. read the same start
+    # frame as the original H.264 — critical for projects relying on
+    # timecode-based sync across cameras.
+    timecode: str | None = None
 
 
 @dataclass
@@ -116,20 +121,39 @@ class FFmpegCommandBuilder:
         # Input file
         args.extend(["-i", str(input_path)])
 
-        # Mapping: copy video + audio + subtitles, but drop data streams.
-        # MP4 muxer chokes on tmcd (timecode) and other "data" streams when
-        # asked to copy them, even though ffmpeg's stream-mapping plan looks
-        # fine. Specifically, BMUCC/Blackmagic outputs include a tmcd track
-        # that fails with:
-        #   "Could not find tag for codec none in stream #1"
-        # `-dn` strips them; the timecode is preserved as track-level
-        # metadata via -map_metadata 0 anyway.
+        # Mapping: copy video + audio + subtitles, drop tmcd data streams
+        # (MP4 muxer can't write them via copy and bails with "Could not
+        # find tag for codec none"). The TIMECODE itself is preserved via
+        # -timecode below — Premiere / Resolve / FCP read that as the
+        # clip's start TC, so multi-cam sync from the original H.264
+        # project keeps working on the H.265 replacement.
         args.extend([
             "-map", "0:v?",            # video tracks (none ok)
             "-map", "0:a?",            # audio tracks (none ok)
             "-map", "0:s?",            # subtitle tracks (none ok)
             "-map_metadata", "0",      # copy container-level metadata
+            "-map_metadata:s:v", "0:s:v",   # copy video stream metadata
+            "-map_metadata:s:a", "0:s:a",   # copy audio stream metadata
             "-dn",                     # drop data streams (tmcd, etc)
+        ])
+        if video_info.timecode:
+            # ffmpeg's -timecode writes a tmcd track in MP4 output without
+            # the "codec none" muxer issue, AND records it on the video
+            # stream's metadata. Both are read by NLEs.
+            args.extend(["-timecode", video_info.timecode])
+
+        # Frame-perfect sync with the H.264 original (so the H.265 can
+        # drop into a Premiere/Resolve project as a direct replacement
+        # without re-syncing): keep input timestamps, don't drop or dup
+        # frames, don't override the input fps.
+        args.extend(["-fps_mode", "passthrough"])
+        # Preserve original color metadata explicitly so NLEs render
+        # with the same color space as the source.
+        args.extend([
+            "-color_primaries", "copy",
+            "-color_trc", "copy",
+            "-colorspace", "copy",
+            "-color_range", "copy",
         ])
 
         # Video encoder settings

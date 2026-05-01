@@ -437,6 +437,13 @@ _SETTINGS_KNOBS: dict[str, dict] = {
         "yaml_key": "dropbox_root",
         "label": "Dropbox folder to monitor (must start with /)",
     },
+    "health_check_interval_minutes": {
+        "type": "int",
+        "min": 1,
+        "max": 1440,
+        "yaml_key": "incidents.health_check_interval_minutes",
+        "label": "Self-health agent: minutes between checks",
+    },
 }
 
 
@@ -449,6 +456,7 @@ def _settings_payload(api: ApiServer) -> dict:
             "legacy_reorganize": cfg.legacy_reorganize,
             "legacy_reorganize_min_age_days": cfg.legacy_reorganize_min_age_days,
             "dropbox_root": cfg.dropbox_root,
+            "health_check_interval_minutes": cfg.incidents.health_check_interval_minutes,
             "cq_value": cfg.cq_value,
             "min_size_gb": cfg.min_size_gb,
         },
@@ -530,9 +538,18 @@ def _apply_settings(api: ApiServer, body: dict) -> dict:
         else:
             raise ValueError(f"unsupported type for {key}")
 
-        # Mutate in-memory config (Pydantic model_validate would re-validate,
-        # but we already validated; setattr keeps it cheap).
-        setattr(cfg, key, value)
+        # Mutate in-memory config. Nested keys (e.g. "incidents.X") walk
+        # the dotted path; flat keys are direct attributes on Config.
+        knob = _SETTINGS_KNOBS[key]
+        yaml_key = knob["yaml_key"]
+        if "." in yaml_key:
+            parent, leaf = yaml_key.rsplit(".", 1)
+            sub = cfg
+            for part in parent.split("."):
+                sub = getattr(sub, part)
+            setattr(sub, leaf, value)
+        else:
+            setattr(cfg, key, value)
         updated.append(key)
 
     # Persist to config.yaml using regex line replacement so comments survive.
@@ -540,20 +557,63 @@ def _apply_settings(api: ApiServer, body: dict) -> dict:
     for key in updated:
         knob = _SETTINGS_KNOBS[key]
         yaml_key = knob["yaml_key"]
-        new_value = getattr(cfg, key)
+        if "." in yaml_key:
+            parent, leaf = yaml_key.rsplit(".", 1)
+            sub = cfg
+            for part in parent.split("."):
+                sub = getattr(sub, part)
+            new_value = getattr(sub, leaf)
+        else:
+            new_value = getattr(cfg, key)
         if isinstance(new_value, bool):
             yaml_val = "true" if new_value else "false"
         else:
             yaml_val = str(new_value)
-        pattern = re.compile(rf'^{re.escape(yaml_key)}\s*:.*$', re.MULTILINE)
-        line = f"{yaml_key}: {yaml_val}"
-        if pattern.search(raw):
-            raw = pattern.sub(line, raw, count=1)
+        if "." in yaml_key:
+            # Nested key: rewrite the matching `  leaf: ...` line within
+            # the parent block. Indented 2 spaces per the YAML the rest of
+            # the codebase emits.
+            parent, leaf = yaml_key.rsplit(".", 1)
+            line = f"  {leaf}: {yaml_val}"
+            # Find the parent block and patch the leaf inside it.
+            block_pat = re.compile(
+                rf'(^{re.escape(parent)}:\s*\n(?: {{2}}.*\n)*)',
+                re.MULTILINE,
+            )
+            m = block_pat.search(raw)
+            if m:
+                block = m.group(1)
+                leaf_pat = re.compile(rf'^ {{2}}{re.escape(leaf)}\s*:.*$', re.MULTILINE)
+                if leaf_pat.search(block):
+                    new_block = leaf_pat.sub(line, block, count=1)
+                else:
+                    new_block = block.rstrip("\n") + "\n" + line + "\n"
+                raw = raw.replace(block, new_block, 1)
+            else:
+                # Parent block missing — append a fresh one.
+                if raw and not raw.endswith("\n"):
+                    raw += "\n"
+                raw += f"{parent}:\n{line}\n"
         else:
-            if raw and not raw.endswith("\n"):
-                raw += "\n"
-            raw += line + "\n"
+            pattern = re.compile(rf'^{re.escape(yaml_key)}\s*:.*$', re.MULTILINE)
+            line = f"{yaml_key}: {yaml_val}"
+            if pattern.search(raw):
+                raw = pattern.sub(line, raw, count=1)
+            else:
+                if raw and not raw.endswith("\n"):
+                    raw += "\n"
+                raw += line + "\n"
     Path(cfg_path).write_text(raw, encoding="utf-8")
+
+    # Live-apply: a few settings affect long-lived components (the
+    # self-health agent's poll interval, etc.) and would otherwise need a
+    # daemon restart to take effect. Push them through here so saving in
+    # the dashboard reflects within seconds.
+    if "health_check_interval_minutes" in updated:
+        agent = getattr(getattr(api, "daemon", None), "self_health", None)
+        if agent is not None:
+            agent.interval_sec = max(60, int(cfg.incidents.health_check_interval_minutes) * 60)
+            logger.info(f"self-health interval updated live to {agent.interval_sec}s")
 
     logger.info("settings updated via API: %s", updated)
     return {"updated": updated, "config_path": cfg_path}
