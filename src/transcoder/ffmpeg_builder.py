@@ -97,7 +97,15 @@ class FFmpegCommandBuilder:
         from .config import TranscodeProfile
 
         profile = self.config.profile
-        temp_output = output_path.with_suffix(output_path.suffix + '.tmp')
+        # Insert .tmp BEFORE the real extension instead of appending it.
+        # ffmpeg infers the muxer from the output extension; an
+        # 'output.mp4.tmp' filename leaves the muxer unknown and ffmpeg
+        # bails with "Unable to choose an output format" before any
+        # frames are processed (which surfaces as the silent -22 we
+        # were chasing). 'output.tmp.mp4' parses cleanly.
+        temp_output = output_path.with_name(
+            output_path.stem + '.tmp' + output_path.suffix
+        )
 
         # Start building command
         args: list[str] = [self.config.ffmpeg_path, "-hide_banner", "-y"]
