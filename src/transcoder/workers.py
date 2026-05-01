@@ -176,6 +176,47 @@ class DownloadWorker(BaseWorker):
         # Partial file path during download
         partial_path = input_path.with_suffix(input_path.suffix + '.partial')
 
+        # Idempotency: a previous attempt may have already produced
+        # input.mp4 (the transcode then failed and the job was queued for
+        # retry). On Windows, partial.rename(input) fails with
+        # ERR_FILE_EXISTS in that case, so the same job loops forever
+        # downloading and never transcodes. If the existing file matches
+        # the expected size, skip download entirely; otherwise wipe it.
+        if input_path.exists():
+            try:
+                actual_size = input_path.stat().st_size
+            except OSError:
+                actual_size = -1
+            expected = int(job.dropbox_size or 0)
+            if expected and actual_size == expected:
+                logger.info(
+                    f"[{self.name}] Reusing previously downloaded "
+                    f"{input_path} ({format_bytes(actual_size)})"
+                )
+                self.db.update_job_state(
+                    job.id,
+                    JobState.DOWNLOADED,
+                    local_input_path=str(input_path),
+                )
+                return
+            logger.warning(
+                f"[{self.name}] Stale {input_path} found "
+                f"({format_bytes(actual_size)} vs expected {format_bytes(expected)}); "
+                f"deleting and re-downloading."
+            )
+            try:
+                input_path.unlink()
+            except OSError as e:
+                logger.error(f"[{self.name}] Could not remove stale input: {e}")
+                raise
+
+        # Wipe any leftover partial from an aborted previous run too.
+        if partial_path.exists():
+            try:
+                partial_path.unlink()
+            except OSError:
+                pass
+
         try:
             # Download with rev check
             self.dropbox.download_file_with_rev_check(
@@ -192,8 +233,13 @@ class DownloadWorker(BaseWorker):
                     partial_path.unlink()
                 return
 
-            # Rename to final path
-            partial_path.rename(input_path)
+            # Rename to final path. If something raced and re-created
+            # input_path between our existence check above and now, fall
+            # back to overwriting (Path.replace is atomic on Windows).
+            try:
+                partial_path.rename(input_path)
+            except FileExistsError:
+                partial_path.replace(input_path)
 
             # Update state
             self.db.update_job_state(

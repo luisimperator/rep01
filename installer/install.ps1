@@ -1,11 +1,11 @@
-# HeavyDrops Transcoder v6.0.13 Installer
+# HeavyDrops Transcoder v6.0.14 Installer
 # Run as Administrator: Right-click -> Run with PowerShell
 
 $ErrorActionPreference = "Stop"
 
 Write-Host ""
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  HeavyDrops Transcoder v6.0.13 Installer" -ForegroundColor Cyan
+Write-Host "  HeavyDrops Transcoder v6.0.14 Installer" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -169,10 +169,10 @@ if (Test-Path $SourceConfig) {
 # Create batch launcher (auto-installs deps if missing)
 $LauncherContent = @"
 @echo off
-title HeavyDrops Transcoder v6.0.13
+title HeavyDrops Transcoder v6.0.14
 cd /d "%~dp0"
 echo ========================================
-echo   HeavyDrops Transcoder v6.0.13
+echo   HeavyDrops Transcoder v6.0.14
 echo ========================================
 echo.
 REM Auto-install dependencies if missing
@@ -199,10 +199,10 @@ Set-Content -Path "$InstallDir\HeavyDrops Transcoder.bat" -Value $LauncherConten
 
 # PowerShell launcher (auto-installs deps if missing, keeps window open)
 $PSLauncherContent = @"
-`$Host.UI.RawUI.WindowTitle = "HeavyDrops Transcoder v6.0.13"
+`$Host.UI.RawUI.WindowTitle = "HeavyDrops Transcoder v6.0.14"
 Set-Location "`$PSScriptRoot"
 Write-Host "========================================" -ForegroundColor Cyan
-Write-Host "  HeavyDrops Transcoder v6.0.13" -ForegroundColor Cyan
+Write-Host "  HeavyDrops Transcoder v6.0.14" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -236,7 +236,7 @@ $Shortcut = $WshShell.CreateShortcut("$env:PUBLIC\Desktop\HeavyDrops Transcoder.
 $Shortcut.TargetPath = "powershell.exe"
 $Shortcut.Arguments = "-ExecutionPolicy Bypass -NoExit -File `"$InstallDir\Launch.ps1`""
 $Shortcut.WorkingDirectory = $InstallDir
-$Shortcut.Description = "HeavyDrops Transcoder v6.0.13"
+$Shortcut.Description = "HeavyDrops Transcoder v6.0.14"
 $Shortcut.Save()
 Write-Host "   Desktop shortcut created" -ForegroundColor Gray
 
