@@ -1021,36 +1021,83 @@ def github_auth(ctx, repo, token, enable):
     if not token:
         token = os.environ.get("GITHUB_TOKEN", "")
     if not token:
-        token = click.prompt("Paste your GitHub PAT", hide_input=True).strip()
+        # Show input so the user can verify before submitting; PATs are not
+        # secret in the same way passwords are (revocable, scoped) and
+        # hide_input has been the source of repeated paste-incomplete bugs.
+        token = click.prompt("Paste your GitHub PAT")
+    # Aggressive cleanup: strip whitespace, surrounding quotes, BOM, trailing
+    # backslashes that PowerShell sometimes injects on multi-line paste.
+    token = (token or "").strip().strip('"').strip("'").strip()
+    token = token.lstrip('﻿')
     if not token:
         console.print("[red]A token is required.[/red]")
         sys.exit(1)
+
+    # Sanity-check what we received so paste failures are obvious.
+    if len(token) < 20:
+        console.print(f"[red]Token looks too short ({len(token)} chars). "
+                      f"Fine-grained PATs start with 'github_pat_' and are 80+ chars. "
+                      f"Classic tokens start with 'ghp_' and are 40+ chars.[/red]")
+        sys.exit(1)
+    masked = f"{token[:7]}...{token[-4:]}"
+    plausible = (
+        token.startswith("github_pat_") or token.startswith("ghp_") or
+        token.startswith("gho_") or token.startswith("ghs_")
+    )
+    console.print(f"[blue]Received token: {masked} ({len(token)} chars){'  [yellow](unfamiliar prefix)[/yellow]' if not plausible else ''}[/blue]")
 
     target_repo = (repo or config.incidents.github_repo or "").strip()
     if not target_repo or "/" not in target_repo:
         target_repo = click.prompt("Target repo (owner/name)", default="luisimperator/rep01").strip()
 
-    # Validate the token can read the repo + create issues
-    req = urllib.request.Request(
-        f"https://api.github.com/repos/{target_repo}",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-            "User-Agent": "heavydrops-transcoder",
-        },
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as r:
-            data = json.loads(r.read().decode("utf-8"))
+    # Try Bearer then token (older "ghp_" classic tokens sometimes only
+    # accept the legacy form). Surface the body of the failing call so the
+    # operator can see exactly what GitHub said.
+    def _try(scheme: str) -> tuple[int, str]:
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{target_repo}",
+            headers={
+                "Accept": "application/vnd.github+json",
+                "Authorization": f"{scheme} {token}",
+                "User-Agent": "heavydrops-transcoder",
+                "X-GitHub-Api-Version": "2022-11-28",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                return r.status, r.read().decode("utf-8")
+        except urllib.error.HTTPError as e:
+            return e.code, e.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            return 0, str(e)
+
+    status, body = _try("Bearer")
+    if status != 200 and "401" in str(status):
+        console.print("[yellow]Bearer rejected, trying legacy token scheme...[/yellow]")
+        status, body = _try("token")
+
+    if status == 200:
+        try:
+            data = json.loads(body)
             console.print(f"[green]Token validated for {data.get('full_name')}[/green]")
-            if not data.get("permissions", {}).get("push", False):
-                console.print("[yellow]Note: push permission not detected on this token. Issue creation may still work if the repo allows public issues.[/yellow]")
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        console.print(f"[red]Token validation failed: HTTP {e.code} {e.reason}\n{body}[/red]")
+            if not (data.get("permissions") or {}).get("push", False):
+                console.print("[yellow]Note: push permission not detected. If this is a fine-grained PAT, make sure 'Issues: Read and write' is enabled.[/yellow]")
+        except json.JSONDecodeError:
+            console.print(f"[green]Token accepted (status {status}), but unexpected response body.[/green]")
+    elif status == 0:
+        console.print(f"[red]Could not reach GitHub: {body}[/red]")
         sys.exit(1)
-    except Exception as e:
-        console.print(f"[red]Could not reach GitHub: {e}[/red]")
+    else:
+        console.print(f"[red]Token validation failed: HTTP {status}[/red]")
+        console.print(f"[red]{body}[/red]")
+        console.print(
+            "\n[yellow]Common causes:[/yellow]\n"
+            "  - Token was copied incompletely (re-copy from github.com)\n"
+            "  - Token was revoked or expired\n"
+            "  - Fine-grained PAT lacks 'Issues' permission on the target repo\n"
+            "  - Repository scope on the PAT doesn't include this repo\n"
+            "  - You pasted the token NAME instead of the actual secret\n"
+        )
         sys.exit(1)
 
     # Persist to config.yaml using the same regex line-replacement pattern
