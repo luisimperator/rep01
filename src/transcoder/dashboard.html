@@ -459,26 +459,34 @@ async function renderSettings() {
     return;
   }
   settingsCache = sp;
-  const s = sp.settings, k = sp.knobs, ctx = sp.context;
-  document.getElementById('settings-body').innerHTML = `
+  const s = sp.settings || {}, k = sp.knobs || {}, ctx = sp.context || {};
+
+  // Defensive helpers: a missing knob (older daemon, partial response)
+  // shouldn't blank the entire panel.
+  const lbl = (key, fallback) => escapeHtml((k[key] && k[key].label) || fallback);
+  const kmin = (key, def) => (k[key] && k[key].min != null) ? k[key].min : def;
+  const kmax = (key, def) => (k[key] && k[key].max != null) ? k[key].max : def;
+
+  try {
+    document.getElementById('settings-body').innerHTML = `
     <div class="field">
-      <label for="set-root">${escapeHtml(k.dropbox_root.label)}</label>
-      <input id="set-root" type="text" value="${escapeHtml(s.dropbox_root)}" style="min-width: 280px;">
+      <label for="set-root">${lbl('dropbox_root', 'Dropbox folder to monitor')}</label>
+      <input id="set-root" type="text" value="${escapeHtml(s.dropbox_root || '')}" style="min-width: 280px;">
       <button type="button" onclick="openBrowse()">Browse...</button>
       <span class="hint">Click Browse to navigate your Dropbox.</span>
     </div>
     <div class="field">
-      <label for="set-cq">${escapeHtml(k.cq_value.label)}</label>
-      <input id="set-cq" type="number" min="${k.cq_value.min}" max="${k.cq_value.max}" value="${s.cq_value}">
-      <span class="hint">${k.cq_value.min}–${k.cq_value.max}. Default 24.</span>
+      <label for="set-cq">${lbl('cq_value', 'H.265 quality')}</label>
+      <input id="set-cq" type="number" min="${kmin('cq_value', 14)}" max="${kmax('cq_value', 36)}" value="${s.cq_value ?? 24}">
+      <span class="hint">${kmin('cq_value', 14)}–${kmax('cq_value', 36)}. Default 24.</span>
     </div>
     <div class="field">
-      <label for="set-min">${escapeHtml(k.min_size_gb.label)}</label>
-      <input id="set-min" type="number" min="0" max="1000" step="0.1" value="${s.min_size_gb}">
+      <label for="set-min">${lbl('min_size_gb', 'Skip files smaller than N GB')}</label>
+      <input id="set-min" type="number" min="0" max="1000" step="0.1" value="${s.min_size_gb ?? 6}">
       <span class="hint">GB. Default 6.</span>
     </div>
     <div class="field">
-      <label>${escapeHtml(k.legacy_reorganize.label)}</label>
+      <label>${lbl('legacy_reorganize', 'Reorganize after upload')}</label>
       <label class="switch">
         <input id="set-reorg" type="checkbox" ${s.legacy_reorganize ? 'checked' : ''}>
         <span class="track"></span>
@@ -486,30 +494,34 @@ async function renderSettings() {
       </label>
     </div>
     <div class="field">
-      <label for="set-age">${escapeHtml(k.legacy_reorganize_min_age_days.label)}</label>
+      <label for="set-age">${lbl('legacy_reorganize_min_age_days', 'Skip reorganize for active folders')}</label>
       <select id="set-age">
         ${[0,30,60,90,180,365].map(v => `<option value="${v}" ${v === s.legacy_reorganize_min_age_days ? 'selected' : ''}>${v === 0 ? 'always' : v + ' days'}</option>`).join('')}
       </select>
       <span class="hint">Higher = safer. Folders touched recently are skipped.</span>
     </div>
     <div class="field">
-      <label for="set-health">${escapeHtml(k.health_check_interval_minutes.label)}</label>
+      <label for="set-health">${lbl('health_check_interval_minutes', 'Self-health agent interval (min)')}</label>
       <select id="set-health">
         ${[1,5,10,30,60,180,360].map(v => `<option value="${v}" ${v === s.health_check_interval_minutes ? 'selected' : ''}>${v === 1 ? '1 minute' : v + ' minutes'}</option>`).join('')}
       </select>
-      <span class="hint">Lower = faster feedback (use 1-5 min for setup). Default 10.</span>
+      <span class="hint">Lower = faster feedback. Default 10.</span>
     </div>
     <div class="field">
       <label>Encoder · Profile</label>
-      <span class="hint">${escapeHtml(ctx.encoder_preference)} · ${escapeHtml(ctx.profile)} (edit in config.yaml + restart)</span>
+      <span class="hint">${escapeHtml(ctx.encoder_preference || '')} · ${escapeHtml(ctx.profile || '')} (edit in config.yaml + restart)</span>
     </div>
     <div class="field">
       <label>Dropbox root</label>
-      <span class="hint">${escapeHtml(ctx.dropbox_root)}</span>
+      <span class="hint">${escapeHtml(ctx.dropbox_root || '')}</span>
     </div>
     <button class="primary" onclick="saveSettings()">Save</button>
     <span style="color: var(--muted); font-size: .85em; margin-left: .8em">Most settings take effect on the next job. No restart needed.</span>
   `;
+  } catch (e) {
+    document.getElementById('settings-body').innerHTML =
+      `<div class="empty err">Settings render failed: ${escapeHtml(e.message)}.<br>Try Ctrl+F5 to refresh, or check the daemon log.</div>`;
+  }
 }
 async function saveSettings() {
   const body = {

@@ -147,14 +147,14 @@ class FFmpegCommandBuilder:
         # without re-syncing): keep input timestamps, don't drop or dup
         # frames, don't override the input fps.
         args.extend(["-fps_mode", "passthrough"])
-        # Preserve original color metadata explicitly so NLEs render
-        # with the same color space as the source.
-        args.extend([
-            "-color_primaries", "copy",
-            "-color_trc", "copy",
-            "-colorspace", "copy",
-            "-color_range", "copy",
-        ])
+        # Color metadata is carried in the bitstream by default — ffmpeg
+        # propagates BT.709/BT.2020 primaries, transfer and matrix from
+        # the source codec context to the output codec context without
+        # us asking. (Earlier versions tried to pass `-color_primaries
+        # copy` etc. but those flags are per-codec options that take
+        # literal values like 'bt709', not 'copy', and libx265 rejected
+        # them with "Error applying encoder options: Invalid argument" —
+        # see the v6.0.20 incident.)
 
         # Video encoder settings
         args.extend(self._get_video_encoder_args(encoder, profile, video_info))
