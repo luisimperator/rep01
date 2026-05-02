@@ -122,6 +122,44 @@ def matches_exclude_pattern(path: str, patterns: list[str]) -> bool:
     return False
 
 
+_ASSETS_SEGMENT_NAMES = {"assets", "Assets", "ASSETS"}
+
+
+def path_has_assets_segment(path: str) -> bool:
+    """True when any path segment matches an 'assets' folder name.
+
+    Independent of config.exclude_patterns so a user override on that
+    list can never accidentally re-enable scanning of project resource
+    folders. Walks all segments so deeply-nested files like
+    `/foo/assets/sub/sub/file.mp4` are caught.
+    """
+    if not path:
+        return False
+    from pathlib import PurePosixPath
+    for seg in PurePosixPath(path).parts:
+        if seg in _ASSETS_SEGMENT_NAMES:
+            return True
+    return False
+
+
+# Codecs that ffprobe reports for files that are technically images
+# wrapped in a movie container (After Effects exports, motion graphics
+# templates, etc). They're not real video and trying to transcode them
+# usually fails (PNG with rgb24/gbr colorspace is the canonical case).
+IMAGE_CODECS = frozenset({
+    "png", "mjpeg", "mjpegb", "jpeg2000", "jpegls",
+    "gif", "bmp", "tiff", "webp", "ppm", "pgm", "pgmyuv",
+    "targa", "exr", "dpx", "psd", "qoi", "smc",
+})
+
+
+def is_image_codec(codec_name: str | None) -> bool:
+    """True when the codec is an image format wrapped in a video container.
+    These shouldn't be transcoded as video — they're typically After Effects
+    exports of logos / overlays / lower thirds."""
+    return bool(codec_name) and codec_name.lower() in IMAGE_CODECS
+
+
 def is_video_file(path: str, extensions: list[str]) -> bool:
     """Check if path has a video file extension."""
     ext = Path(path).suffix.lower()
