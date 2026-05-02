@@ -773,6 +773,63 @@ class DropboxClient:
         except DropboxNotFoundError:
             return None
 
+    def download_partial(
+        self,
+        dropbox_path: str,
+        local_path: Path,
+        start_byte: int,
+        length_bytes: int,
+    ) -> int:
+        """
+        Range-download a slice of a Dropbox file. Used by the preflight
+        codec probe so we can detect HEVC-native files (which have nothing
+        to transcode) from the first few MB instead of the whole file.
+
+        Goes through `files_get_temporary_link` because the SDK's
+        `files_download` doesn't expose HTTP Range. The temp URL is valid
+        for ~4 hours and is safe to GET with a Range header.
+
+        Returns the number of bytes actually written, which may be less
+        than `length_bytes` if the file is shorter or the server caps the
+        range. Raises `DropboxNotFoundError` for missing paths.
+        """
+        import requests
+        norm_path = self._normalize_path(dropbox_path)
+
+        def operation() -> int:
+            try:
+                link_result = self._dbx.files_get_temporary_link(norm_path)
+            except ApiError as e:
+                if _is_path_not_found(e):
+                    raise DropboxNotFoundError(dropbox_path)
+                raise
+            url = link_result.link
+            end_byte = start_byte + length_bytes - 1
+            headers = {'Range': f'bytes={start_byte}-{end_byte}'}
+            with requests.get(url, headers=headers, stream=True, timeout=60) as r:
+                # 206 = partial content, 200 = server ignored Range (returned full).
+                # Both are fine — we just write up to length_bytes.
+                if r.status_code not in (200, 206):
+                    raise OSError(
+                        f"partial download HTTP {r.status_code} for {dropbox_path}"
+                    )
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                written = 0
+                with local_path.open('wb') as fh:
+                    for chunk in r.iter_content(chunk_size=64 * 1024):
+                        if not chunk:
+                            continue
+                        remaining = length_bytes - written
+                        if remaining <= 0:
+                            break
+                        if len(chunk) > remaining:
+                            chunk = chunk[:remaining]
+                        fh.write(chunk)
+                        written += len(chunk)
+                return written
+
+        return self._retry_operation(operation, f"download_partial({dropbox_path}, {start_byte}+{length_bytes})")
+
     def delete_file(self, path: str) -> bool:
         """
         Delete file from Dropbox.

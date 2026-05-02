@@ -258,6 +258,52 @@ def validate_output(
     return (True, None)
 
 
+def probe_codec_from_file(
+    input_path: Path,
+    ffprobe_path: str = "ffprobe",
+    timeout: int = 30,
+) -> str | None:
+    """
+    Lightweight codec probe for possibly-partial files. Returns the lowercase
+    codec_name of the first video stream, or None when ffprobe can't read
+    enough of the file to decide. Never raises — callers fall back to a full
+    download when this returns None.
+    """
+    if not input_path.exists() or input_path.stat().st_size == 0:
+        return None
+
+    cmd = [
+        ffprobe_path,
+        "-v", "quiet",
+        "-print_format", "json",
+        "-select_streams", "v:0",
+        "-show_streams",
+        str(input_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+        data = json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError, OSError):
+        return None
+
+    for stream in data.get('streams', []):
+        if stream.get('codec_type') == 'video':
+            codec = stream.get('codec_name')
+            if codec:
+                return codec.lower()
+    return None
+
+
+HEVC_CODEC_NAMES = frozenset({'hevc', 'h265', 'hev1', 'hvc1'})
+
+
+def is_hevc_codec(codec_name: str | None) -> bool:
+    """True if the codec name (any case) identifies HEVC/H.265."""
+    return bool(codec_name) and codec_name.lower() in HEVC_CODEC_NAMES
+
+
 def get_video_info_string(video_info: VideoInfo) -> str:
     """Get human-readable video info string."""
     parts = [

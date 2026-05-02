@@ -2,6 +2,52 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.31
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+SCAN: preflight HEVC probe (range-download) + h264 deletion audit log
+
+  [NOVO] Preflight HEVC detection antes do download completo
+  ----------------------------------------------------------
+  ANTES: arquivos nativamente em H.265 (entregues prontos, ou
+         transcodificados fora desse daemon) eram baixados INTEIROS,
+         o probe local descobria que ja era HEVC, marcava SKIPPED_HEVC
+         e deletava o staging. Desperdicio gigante de banda — um
+         arquivo de 100GB pra descobrir que nao precisava transcodar.
+
+  AGORA: antes do download completo, o downloader faz range-download
+         dos primeiros 16 MB do arquivo (configuravel via
+         `preflight_hevc_probe_mb`) usando files_get_temporary_link
+         + HTTP Range, e roda ffprobe no chunk. Se detectar HEVC,
+         marca SKIPPED_HEVC e nao baixa o resto.
+
+         Fallback: se o probe do head for inconclusivo (moov atom
+         no final, comum em exports do Premiere), tenta os ultimos
+         16 MB. Se ambos falharem, baixa inteiro como antes.
+
+         Custo pior caso por arquivo desconhecido: ~32 MB. Ganho
+         por arquivo HEVC nativo: ~99.97% da banda economizada.
+
+         Default: 16 MB. Setar 0 desabilita totalmente.
+
+  [NOVO] Audit log de delecao do /h264
+  ------------------------------------
+  Quando legacy_reorganize_delete_h264_after_seconds > 0 dispara
+  a delecao da pasta /h264, o daemon agora primeiro escreve um
+  log em <parent>/h264 deletado.txt listando:
+    - filename de cada arquivo deletado
+    - tamanho legivel
+    - data/hora da delecao
+    - motivo (delay configurado)
+    - lembrete de recovery via Dropbox history
+
+  Cada batch de delecao APPENDA uma nova secao no mesmo arquivo,
+  entao o usuario tem o historico completo de tudo que ja foi
+  apagado da pasta. Sobrevive ao rmtree do /h264 (esta no parent).
+
+================================================================================
+
 Versão: 6.0.30
 Data: 02/05/2026
 --------------------------------------------------------------------------------
