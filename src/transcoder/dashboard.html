@@ -494,11 +494,11 @@ async function renderSettings() {
       </label>
     </div>
     <div class="field">
-      <label for="set-age">${lbl('legacy_reorganize_min_age_days', 'Skip reorganize for active folders')}</label>
+      <label for="set-age">${lbl('legacy_reorganize_min_age_days', 'Wait before reorganize (skip if folder still active)')}</label>
       <select id="set-age">
-        ${[0,30,60,90,180,365].map(v => `<option value="${v}" ${v === s.legacy_reorganize_min_age_days ? 'selected' : ''}>${v === 0 ? 'always' : v + ' days'}</option>`).join('')}
+        ${[0,30,60,90,180,365].map(v => `<option value="${v}" ${v === s.legacy_reorganize_min_age_days ? 'selected' : ''}>${v === 0 ? 'no wait (reorganize immediately)' : v + ' days'}</option>`).join('')}
       </select>
-      <span class="hint">Higher = safer. Folders touched recently are skipped.</span>
+      <span class="hint">Higher = safer (recently-touched folders are skipped). "no wait" reorganizes every job regardless of activity.</span>
     </div>
     <div class="field">
       <label for="set-health">${lbl('health_check_interval_minutes', 'Self-health agent interval (min)')}</label>
