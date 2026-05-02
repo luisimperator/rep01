@@ -2,6 +2,77 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.2.2
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+URGENT BUGFIX: 8->10 upgrade quebrava QSV + main12/main-422-* nao
+existem + /assets continuava sendo escaneado + skip de baixo bitrate
+
+  [BUGFIX CRITICO #1] Forced 8->10 upgrade quebrava QSV main10
+  ------------------------------------------------------------
+  ANTES (v6.2.0): _resolve_output_format SEMPRE elevava saida pra
+         10-bit (out_depth = 10 mesmo pra source 8-bit). Resultado
+         em QSV: input nv12 (8-bit) saia do decoder, encoder pedia
+         main10 (10-bit) — format mismatch. ffmpeg cuspia:
+           [hevc_qsv] Current profile is unsupported
+           [hevc_qsv] Low power mode is unsupported
+         e o worker caia pra libx265 (CPU) DESNECESSARIAMENTE.
+
+  AGORA: out_depth match input. 8-bit fonte vira main + yuv420p.
+         10-bit fonte vira main10 + yuv420p10le. O upgrade 8->10
+         era teoria boa pro libx265 mas nao se traduz em QSV/NVENC.
+
+  [BUGFIX CRITICO #2] main12 e main-422-* nao existem em hevc_qsv
+  ----------------------------------------------------------------
+  ANTES: 12-bit ou 4:2:2 output mandava `-profile:v main12` /
+         `main-422-10` pro hevc_qsv. ffmpeg:
+           [hevc_qsv] Unable to parse "profile" option value "main12"
+         O fallback automatico tentava libx265 mas perdia ~2 ffmpeg
+         launches falhos antes (~30s + audio retry + cpu retry).
+
+  AGORA: worker detecta upfront via probe e forca encoder=libx265
+         em qualquer um destes:
+           - source chroma e 4:2:2 ou 4:4:4
+           - source bit_depth > 10 (alvo seria main12)
+           - preserve_chroma_422 ON e source 4:2:2
+         Aviso "Forcing libx265 (CPU): <razao>. Job rodara ~10x
+         mais lento" no log antes do transcode.
+
+  [BUGFIX] /assets nao estava sendo pulado
+  -----------------------------------------
+  ANTES: v6.2.1 adicionou */assets/* aos defaults de exclude_patterns
+         no config.py. Mas o config.yaml do usuario ja tinha
+         exclude_patterns proprio que sobrescreve o default (Pydantic
+         nao mescla listas). Resultado: ProRes 4444 12-bit em
+         /podcast/assets/drunk canvas/render intermed/ ainda era
+         baixado, scaneado e tentado transcode (que falhava).
+
+  AGORA: scanner._process_file chama _path_has_assets_segment(path)
+         como PRIMEIRA gate, antes de qualquer outra checagem. Se
+         qualquer segmento do path (case-sensitive 'assets'/'Assets'/
+         'ASSETS') bater, skip imediato. Independente de
+         exclude_patterns — usuario nao pode acidentalmente desligar
+         essa protecao.
+
+  [FEATURE] Skip de baixo bitrate (YouTube downloads etc)
+  -------------------------------------------------------
+  Novo state SKIPPED_LOW_BITRATE + setting
+  low_bitrate_skip_mbps_per_megapixel (default 3.0). Quando o probe
+  retorna bitrate por megapixel abaixo do threshold, marca o job
+  como SKIPPED_LOW_BITRATE e libera staging — sem transcode, upload
+  ou reorganize.
+
+  Threshold escala com resolucao:
+    - 1080p (~2 MP) skip < 6 Mbps  (catches YT 1080p ~5 Mbps)
+    - 4K (~8 MP) skip < 25 Mbps    (catches YT 4K ~20 Mbps)
+    - A7siii XAVC-S 4K ~140 Mbps -> 17 Mbps/MP, NAO pula
+    - Camera ATEM 1080p 50 Mbps   -> 24 Mbps/MP, NAO pula
+
+  Set 0 pra desligar.
+
+================================================================================
+
 Versão: 6.2.1
 Data: 02/05/2026
 --------------------------------------------------------------------------------

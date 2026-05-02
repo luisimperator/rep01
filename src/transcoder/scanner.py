@@ -288,6 +288,16 @@ class Scanner:
     ) -> str | None:
         path = file_info.path
 
+        # Hardcoded skip: anything under an /assets/ or /Assets/ folder.
+        # These are project resources (LUTs, plates, ProRes 4444 graphics
+        # renders, fonts) and must NEVER be touched by the transcoder. We
+        # check by path component because the user's exclude_patterns
+        # config may have been overridden and lost the default; this gate
+        # is independent of that.
+        if _path_has_assets_segment(path):
+            logger.debug(f"Skipping (under /assets/): {path}")
+            return 'skipped_excluded'
+
         # Audio path takes priority: extension matches AND the file lives
         # directly inside a folder whose name matches the configured audio
         # source folder name. WAVs anywhere else are intentionally ignored.
@@ -622,3 +632,23 @@ def _cursor_preview(cursor: str | None) -> str:
     if not cursor:
         return "<none>"
     return cursor[:16] + "..."
+
+
+_ASSETS_SEGMENT_NAMES = {"assets", "Assets", "ASSETS"}
+
+
+def _path_has_assets_segment(path: str) -> bool:
+    """True when any path segment matches an 'assets' folder name.
+
+    Independent of config.exclude_patterns so a user override on that
+    list can never accidentally re-enable scanning of project resource
+    folders. The check walks all segments so deeply-nested files like
+    `/foo/assets/sub/sub/file.mp4` are caught.
+    """
+    if not path:
+        return False
+    parts = PurePosixPath(path).parts
+    for seg in parts:
+        if seg in _ASSETS_SEGMENT_NAMES:
+            return True
+    return False

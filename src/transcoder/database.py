@@ -29,6 +29,7 @@ class JobState(str, Enum):
     SKIPPED_HEVC = "SKIPPED_HEVC"
     SKIPPED_ALREADY_EXISTS = "SKIPPED_ALREADY_EXISTS"
     SKIPPED_TOO_SMALL = "SKIPPED_TOO_SMALL"
+    SKIPPED_LOW_BITRATE = "SKIPPED_LOW_BITRATE"
     FAILED = "FAILED"
     RETRY_WAIT = "RETRY_WAIT"
 
@@ -48,6 +49,7 @@ TERMINAL_STATES = {
     JobState.SKIPPED_HEVC,
     JobState.SKIPPED_ALREADY_EXISTS,
     JobState.SKIPPED_TOO_SMALL,
+    JobState.SKIPPED_LOW_BITRATE,
 }
 
 # States that can be retried
@@ -207,7 +209,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at);
 -- when the same file is rediscovered between scans.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_path
     ON jobs(dropbox_path)
-    WHERE state NOT IN ('DONE','FAILED','SKIPPED_HEVC','SKIPPED_ALREADY_EXISTS','SKIPPED_TOO_SMALL');
+    WHERE state NOT IN ('DONE','FAILED','SKIPPED_HEVC','SKIPPED_ALREADY_EXISTS','SKIPPED_TOO_SMALL','SKIPPED_LOW_BITRATE');
 
 -- Stability checks table: tracks file stability over time (R2)
 CREATE TABLE IF NOT EXISTS stability_checks (
@@ -330,6 +332,19 @@ class Database:
             # Older DBs predate the audio pipeline. Backfill 'video' for every
             # existing row so dispatcher routing is unambiguous.
             conn.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'")
+        # Refresh idx_jobs_active_path so newer SKIPPED_* states (added in
+        # later versions like SKIPPED_LOW_BITRATE) are treated as terminal
+        # by the unique-active-path constraint. SQLite re-creates indexes
+        # cheaply; doing it every startup is harmless and ensures old DBs
+        # pick up new terminal states without manual migration.
+        conn.execute("DROP INDEX IF EXISTS idx_jobs_active_path")
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_path "
+            "ON jobs(dropbox_path) "
+            "WHERE state NOT IN "
+            "('DONE','FAILED','SKIPPED_HEVC','SKIPPED_ALREADY_EXISTS',"
+            "'SKIPPED_TOO_SMALL','SKIPPED_LOW_BITRATE')"
+        )
 
     @contextmanager
     def transaction(self) -> Generator[sqlite3.Connection, None, None]:

@@ -468,6 +468,20 @@ class Config(BaseModel):
         default=True,
         description="Delete local staging files after successful upload"
     )
+    low_bitrate_skip_mbps_per_megapixel: float = Field(
+        default=3.0,
+        ge=0.0,
+        description=(
+            "Skip files whose video bitrate per megapixel is below this "
+            "threshold. Catches YouTube downloads / streaming-grade "
+            "files where re-transcoding to H.265 buys little (and often "
+            "produces a LARGER file at the configured CQ). The check "
+            "scales by resolution: 1080p (~2 MP) skips below ~6 Mbps, "
+            "4K (~8 MP) skips below ~25 Mbps. Set to 0 to disable. "
+            "Job is marked SKIPPED_LOW_BITRATE and the staging is "
+            "cleaned up — no upload, no reorganize."
+        ),
+    )
     preserve_chroma_422: bool = Field(
         default=False,
         description=(
