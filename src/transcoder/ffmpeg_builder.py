@@ -127,8 +127,15 @@ class FFmpegCommandBuilder:
         # Start building command
         args: list[str] = [self.config.ffmpeg_path, "-hide_banner", "-y"]
 
-        # Add hardware acceleration for input (if applicable)
-        args.extend(self._get_input_hwaccel(encoder))
+        # Add hardware acceleration for input (if applicable). When the
+        # source chroma is 4:2:2/4:4:4, the QSV / NVENC consumer hardware
+        # decoders refuse the input (most Intel iGPUs only decode H.264
+        # High 4:2:0; consumer NVENC same story). In that case we fall
+        # back to software decode while keeping the QSV/NVENC encoder —
+        # ~5-10x faster than pure libx265 because the encode itself is
+        # still hardware. Detected upfront so we don't waste two failed
+        # ffmpeg launches before the auto-fallback kicks in.
+        args.extend(self._get_input_hwaccel(encoder, video_info))
 
         # Input file
         args.extend(["-i", str(input_path)])
@@ -170,6 +177,12 @@ class FFmpegCommandBuilder:
         # encoders pick 'tv' silently anyway.
         args.extend(self._color_metadata_args(video_info))
 
+        # Software chroma conversion when running QSV / NVENC in hybrid
+        # mode (sw decode for 4:2:2/4:4:4 inputs the HW decoder rejects).
+        # No-op for libx265 (pix_fmt covers it) and no-op when full HW
+        # decode is in play.
+        args.extend(self._get_video_filter_args(encoder, video_info))
+
         # Video encoder settings
         args.extend(self._get_video_encoder_args(encoder, profile, video_info))
 
@@ -207,15 +220,81 @@ class FFmpegCommandBuilder:
             expected_duration_sec=video_info.duration_sec,
         )
 
-    def _get_input_hwaccel(self, encoder: EncoderType) -> list[str]:
+    def _hw_can_decode_input(self, video_info: VideoInfo | None) -> bool:
+        """Heuristic: can the QSV / NVENC hardware decoder read this input?
+
+        QSV: most Intel iGPUs decode H.264 / HEVC Main + Main10 4:2:0
+        only. H.264 High 4:2:2 (the A7siii XAVC-S-I container) and
+        anything 4:4:4 fail at decode time, so ffmpeg returns -22
+        (Invalid argument) before any frame is encoded.
+
+        NVENC consumer: similar restrictions on consumer GeForce — Pro
+        cards (Quadro, A-series) handle 4:2:2 fine but we can't tell
+        them apart at runtime, so be conservative.
+
+        We treat 4:2:0 as the only safe input. Returns True for unknown
+        video_info to preserve the original behavior on probe failure.
+        """
+        if video_info is None:
+            return True
+        chroma = video_info.chroma or "420"
+        return chroma == "420"
+
+    def _get_input_hwaccel(
+        self,
+        encoder: EncoderType,
+        video_info: VideoInfo | None = None,
+    ) -> list[str]:
         """Get input hardware acceleration arguments."""
         if encoder == EncoderType.QSV:
-            return ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]
+            if self._hw_can_decode_input(video_info):
+                return ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]
+            # Skip hwaccel — let ffmpeg software-decode the 4:2:2/4:4:4
+            # input into system memory. The QSV encoder still gets used
+            # downstream; it'll auto-upload the converted frames. A
+            # `-vf format=...` filter (added by build_transcode_command)
+            # reduces chroma to whatever the encoder supports.
+            logger.info(
+                "ffmpeg: QSV hardware decode skipped (input chroma=%s); "
+                "using software decode + QSV hardware encode (hybrid mode)",
+                video_info.chroma if video_info else "?",
+            )
+            return []
         elif encoder == EncoderType.NVENC:
-            # NVENC can decode with CUDA but encoding doesn't require hwaccel flag
-            # Optionally use CUDA decode for performance
-            return ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+            if self._hw_can_decode_input(video_info):
+                return ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+            logger.info(
+                "ffmpeg: NVENC CUDA decode skipped (input chroma=%s); "
+                "using software decode + NVENC hardware encode (hybrid mode)",
+                video_info.chroma if video_info else "?",
+            )
+            return []
         return []
+
+    def _get_video_filter_args(
+        self,
+        encoder: EncoderType,
+        video_info: VideoInfo,
+    ) -> list[str]:
+        """Software chroma/format conversion filter, used when:
+          - the hardware encoder needs 4:2:0 but the source is 4:2:2; AND
+          - the input is software-decoded (no GPU surface), so we can
+            apply -vf format=... before the encoder picks it up.
+
+        For libx265 the `-pix_fmt` flag handles conversion natively, no
+        filter needed. For QSV/NVENC with hybrid mode (sw decode + hw
+        encode), the format filter is what bridges the chroma gap.
+        """
+        if encoder == EncoderType.CPU:
+            return []
+        # If hwaccel is active (frames live on GPU surfaces), no
+        # software filter is appropriate.
+        if self._hw_can_decode_input(video_info):
+            return []
+        # Hybrid mode: pick the same pix_fmt the encoder will produce so
+        # the chroma reduction happens once, in software, before upload.
+        out_pix_fmt, _, _, _ = self._resolve_output_format(video_info)
+        return ["-vf", f"format={out_pix_fmt}"]
 
     def _resolve_output_format(self, video_info: VideoInfo) -> tuple[str, str, int, str]:
         """Decide output pix_fmt + profile + bit depth + chroma from input.

@@ -2,6 +2,43 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.2.1
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+QSV HYBRID DECODE: 4:2:2 input ja nao cai pra libx265 puro
+
+  [PERF] H.264 High 4:2:2 (A7siii XAVC-S-I) agora encoda em QSV
+  -------------------------------------------------------------
+  ANTES: cliente A7siii grava H.264 High 4:2:2 10-bit. O decoder
+         do QSV em chips Intel comuns NAO LE essa variante de
+         input — so High (4:2:0). O ffmpeg falhava com -22 e o
+         worker, depois de duas tentativas, caia pra libx265 puro
+         (CPU). Resultado: ~0.38x realtime, 4K em quase 3h por hora
+         de conteudo.
+
+  AGORA: detectado upfront via probe.chroma. Quando input chroma
+         e 4:2:2 ou 4:4:4 e a gente esta querendo usar QSV/NVENC:
+           - dropa `-hwaccel qsv` / `-hwaccel cuda` (decode em SW)
+           - aplica `-vf format=yuv420p10le` (chroma reduction em SW)
+           - mantem `-c:v hevc_qsv` (encode em HW)
+         Bottleneck vira o decode SW (~50-100 fps em 4K H.264 num
+         CPU forte) em vez do encode SW. ~5-10x mais rapido que
+         libx265 puro — 1.5-3x realtime em vez de 0.38x.
+
+         Quando preserve_chroma_422 e ON E source e 4:2:2, o
+         worker continua forcando libx265 (CPU), porque ai precisa
+         de chroma 4:2:2 no OUTPUT, e o encoder QSV nao suporta
+         Main 4:2:2 — esse caminho lento e inevitavel.
+
+  [POLISH] /assets/ adicionado ao exclude_patterns default
+  --------------------------------------------------------
+  Pasta de project resources (LUTs, plates, fonts, graficos) nunca
+  deve ser scaneada. Adicionado *​/assets/* e *​/Assets/* aos
+  defaults de exclude_patterns no config.
+
+================================================================================
+
 Versão: 6.2.0
 Data: 02/05/2026
 --------------------------------------------------------------------------------

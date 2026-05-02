@@ -102,6 +102,10 @@ exclude_patterns:
 - '*/H265/*'
 - '*/h264/*'
 - '*/H264/*'
+# /assets/ holds project resources (LUTs, plates, fonts, graphics).
+# Never transcode anything in there.
+- '*/assets/*'
+- '*/Assets/*'
 upload_to_dropbox: true
 delete_staging_after_upload: true
 # legacy_reorganize: when true, after each successful upload the daemon moves
