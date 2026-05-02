@@ -113,6 +113,10 @@ legacy_reorganize: true
 # the H.265 stays in /h265/ subfolder until the project goes quiet, and a future
 # `hd reorganize-existing` pass picks it up. 0 = always reorganize, no filter.
 legacy_reorganize_min_age_days: 60
+# After a per-folder reorganize batch succeeds, schedule deletion of the
+# /h264 backup folder this many seconds later. Default 0 = keep the backups
+# forever. Dropbox version history (30d Plus, 180d Business) covers recovery.
+legacy_reorganize_delete_h264_after_seconds: 0
 allow_delete_original: false
 delete_original_delay_hours: 168
 allow_mkv_fallback: false

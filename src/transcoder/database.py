@@ -392,6 +392,36 @@ class Database:
         row = cursor.fetchone()
         return Job.from_row(row) if row else None
 
+    def get_jobs_in_folder(self, parent: str) -> list[Job]:
+        """Return the latest job for each dropbox_path directly inside `parent`.
+
+        `parent` is a Dropbox folder path (POSIX, no trailing slash). Matches
+        files like `<parent>/foo.mp4` but excludes deeper paths like
+        `<parent>/sub/foo.mp4` so the result reflects exactly the files the
+        user sees in that one folder. Used by the per-folder reorganize gate.
+        """
+        parent = parent.rstrip('/')
+        # LIKE prefix match + excludes any path with a slash in the suffix
+        # (i.e., drops grandchildren). instr returns 0 when no slash is found.
+        sql = (
+            "SELECT * FROM jobs "
+            "WHERE dropbox_path LIKE ? || '/%' "
+            "  AND instr(substr(dropbox_path, length(?) + 2), '/') = 0 "
+            "ORDER BY created_at DESC"
+        )
+        conn = self._get_connection()
+        rows = conn.execute(sql, (parent, parent)).fetchall()
+        # Dedupe by dropbox_path (keep the most recent revision only).
+        seen: set[str] = set()
+        out: list[Job] = []
+        for r in rows:
+            p = r['dropbox_path']
+            if p in seen:
+                continue
+            seen.add(p)
+            out.append(Job.from_row(r))
+        return out
+
     def get_jobs_by_state(self, state: JobState, limit: int = 100) -> list[Job]:
         """Get jobs in a specific state."""
         conn = self._get_connection()

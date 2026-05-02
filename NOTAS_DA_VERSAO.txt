@@ -2,6 +2,42 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.30
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+REORGANIZE: gate por pasta (em vez de por upload) + delete h264 com delay
+
+  [BREAKING] Reorganize agora roda no fim da PASTA, nao por arquivo
+  ----------------------------------------------------------------
+  ANTES: cada upload disparava o swap individual do arquivo recem-subido,
+         desde que `is_folder_settled` passasse. Resultado: pastas com 8
+         CAMs viam 8 reorganizes pingados; se uma falhasse permanente,
+         as outras 7 ja estavam swappadas (estado misto inconsistente).
+
+  AGORA: cada upload dispara um *check* — se TODOS os jobs cuja
+         dropbox_path mora direto na pasta-pai estao em estado terminal
+         (DONE ou SKIPPED_*), o reorganize em batch roda pra todos os
+         pares pendentes daquela pasta. FAILED ou RETRY_WAIT bloqueiam
+         (modo all-or-nothing — escolhido pelo usuario).
+
+  CONCORRENCIA: nada de lock por pasta. Para evitar race entre uploads
+         simultaneos no mesmo folder, deixe `concurrency.upload_workers
+         = 1` no config.yaml. Com 1 uploader, so um trigger por vez.
+
+  [NOVO] legacy_reorganize_delete_h264_after_seconds
+  --------------------------------------------------
+  Apos um batch de reorganize completar 100% (todos os pares
+  swappados com sucesso), agenda a delecao da pasta `<parent>/h264/`
+  N segundos depois. Default = 0 (mantem backups). Recovery via
+  historico do Dropbox (30d Plus / 180d Business).
+
+  Configuracao via dashboard: Settings -> "Delete /h264 backup after
+  reorganize (seconds)". Opcoes: keep forever, 10s, 30s, 1min, 5min,
+  30min, 1h, 24h.
+
+================================================================================
+
 Versão: 6.0.29
 Data: 02/05/2026
 --------------------------------------------------------------------------------

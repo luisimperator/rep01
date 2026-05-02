@@ -510,6 +510,13 @@ _SETTINGS_KNOBS: dict[str, dict] = {
         "yaml_key": "legacy_reorganize_min_age_days",
         "label": "Skip reorganize for folders touched in the last N days",
     },
+    "legacy_reorganize_delete_h264_after_seconds": {
+        "type": "int",
+        "min": 0,
+        "max": 86400,
+        "yaml_key": "legacy_reorganize_delete_h264_after_seconds",
+        "label": "Delete /h264 backup folder N seconds after reorganize (0 = keep)",
+    },
     "cq_value": {
         "type": "int",
         "min": 14,
@@ -566,6 +573,7 @@ def _settings_payload(api: ApiServer) -> dict:
         "settings": {
             "legacy_reorganize": cfg.legacy_reorganize,
             "legacy_reorganize_min_age_days": cfg.legacy_reorganize_min_age_days,
+            "legacy_reorganize_delete_h264_after_seconds": cfg.legacy_reorganize_delete_h264_after_seconds,
             "dropbox_root": cfg.dropbox_root,
             "health_check_interval_minutes": cfg.incidents.health_check_interval_minutes,
             "api_bind": cfg.api.bind,
