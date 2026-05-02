@@ -44,6 +44,13 @@ logger = logging.getLogger(__name__)
 
 DASHBOARD_HTML = (Path(__file__).parent / "dashboard.html").read_text(encoding="utf-8")
 
+# PWA assets shipped alongside the dashboard. Read once at import time;
+# they're tiny and never change at runtime.
+_PKG_DIR = Path(__file__).parent
+PWA_MANIFEST = (_PKG_DIR / "manifest.json").read_bytes()
+PWA_ICON_SVG = (_PKG_DIR / "icon.svg").read_bytes()
+PWA_APPLE_ICON = (_PKG_DIR / "apple-touch-icon.png").read_bytes()
+
 
 class ApiServer:
     """Runs a ThreadingHTTPServer in a background thread until shutdown()."""
@@ -68,6 +75,13 @@ class ApiServer:
         # /api/reorganize/status until done.
         self._reorganize_run: ReorganizeRun | None = None
         self._reorganize_lock = threading.Lock()
+        # Dropbox storage usage cache. Hitting users_get_space_usage on
+        # every dashboard refresh is wasteful; the value moves slowly so
+        # a 5min TTL is plenty.
+        self._storage_cache: dict | None = None
+        self._storage_cache_at: float = 0.0
+        self._storage_cache_ttl_sec: float = 300.0
+        self._storage_cache_lock = threading.Lock()
 
     def start(self) -> None:
         if not self.config.api.enabled:
@@ -172,6 +186,17 @@ def _build_handler(api: ApiServer):
 
         def do_GET(self) -> None:  # noqa: N802 (stdlib naming)
             route, qs = _split(self.path)
+            # PWA static assets (manifest, icons) are served WITHOUT auth so
+            # the iOS "Add to Home Screen" flow can fetch the icon during
+            # installation even before the user pastes the token. They're
+            # public, non-sensitive metadata.
+            if route == "/manifest.json":
+                return self._send_bytes(PWA_MANIFEST, "application/manifest+json")
+            if route == "/icon.svg":
+                return self._send_bytes(PWA_ICON_SVG, "image/svg+xml")
+            if route in ("/apple-touch-icon.png", "/apple-touch-icon-precomposed.png", "/favicon.ico"):
+                return self._send_bytes(PWA_APPLE_ICON, "image/png")
+
             if not self._is_authorized(route, qs):
                 return self._send_unauthorized()
             if route == "/":
@@ -337,6 +362,18 @@ def _build_handler(api: ApiServer):
             self.end_headers()
             self.wfile.write(body)
 
+        def _send_bytes(self, body: bytes, content_type: str) -> None:
+            """Static asset response (manifest, PWA icons, favicon).
+            Cacheable for 1h since these assets are tied to the daemon
+            version — a fresh install/upgrade will see them via the
+            no-cache headers on the dashboard HTML."""
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "public, max-age=3600")
+            self.end_headers()
+            self.wfile.write(body)
+
     return _Handler
 
 
@@ -353,6 +390,7 @@ def _status_payload(api: ApiServer) -> dict:
     scan_state = api.db.get_scan_state(api.config.dropbox_root)
     depths = api.dispatcher.queue_depths()
     disk = _disk_snapshot(api)
+    dropbox_storage = _dropbox_storage_snapshot(api)
 
     uptime_sec = max(0.0, time.time() - api.started_at_epoch)
     state_counts = stats.get("state_counts", {})
@@ -393,6 +431,7 @@ def _status_payload(api: ApiServer) -> dict:
             "active": depths["active"],
         },
         "disk": disk,
+        "dropbox_storage": dropbox_storage,
         "jobs": {
             "total": stats.get("total_jobs", 0),
             "done": state_counts.get(JobState.DONE.value, 0),
@@ -457,6 +496,53 @@ def _metrics_payload(api: ApiServer) -> dict:
         "total_bytes_done": stats.get("total_bytes_done", 0),
         "avg_transcode_seconds": stats.get("avg_transcode_seconds", 0),
         "disk_reserved_bytes": api.db.total_reserved_bytes(),
+    }
+
+
+def _dropbox_storage_snapshot(api: ApiServer) -> dict | None:
+    """Cached Dropbox space usage. None when daemon has no Dropbox client
+    or the call failed. Cache TTL is 5 min — usage moves slowly enough
+    that hammering Dropbox on every dashboard refresh would be wasteful.
+    """
+    target_tb = float(getattr(api.config, "storage_target_tb", 0.0) or 0.0)
+    target_bytes = int(target_tb * (1024 ** 4))
+
+    now = time.time()
+    with api._storage_cache_lock:
+        cached = api._storage_cache
+        cache_age = now - api._storage_cache_at
+        if cached is not None and cache_age < api._storage_cache_ttl_sec:
+            return {
+                **cached,
+                "target_bytes": target_bytes,
+                "target_tb": target_tb,
+                "cached_at": api._storage_cache_at,
+            }
+
+    dropbox = getattr(getattr(api, "daemon", None), "dropbox", None)
+    if dropbox is None:
+        return None
+    try:
+        usage = dropbox.get_space_usage()
+    except Exception as e:
+        logger.warning(f"dropbox_storage: get_space_usage failed: {e}")
+        return None
+
+    snap = {
+        "used_bytes": int(usage.get("used") or 0),
+        "allocated_bytes": int(usage.get("allocated") or 0) or None,
+        "team_used_bytes": int(usage.get("team_used") or 0) or None,
+        "allocation_type": usage.get("allocation_type"),
+    }
+    with api._storage_cache_lock:
+        api._storage_cache = snap
+        api._storage_cache_at = now
+
+    return {
+        **snap,
+        "target_bytes": target_bytes,
+        "target_tb": target_tb,
+        "cached_at": now,
     }
 
 

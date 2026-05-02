@@ -306,13 +306,37 @@ class DropboxClient:
         }
 
     def get_space_usage(self) -> dict:
-        """Get space usage information."""
+        """Get space usage information.
+
+        Handles both individual and team (Business) allocations. For team
+        accounts, `used` is the user's individual contribution; the team-
+        wide total is exposed as `team_used` when present.
+        """
         usage = self._dbx.users_get_space_usage()
-        return {
+        out: dict = {
             'used': usage.used,
-            'allocated': usage.allocation.get_individual().allocated
-            if usage.allocation.is_individual() else None,
+            'allocated': None,
+            'allocation_type': None,
+            'team_used': None,
         }
+        try:
+            alloc = usage.allocation
+            if alloc.is_individual():
+                ind = alloc.get_individual()
+                out['allocation_type'] = 'individual'
+                out['allocated'] = ind.allocated
+            elif alloc.is_team():
+                team = alloc.get_team()
+                out['allocation_type'] = 'team'
+                # `team.allocated` is the whole-team quota; `team.used` is
+                # the entire team's storage. user_within_team_space_used
+                # is this user's slice when present.
+                out['allocated'] = team.allocated
+                out['team_used'] = team.used
+        except Exception:
+            # Defensive — newer Dropbox SDK shapes shouldn't break the call.
+            pass
+        return out
 
     def get_metadata(self, path: str) -> DropboxFileInfo | None:
         """
