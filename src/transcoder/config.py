@@ -452,9 +452,11 @@ class Config(BaseModel):
         description="Video file extensions to process"
     )
     exclude_patterns: list[str] = Field(
-        default=["*/h265/*", "*/.h265/*", "*/H265/*", "*/h264/*", "*/H264/*"],
+        default=["*/h265/*", "*/.h265/*", "*/H265/*", "*/h264/*", "*/H264/*", "*/assets/*", "*/Assets/*"],
         description="Glob patterns to exclude (R4). h264/ folders contain originals "
-                    "backed up by legacy_reorganize and must be skipped on rescans."
+                    "backed up by legacy_reorganize and must be skipped on rescans. "
+                    "/assets/ folders are project resources (LUTs, plates, fonts) "
+                    "and must never be scanned for transcode."
     )
 
     # Behavior flags
@@ -805,7 +807,7 @@ def save_example_config(path: Path) -> None:
         'output_layout': 'sibling',
         'output_mirror_root': '_h265_output',
         'video_extensions': ['.mp4', '.mov', '.MP4', '.MOV'],
-        'exclude_patterns': ['*/h265/*', '*/.h265/*', '*/H265/*', '*/h264/*', '*/H264/*'],
+        'exclude_patterns': ['*/h265/*', '*/.h265/*', '*/H265/*', '*/h264/*', '*/H264/*', '*/assets/*', '*/Assets/*'],
         'upload_to_dropbox': True,
         'delete_staging_after_upload': True,
         'allow_delete_original': False,
