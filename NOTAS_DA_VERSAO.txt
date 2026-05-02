@@ -2,6 +2,47 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.3.1
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+Reorganize-existing alinhado com pipeline principal
+
+  [PARITY] /api/reorganize/preview e /api/reorganize/run agora seguem
+           o mesmo conjunto de regras do _legacy_reorganize_folder
+           que roda live apos cada upload.
+
+  ANTES: o sweep retroativo so via pares de VIDEO (h264/h265). Audio
+         (Audio Source Files com wav/ + mp3/ pendentes) era invisivel.
+         Tambem nao agendava deletion da pasta de backup nem varria
+         os ._ apos sucesso. Resultado: pasta antiga reorganizada
+         ficava com h264/ acumulado e ._ orfaos.
+
+  AGORA:
+    - find_unreorganized_pairs aceita layout=VIDEO_LAYOUT|AUDIO_LAYOUT
+      (default video pra compat). O matching de pares respeita a troca
+      de extensao (.wav -> .mp3) via layout.output_name().
+    - _reorganize_run agora discovery roda 2x (video + audio), agrupa
+      por parent. Pra cada folder settled:
+        * Reorganiza todos os pares de video presentes (layout video)
+        * Reorganiza todos os pares de audio presentes (layout audio)
+        * Atualiza output_path no DB (best-effort, ignora se nao existir
+          job correspondente)
+        * Agenda deletion de h264/ se TODOS os pares de video da pasta
+          deram certo (com legacy_reorganize_delete_h264_after_seconds)
+        * Agenda deletion de wav/ se TODOS os pares de audio deram certo
+        * Sweep ._ files na pasta (cleanup_dot_underscore + filtros)
+    - _reorganize_preview tambem foi atualizado pra mostrar contagens
+      separadas: video_pairs e audio_pairs por folder. Total combinado
+      no campo "pairs".
+
+    Diferenca intencional vs principal: o gate is_folder_complete
+    (DB-driven) NAO se aplica no retroativo, porque essas pastas
+    geralmente predam o daemon e nao tem job no DB. Mantemos so o
+    gate is_folder_settled (atividade de usuario) — mesmo do principal.
+
+================================================================================
+
 Versão: 6.3.0
 Data: 02/05/2026
 --------------------------------------------------------------------------------

@@ -967,26 +967,46 @@ class ReorganizeRun:
 def _reorganize_preview(api: ApiServer, body: dict) -> dict:
     """
     Synchronously walk the tree and return the list of candidate folders +
-    settled/active classification. Cheap enough to call inline (no Dropbox
-    moves performed).
+    settled/active classification, considering BOTH layouts (video h264/h265
+    AND audio wav/mp3). Mirrors the main pipeline's discovery scope so the
+    retroactive sweep has the same coverage as live processing.
+    Cheap enough to call inline (no Dropbox moves performed).
     """
     from .dropbox_client import make_client_from_config
-    from .reorganize import find_unreorganized_pairs, is_folder_settled
+    from .reorganize import (
+        AUDIO_LAYOUT, VIDEO_LAYOUT,
+        find_unreorganized_pairs, is_folder_settled,
+    )
 
     threshold = int(body.get("min_age_days", api.config.legacy_reorganize_min_age_days))
     folder = body.get("folder") or api.config.dropbox_root
 
     dropbox = make_client_from_config(api.config)
-    candidates = find_unreorganized_pairs(dropbox, folder)
+    # Run discovery for each layout; merge by parent so the same folder
+    # with both video AND audio pending appears once with combined counts.
+    video_cands = find_unreorganized_pairs(dropbox, folder, VIDEO_LAYOUT)
+    audio_cands = find_unreorganized_pairs(dropbox, folder, AUDIO_LAYOUT)
+
+    by_parent: dict[str, dict] = {}
+    for cand in video_cands:
+        by_parent.setdefault(cand.parent, {"video_pairs": [], "audio_pairs": []})["video_pairs"] = cand.pairs
+    for cand in audio_cands:
+        by_parent.setdefault(cand.parent, {"video_pairs": [], "audio_pairs": []})["audio_pairs"] = cand.pairs
 
     rows = []
-    for cand in candidates:
-        activity = is_folder_settled(dropbox, cand.parent, threshold)
+    for parent, slots in by_parent.items():
+        activity = is_folder_settled(dropbox, parent, threshold)
+        v_pairs = slots["video_pairs"]
+        a_pairs = slots["audio_pairs"]
+        total = len(v_pairs) + len(a_pairs)
+        sample = [p.name for p in (v_pairs + a_pairs)[:5]]
         rows.append({
-            "parent": cand.parent,
-            "pairs": len(cand.pairs),
-            "names": [p.name for p in cand.pairs[:5]],
-            "more": max(0, len(cand.pairs) - 5),
+            "parent": parent,
+            "pairs": total,
+            "video_pairs": len(v_pairs),
+            "audio_pairs": len(a_pairs),
+            "names": sample,
+            "more": max(0, total - 5),
             "settled": activity.settled,
             "days_since_newest": activity.days_since_newest,
         })
@@ -1008,9 +1028,30 @@ def _reorganize_run(api: ApiServer, body: dict) -> dict:
     """
     Kick off a reorganize sweep in a background thread. Status is polled via
     /api/reorganize/status until finished=true.
+
+    This mirrors the main pipeline's per-folder reorganize behavior:
+      - Discovers BOTH video (h264/h265) AND audio (wav/mp3) pairs
+      - For each settled folder, reorganizes every pending pair (both layouts)
+      - Updates job DB output_path when a matching job exists
+      - After a fully-successful batch in a folder, schedules backup folder
+        cleanup (h264/ or wav/) honoring the configured delays
+      - Sweeps `._` macOS resource forks in the same folder
+
+    The intentional difference from the main pipeline is the gate:
+      - Main: is_folder_complete (DB-driven; every job in folder is terminal)
+      - Retroactive: just is_folder_settled (these folders may pre-date the
+        DB; checking job-completeness would skip them all)
     """
+    from .database import JobState
     from .dropbox_client import make_client_from_config
-    from .reorganize import find_unreorganized_pairs, is_folder_settled, reorganize_pair
+    from .reorganize import (
+        AUDIO_LAYOUT, VIDEO_LAYOUT,
+        cleanup_dot_underscore_files,
+        find_unreorganized_pairs,
+        is_folder_settled,
+        reorganize_pair,
+        schedule_h264_delete,
+    )
 
     with api._reorganize_lock:
         if api._reorganize_run is not None and not api._reorganize_run.finished:
@@ -1030,37 +1071,137 @@ def _reorganize_run(api: ApiServer, body: dict) -> dict:
     def worker() -> None:
         try:
             dropbox = make_client_from_config(api.config)
-            run.push(f"Scanning {folder} for unreorganized pairs...")
-            candidates = find_unreorganized_pairs(dropbox, folder)
-            ready = []
-            for cand in candidates:
-                activity = is_folder_settled(dropbox, cand.parent, threshold)
+            cfg = api.config
+
+            run.push(f"Scanning {folder} for unreorganized pairs (video + audio)...")
+            video_cands = find_unreorganized_pairs(dropbox, folder, VIDEO_LAYOUT)
+            audio_cands = find_unreorganized_pairs(dropbox, folder, AUDIO_LAYOUT)
+
+            # Group by parent so each folder's batch is processed atomically
+            # — same way the main pipeline keeps per-folder reorganize +
+            # cleanup tightly coupled.
+            grouped: dict[str, dict] = {}
+            for cand in video_cands:
+                grouped.setdefault(cand.parent, {"video": [], "audio": []})["video"] = cand.pairs
+            for cand in audio_cands:
+                grouped.setdefault(cand.parent, {"video": [], "audio": []})["audio"] = cand.pairs
+
+            ready_parents: list[tuple[str, dict]] = []
+            for parent, slots in grouped.items():
+                activity = is_folder_settled(dropbox, parent, threshold)
                 if activity.settled:
-                    ready.append(cand)
+                    ready_parents.append((parent, slots))
                 else:
                     run.skipped_folders += 1
-            run.total_pairs = sum(len(c.pairs) for c in ready)
-            run.push(f"Found {run.total_pairs} pair(s) in {len(ready)} settled folder(s); "
-                     f"{run.skipped_folders} active folder(s) deferred.")
 
-            for cand in ready:
-                run.push(f"--- {cand.parent} ({len(cand.pairs)} pairs) ---")
-                for pair in cand.pairs:
-                    run.current = f"{cand.parent}/{pair.name}"
-                    try:
-                        reorganize_pair(
-                            dropbox, cand.parent, pair.name,
-                            int(pair.original.size or 0),
-                            int(pair.h265.size or 0),
+            run.total_pairs = sum(
+                len(s["video"]) + len(s["audio"]) for _, s in ready_parents
+            )
+            run.push(
+                f"Found {run.total_pairs} pair(s) in {len(ready_parents)} settled folder(s); "
+                f"{run.skipped_folders} active folder(s) deferred."
+            )
+
+            for parent, slots in ready_parents:
+                v_pairs = slots["video"]
+                a_pairs = slots["audio"]
+                total_in_folder = len(v_pairs) + len(a_pairs)
+                run.push(
+                    f"--- {parent} ({len(v_pairs)} video + {len(a_pairs)} audio) ---"
+                )
+
+                # Track per-layout success so we only schedule the backup
+                # cleanup when the whole layout's batch landed in this folder.
+                video_done_in_folder = 0
+                audio_done_in_folder = 0
+
+                for layout, pairs, label in (
+                    (VIDEO_LAYOUT, v_pairs, "video"),
+                    (AUDIO_LAYOUT, a_pairs, "audio"),
+                ):
+                    for pair in pairs:
+                        run.current = f"{parent}/{pair.name}"
+                        try:
+                            new_path = reorganize_pair(
+                                dropbox, parent, pair.name,
+                                int(pair.original.size or 0),
+                                int(pair.h265.size or 0),
+                                layout=layout,
+                            )
+                            run.push(f"  + {pair.name} ({label})")
+                            run.done_pairs += 1
+                            if label == "video":
+                                video_done_in_folder += 1
+                            else:
+                                audio_done_in_folder += 1
+
+                            # Best-effort: bring the matching DB job's
+                            # output_path in line with the new canonical
+                            # location. Ignored when no DB row exists
+                            # (these are usually retroactive sweeps over
+                            # files predating the daemon).
+                            try:
+                                original_path = (
+                                    parent.rstrip('/') + '/' + pair.name
+                                ) if parent else '/' + pair.name
+                                related = api.db.get_job_by_path(original_path)
+                                if related is not None:
+                                    api.db.update_job_state(
+                                        related.id, JobState.DONE,
+                                        output_path=new_path,
+                                    )
+                            except Exception:
+                                pass
+                        except Exception as e:
+                            run.push(f"  x {pair.name} ({label}): {e}")
+                            run.failed_pairs += 1
+
+                # Schedule backup-folder cleanup only when the WHOLE
+                # layout batch in this folder landed (mirror of the main
+                # pipeline's safety check).
+                if v_pairs and video_done_in_folder == len(v_pairs):
+                    delay = cfg.legacy_reorganize_delete_h264_after_seconds
+                    if delay > 0:
+                        h264_dir = (parent.rstrip('/') + '/h264') if parent else '/h264'
+                        run.push(
+                            f"  · scheduling h264 cleanup in {delay}s "
+                            f"(folder kept; audit log inside)"
                         )
-                        run.push(f"  + {pair.name}")
-                        run.done_pairs += 1
+                        schedule_h264_delete(dropbox, h264_dir, delay)
+
+                if a_pairs and audio_done_in_folder == len(a_pairs):
+                    delay = cfg.legacy_reorganize_delete_wav_after_seconds
+                    if delay > 0:
+                        wav_dir = (parent.rstrip('/') + '/wav') if parent else '/wav'
+                        run.push(
+                            f"  · scheduling wav cleanup in {delay}s"
+                        )
+                        schedule_h264_delete(dropbox, wav_dir, delay)
+
+                # Sweep ._ resource forks in this folder if cleanup is
+                # enabled — same housekeeping the main pipeline does after
+                # each batch. Best-effort, won't fail the run.
+                if (
+                    cfg.cleanup_dot_underscore
+                    and (video_done_in_folder + audio_done_in_folder) == total_in_folder
+                ):
+                    try:
+                        cleaned = cleanup_dot_underscore_files(
+                            dropbox,
+                            parent,
+                            cfg.cleanup_dot_underscore_delete_after_seconds,
+                            target_folder_names=cfg.dot_underscore_target_folder_names,
+                            max_size_bytes=cfg.dot_underscore_max_size_bytes,
+                        )
+                        if cleaned > 0:
+                            run.push(f"  · quarantined {cleaned} ._ file(s)")
                     except Exception as e:
-                        run.push(f"  x {pair.name}: {e}")
-                        run.failed_pairs += 1
+                        run.push(f"  · ._ sweep failed: {e}")
 
             run.current = ""
-            run.push(f"Done. {run.done_pairs} reorganized, {run.failed_pairs} failed.")
+            run.push(
+                f"Done. {run.done_pairs} reorganized, {run.failed_pairs} failed."
+            )
         except Exception as e:
             logger.exception("reorganize-existing run crashed")
             run.error = str(e)

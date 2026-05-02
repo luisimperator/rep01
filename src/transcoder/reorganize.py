@@ -219,22 +219,27 @@ class FolderCandidate:
 def find_unreorganized_pairs(
     dropbox: DropboxClient,
     dropbox_root: str,
+    layout: ReorganizeLayout = VIDEO_LAYOUT,
 ) -> list[FolderCandidate]:
     """
-    Walk `dropbox_root` recursively and find folders with H.265 outputs that
-    haven't been reorganized into the legacy layout yet.
+    Walk `dropbox_root` recursively and find folders with outputs of the
+    given layout that haven't been reorganized into the legacy spot yet.
 
-    A folder is a candidate when it contains BOTH:
+    For VIDEO_LAYOUT a folder is a candidate when it contains BOTH:
       - /<parent>/<name>           (original, presumed H.264)
       - /<parent>/h265/<name>      (H.265 output)
     AND does NOT already contain:
       - /<parent>/h264/<name>      (would mean already reorganized)
 
+    For AUDIO_LAYOUT the same idea applies with wav/mp3 subfolder names
+    AND the output extension differs (.wav -> .mp3); we look up the
+    expected output filename via layout.output_name().
+
     The case of the subfolder names is normalized when matching, but the
     actual move uses the path Dropbox returned.
     """
     # Index every file by its parent directory and by lowercase basename.
-    # Keys are case-insensitive parent paths so we can match h265/ siblings.
+    # Keys are case-insensitive parent paths so we can match siblings.
     by_parent: dict[str, dict[str, DropboxFileInfo]] = {}
 
     for entry in dropbox.list_folder(dropbox_root, recursive=True):
@@ -253,43 +258,45 @@ def find_unreorganized_pairs(
 
     candidates: list[FolderCandidate] = []
     seen_parents = set()
+    skip_dirs_lower = {layout.backup_subdir.lower(), layout.output_subdir.lower()}
 
     for parent, files in by_parent.items():
-        # Skip subfolders themselves
+        # Skip the layout's own subfolder names — they're not target parents.
         last = PurePosixPath(parent).name.lower()
-        if last in ('h264', 'h265'):
+        if last in skip_dirs_lower:
             continue
         if parent in seen_parents:
             continue
         seen_parents.add(parent)
 
-        h265_files = find_subfolder_files(parent, 'h265')
-        if not h265_files:
+        out_files = find_subfolder_files(parent, layout.output_subdir)
+        if not out_files:
             continue
-        h264_files = find_subfolder_files(parent, 'h264')
+        backup_files = find_subfolder_files(parent, layout.backup_subdir)
 
         pairs: list[PairCandidate] = []
         for name, original in files.items():
-            if name.lower() == 'h265 feito.txt':
+            if name.lower() == layout.feito_filename.lower():
                 continue
-            # Match by case-insensitive name lookup in h265/
-            h265_match = None
-            for h265_name, h265_info in h265_files.items():
-                if h265_name.lower() == name.lower():
-                    h265_match = h265_info
+            # The output file may have a different extension (audio: .wav -> .mp3).
+            expected_output = layout.output_name(name)
+            out_match = None
+            for out_name, out_info in out_files.items():
+                if out_name.lower() == expected_output.lower():
+                    out_match = out_info
                     break
-            if h265_match is None:
+            if out_match is None:
                 continue
-            # Already-reorganized check: if a file with the same name exists
-            # under h264/, the swap was already done — skip the pair.
-            already = any(n.lower() == name.lower() for n in h264_files)
+            # Already-reorganized check: if a file with the same ORIGINAL name
+            # exists under the backup subfolder, the swap was already done.
+            already = any(n.lower() == name.lower() for n in backup_files)
             if already:
                 continue
             pairs.append(PairCandidate(
                 parent=parent,
                 name=name,
                 original=original,
-                h265=h265_match,
+                h265=out_match,
             ))
 
         if pairs:
