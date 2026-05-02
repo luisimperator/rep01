@@ -773,66 +773,145 @@ class UploadWorker(BaseWorker):
 
         logger.info(f"[{self.name}] Upload complete: {job.output_path}")
 
-        final_path = job.output_path
-        if self.config.legacy_reorganize:
-            try:
-                final_path = self._legacy_reorganize(job, local_size)
-            except Exception as reorg_err:
-                # Surface the failure but keep the upload state — the H.265
-                # file is sitting at /<parent>/h265/<name> and reachable.
-                logger.error(
-                    f"[{self.name}] Reorganization failed for job {job.id} "
-                    f"({job.dropbox_path}): {reorg_err}. "
-                    f"H.265 left at {job.output_path}; original untouched."
-                )
-
-        # Mark done. Persist the *final* output path (post-reorg if it ran)
-        # plus the actual H.265 byte count so /api/stats can report savings.
+        # Mark DONE with the upload location BEFORE attempting reorganize, so
+        # the per-folder gate sees this job as terminal when it counts pending
+        # work. The output_path will be updated again per-job inside the batch
+        # reorganize if the swap succeeds.
         self.db.update_job_state(
             job.id,
             JobState.DONE,
-            output_path=final_path,
+            output_path=job.output_path,
             output_size=int(local_size),
         )
+
+        if self.config.legacy_reorganize:
+            try:
+                self._try_reorganize_folder(job)
+            except Exception as reorg_err:
+                # Never let a reorganize failure tip the upload back into FAILED.
+                # The H.265 is safely uploaded; the swap can be retried later.
+                logger.error(
+                    f"[{self.name}] Folder reorganize failed for job {job.id} "
+                    f"({job.dropbox_path}): {reorg_err}. "
+                    f"H.265 left at {job.output_path}; originals untouched."
+                )
 
         # Clean up staging if configured
         if self.config.delete_staging_after_upload:
             self._cleanup_staging(job)
 
-    def _legacy_reorganize(self, job: Job, h265_size: int) -> str:
+    def _try_reorganize_folder(self, just_finished_job: Job) -> None:
         """
-        Honor the legacy_reorganize_min_age_days threshold, then delegate the
-        actual swap to reorganize.reorganize_pair so the same code path is
-        shared with `hd reorganize-existing`.
+        Per-folder reorganize trigger.
+
+        Triggered after every successful upload. Only proceeds when:
+          (1) the folder passed the user-activity gate (`is_folder_settled`),
+              AND
+          (2) every job whose dropbox_path lives directly in this parent is
+              in a TERMINAL state (DONE or any SKIPPED_*) — no in-flight or
+              FAILED work left.
+
+        When both gates pass, batches the swap for every still-pending pair
+        in the folder. After a fully-successful batch, optionally schedules
+        deletion of the /h264 backup folder (Dropbox keeps history so this
+        is recoverable).
+
+        Does nothing on a no-op (e.g. nothing to reorganize, or folder
+        already cleaned up by a parallel uploader). Per-folder concurrency is
+        controlled by setting concurrency.upload_workers = 1 — keeping the
+        worker count at 1 is the user-chosen alternative to fine-grained
+        per-folder locks.
         """
-        from .reorganize import is_folder_settled, reorganize_pair
+        from .reorganize import (
+            find_unreorganized_pairs_in_folder,
+            is_folder_complete,
+            is_folder_settled,
+            reorganize_pair,
+            schedule_h264_delete,
+        )
 
-        original_p = PurePosixPath(job.dropbox_path)
-        parent = str(original_p.parent)
-        name = original_p.name
+        parent = str(PurePosixPath(just_finished_job.dropbox_path).parent)
 
+        # Gate 1: user activity (existing semantic)
         activity = is_folder_settled(
-            self.dropbox,
-            parent,
-            self.config.legacy_reorganize_min_age_days,
+            self.dropbox, parent, self.config.legacy_reorganize_min_age_days,
         )
         if not activity.settled:
-            days = (f"{activity.days_since_newest:.1f}" if activity.days_since_newest is not None else "?")
+            days = (f"{activity.days_since_newest:.1f}"
+                    if activity.days_since_newest is not None else "?")
             logger.info(
-                f"[{self.name}] Reorganize deferred: {parent} has activity "
+                f"[{self.name}] Reorganize deferred ({parent}): folder activity "
                 f"{days}d old (< threshold {activity.threshold_days}d). "
-                f"H.265 stays at {job.output_path}; future "
-                f"`hd reorganize-existing` will swap when the folder goes quiet."
+                f"Will retry after the next upload in this folder."
             )
-            return job.output_path
+            return
 
-        return reorganize_pair(
-            self.dropbox,
-            parent,
-            name,
-            int(job.dropbox_size or 0),
-            h265_size,
+        # Gate 2: every job in this folder must be terminal
+        completion = is_folder_complete(self.db, parent)
+        if not completion.complete:
+            logger.info(
+                f"[{self.name}] Reorganize deferred ({parent}): "
+                f"{completion.reason}. "
+                f"Will retry after the next upload in this folder."
+            )
+            return
+
+        # Both gates passed — reorganize all pending pairs in this folder.
+        pairs = find_unreorganized_pairs_in_folder(self.dropbox, parent)
+        if not pairs:
+            logger.info(
+                f"[{self.name}] Reorganize: nothing to do in {parent} "
+                f"(folder already reorganized by an earlier batch)."
+            )
+            return
+
+        logger.info(
+            f"[{self.name}] Reorganize batch starting: {len(pairs)} pair(s) "
+            f"in {parent}"
         )
+        succeeded = 0
+        for pair in pairs:
+            try:
+                new_path = reorganize_pair(
+                    self.dropbox,
+                    pair.parent,
+                    pair.name,
+                    int(pair.original.size),
+                    int(pair.h265.size),
+                )
+                # Bring the corresponding job's output_path in line with the
+                # new canonical location. Best-effort: if no DB row matches
+                # (e.g. the file was reorganized retroactively by `hd
+                # reorganize-existing` from outside the daemon), continue.
+                original_path = (pair.parent.rstrip('/') + '/' + pair.name) if pair.parent else '/' + pair.name
+                related = self.db.get_job_by_path(original_path)
+                if related is not None:
+                    self.db.update_job_state(
+                        related.id, JobState.DONE, output_path=new_path,
+                    )
+                succeeded += 1
+            except Exception as e:
+                logger.error(
+                    f"[{self.name}] reorganize_pair failed for {pair.name} "
+                    f"in {parent}: {e}. Continuing with the rest of the batch."
+                )
+
+        logger.info(
+            f"[{self.name}] Reorganize batch complete: {succeeded}/{len(pairs)} "
+            f"swapped in {parent}"
+        )
+
+        # Schedule h264/ backup deletion only when the WHOLE batch landed.
+        # A partial batch would mean some originals were already swapped while
+        # others stayed in the parent — deleting h264/ then would lose data.
+        delay = self.config.legacy_reorganize_delete_h264_after_seconds
+        if delay > 0 and succeeded == len(pairs):
+            h264_dir = (parent.rstrip('/') + '/h264') if parent else '/h264'
+            logger.info(
+                f"[{self.name}] Scheduling deletion of {h264_dir} in {delay}s "
+                f"(Dropbox version history preserves the backups)"
+            )
+            schedule_h264_delete(self.dropbox, h264_dir, delay)
 
     def _make_progress_callback(
         self,

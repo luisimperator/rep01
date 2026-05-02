@@ -443,6 +443,17 @@ class Config(BaseModel):
             "time and by `hd reorganize-existing`."
         ),
     )
+    legacy_reorganize_delete_h264_after_seconds: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "After a per-folder reorganize batch succeeds, schedule deletion "
+            "of the <parent>/h264/ backup folder this many seconds later. "
+            "0 disables deletion (default — keep backups). Dropbox keeps "
+            "deleted files in its history for 30 days (Plus) or 180 days "
+            "(Business), so this is recoverable."
+        ),
+    )
     allow_delete_original: bool = Field(
         default=False,
         description="DANGEROUS: Allow deleting original after successful transcode"

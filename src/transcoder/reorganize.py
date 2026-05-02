@@ -9,12 +9,17 @@ the live UploadWorker and by the `hd reorganize-existing` retroactive sweep.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
 
 from .dropbox_client import DropboxClient, DropboxFileInfo
+
+if TYPE_CHECKING:
+    from .database import Database
 
 logger = logging.getLogger(__name__)
 
@@ -250,3 +255,133 @@ def find_unreorganized_pairs(
             candidates.append(FolderCandidate(parent=parent, pairs=pairs))
 
     return candidates
+
+
+# --------------------------------------------------------------------------
+# Per-folder gating: only reorganize when every job in a folder is finished.
+# Used by the live UploadWorker so the swap happens once per folder instead
+# of once per file.
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class FolderCompletion:
+    """Result of an is_folder_complete check."""
+    complete: bool
+    total_jobs: int
+    pending_states: dict[str, int]  # state name -> count of jobs blocking us
+    reason: str
+
+
+def is_folder_complete(db: "Database", parent: str) -> FolderCompletion:
+    """
+    Check whether every job whose dropbox_path lives directly in `parent` has
+    reached a terminal state (DONE or any SKIPPED_*). FAILED and RETRY_WAIT
+    block — the user opted into "all-or-nothing": one bad job freezes the
+    folder until they intervene. In-progress states (DOWNLOADING etc.) also
+    block.
+
+    Returns FolderCompletion(False, ...) when there are no jobs at all — a
+    folder we've never seen isn't a folder we should reorganize.
+    """
+    from .database import TERMINAL_STATES
+    jobs = db.get_jobs_in_folder(parent)
+    if not jobs:
+        return FolderCompletion(False, 0, {}, "no jobs tracked in this folder")
+    pending: dict[str, int] = {}
+    for j in jobs:
+        if j.state not in TERMINAL_STATES:
+            pending[j.state.value] = pending.get(j.state.value, 0) + 1
+    if pending:
+        summary = ", ".join(f"{n}×{s}" for s, n in sorted(pending.items()))
+        return FolderCompletion(False, len(jobs), pending, summary)
+    return FolderCompletion(True, len(jobs), {}, "")
+
+
+def find_unreorganized_pairs_in_folder(
+    dropbox: DropboxClient,
+    parent: str,
+) -> list[PairCandidate]:
+    """
+    Single-folder version of find_unreorganized_pairs.
+
+    Lists `<parent>/`, `<parent>/h265/` and `<parent>/h264/` (each non-recursive)
+    and returns the pairs where:
+      - `<parent>/<name>`        (original) still exists
+      - `<parent>/h265/<name>`   (transcode output) exists
+      - `<parent>/h264/<name>`   (already-reorganized backup) does NOT exist
+
+    Survives missing h264/ and h265/ subfolders by treating them as empty.
+    """
+    parent = parent.rstrip('/') if parent != '/' else ''
+
+    def _safe_list(path: str) -> list[DropboxFileInfo]:
+        try:
+            return list(dropbox.list_folder(path or '/', recursive=False))
+        except Exception:
+            return []
+
+    parent_entries = _safe_list(parent)
+    h265_entries = _safe_list(parent + '/h265')
+    if not h265_entries:
+        return []
+    h264_entries = _safe_list(parent + '/h264')
+
+    h265_by_lower = {e.name.lower(): e for e in h265_entries}
+    h264_lower = {e.name.lower() for e in h264_entries}
+
+    pairs: list[PairCandidate] = []
+    for entry in parent_entries:
+        if entry.name.lower() == 'h265 feito.txt':
+            continue
+        h265_match = h265_by_lower.get(entry.name.lower())
+        if h265_match is None:
+            continue
+        if entry.name.lower() in h264_lower:
+            # Already reorganized in a previous run.
+            continue
+        pairs.append(PairCandidate(
+            parent=parent,
+            name=entry.name,
+            original=entry,
+            h265=h265_match,
+        ))
+    return pairs
+
+
+def schedule_h264_delete(
+    dropbox: DropboxClient,
+    h264_dir: str,
+    delay_seconds: int,
+) -> None:
+    """
+    Spawn a background daemon thread that sleeps `delay_seconds` and then
+    deletes the entire h264/ backup folder. Dropbox keeps the originals in
+    its 30-day version history (Plus) or longer (Business), so the user can
+    always restore. Errors are logged, never raised.
+    """
+    if delay_seconds <= 0:
+        return
+
+    def _worker() -> None:
+        time.sleep(delay_seconds)
+        try:
+            existed = dropbox.delete_file(h264_dir)
+            if existed:
+                logger.info(
+                    f"reorganize: deleted h264 backup folder {h264_dir} "
+                    f"after {delay_seconds}s (recoverable via Dropbox history)"
+                )
+            else:
+                logger.info(
+                    f"reorganize: h264 folder already gone, skipping delete: {h264_dir}"
+                )
+        except Exception as e:
+            logger.warning(f"reorganize: failed to delete {h264_dir}: {e}")
+
+    t = threading.Thread(
+        target=_worker,
+        name=f"h264-delete-{h264_dir}",
+        daemon=True,
+    )
+    t.start()

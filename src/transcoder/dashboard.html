@@ -501,6 +501,13 @@ async function renderSettings() {
       <span class="hint">Higher = safer (recently-touched folders are skipped). "no wait" reorganizes every job regardless of activity.</span>
     </div>
     <div class="field">
+      <label for="set-h264-del">${lbl('legacy_reorganize_delete_h264_after_seconds', 'Delete /h264 backup after reorganize (seconds)')}</label>
+      <select id="set-h264-del">
+        ${[0,10,30,60,300,1800,3600,86400].map(v => `<option value="${v}" ${v === s.legacy_reorganize_delete_h264_after_seconds ? 'selected' : ''}>${v === 0 ? 'keep forever (default)' : v < 60 ? v + 's' : v < 3600 ? Math.round(v/60) + 'min' : v < 86400 ? Math.round(v/3600) + 'h' : '24h'}</option>`).join('')}
+      </select>
+      <span class="hint">Once the folder reorganize batch succeeds, schedule deletion of /h264 backup after this delay. Recoverable via Dropbox version history.</span>
+    </div>
+    <div class="field">
       <label for="set-health">${lbl('health_check_interval_minutes', 'Self-health agent interval (min)')}</label>
       <select id="set-health">
         ${[1,5,10,30,60,180,360].map(v => `<option value="${v}" ${v === s.health_check_interval_minutes ? 'selected' : ''}>${v === 1 ? '1 minute' : v + ' minutes'}</option>`).join('')}
@@ -552,6 +559,7 @@ async function saveSettings() {
     min_size_gb: parseFloat(document.getElementById('set-min').value),
     legacy_reorganize: document.getElementById('set-reorg').checked,
     legacy_reorganize_min_age_days: parseInt(document.getElementById('set-age').value),
+    legacy_reorganize_delete_h264_after_seconds: parseInt(document.getElementById('set-h264-del').value),
     health_check_interval_minutes: parseInt(document.getElementById('set-health').value),
     api_bind: document.getElementById('set-bind').value,
     transcode_workers: parseInt(document.getElementById('set-tw').value),
