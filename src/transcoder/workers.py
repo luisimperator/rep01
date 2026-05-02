@@ -217,6 +217,13 @@ class DownloadWorker(BaseWorker):
             except OSError:
                 pass
 
+        # Preflight HEVC probe: range-download a few MB and run ffprobe on
+        # the chunk so we never download a 100 GB file just to discover it's
+        # already H.265. Returns True (= early-exit) when the file was
+        # detected as HEVC and the job has been marked SKIPPED_HEVC.
+        if self._preflight_hevc_check(job, job_dir):
+            return
+
         try:
             # Download with rev check
             self.dropbox.download_file_with_rev_check(
@@ -255,6 +262,105 @@ class DownloadWorker(BaseWorker):
             if partial_path.exists():
                 partial_path.unlink()
             raise
+
+    def _preflight_hevc_check(self, job: Job, job_dir: Path) -> bool:
+        """
+        Detect natively-encoded H.265 files via a partial download + ffprobe
+        BEFORE pulling the whole file. Marks the job SKIPPED_HEVC and tears
+        down the staging dir on a hit so a 100 GB native-HEVC clip costs ~32
+        MB instead of 100 GB.
+
+        Strategy: try the head first (faststart MP4s have moov at start),
+        fall back to the tail (camera/Premiere exports often have moov at
+        end). Both probes use the chunk size from
+        config.preflight_hevc_probe_mb. Returns True when the job was
+        short-circuited.
+
+        Inconclusive probes (ffprobe couldn't find the codec in either
+        chunk) fall through to the normal full download — better to spend
+        the bandwidth than mis-skip an H.264 file.
+        """
+        from .prober import is_hevc_codec, probe_codec_from_file
+
+        probe_mb = int(getattr(self.config, 'preflight_hevc_probe_mb', 0) or 0)
+        if probe_mb <= 0:
+            return False
+
+        chunk_bytes = probe_mb * 1024 * 1024
+        file_size = int(job.dropbox_size or 0)
+        # If the whole file is smaller than two probe chunks the round-trip
+        # cost outweighs the bandwidth saved. Just download it normally.
+        if file_size and file_size <= chunk_bytes * 2:
+            return False
+
+        head_path = job_dir / "preflight-head.tmp"
+        tail_path = job_dir / "preflight-tail.tmp"
+        detected: str | None = None
+
+        try:
+            try:
+                self.dropbox.download_partial(
+                    job.dropbox_path, head_path, 0, chunk_bytes,
+                )
+                detected = probe_codec_from_file(head_path, self.config.ffprobe_path)
+            except Exception as e:
+                logger.debug(f"[{self.name}] preflight head probe error: {e}")
+
+            if not detected and file_size:
+                tail_start = max(0, file_size - chunk_bytes)
+                try:
+                    self.dropbox.download_partial(
+                        job.dropbox_path, tail_path, tail_start, chunk_bytes,
+                    )
+                    detected = probe_codec_from_file(tail_path, self.config.ffprobe_path)
+                except Exception as e:
+                    logger.debug(f"[{self.name}] preflight tail probe error: {e}")
+
+            if not detected:
+                logger.debug(
+                    f"[{self.name}] preflight inconclusive for "
+                    f"{job.dropbox_path}; proceeding with full download"
+                )
+                return False
+
+            if not is_hevc_codec(detected):
+                logger.debug(
+                    f"[{self.name}] preflight detected {detected} (not HEVC); "
+                    f"full download next"
+                )
+                return False
+
+            saved = max(0, file_size - chunk_bytes * 2)
+            logger.info(
+                f"[{self.name}] Preflight detected HEVC ({detected}) for "
+                f"{job.dropbox_path} — skipping full download "
+                f"(~{format_bytes(saved)} saved)"
+            )
+            self.db.update_job_state(
+                job.id,
+                JobState.SKIPPED_HEVC,
+                input_codec=detected,
+            )
+            if self.disk_budget is not None:
+                self.disk_budget.release(job.id)
+            # Tear down the staging dir we created — there's nothing to
+            # transcode. Safe-guard the rmtree behind the job_ prefix so a
+            # mis-typed path can never wipe something else.
+            if job_dir.exists() and job_dir.name.startswith('job_'):
+                try:
+                    shutil.rmtree(job_dir)
+                except Exception as e:
+                    logger.warning(
+                        f"[{self.name}] failed to clean preflight staging: {e}"
+                    )
+            return True
+        finally:
+            for p in (head_path, tail_path):
+                try:
+                    if p.exists():
+                        p.unlink()
+                except OSError:
+                    pass
 
     def _make_progress_callback(
         self,

@@ -359,18 +359,33 @@ def schedule_h264_delete(
     deletes the entire h264/ backup folder. Dropbox keeps the originals in
     its 30-day version history (Plus) or longer (Business), so the user can
     always restore. Errors are logged, never raised.
+
+    Before deleting, writes/appends an audit log to
+    `<parent>/h264 deletado.txt` listing every backup file (name + size +
+    deletion timestamp). The log survives the deletion and gives the user a
+    paper trail to recover from Dropbox history if needed.
     """
     if delay_seconds <= 0:
         return
 
+    parent = str(PurePosixPath(h264_dir).parent)
+    audit_log_path = parent.rstrip('/') + '/h264 deletado.txt' if parent != '/' else '/h264 deletado.txt'
+
     def _worker() -> None:
         time.sleep(delay_seconds)
+        try:
+            _write_h264_deletion_log(dropbox, h264_dir, audit_log_path, delay_seconds)
+        except Exception as log_err:
+            # Don't block the delete on a log failure.
+            logger.warning(f"reorganize: failed to write deletion log {audit_log_path}: {log_err}")
+
         try:
             existed = dropbox.delete_file(h264_dir)
             if existed:
                 logger.info(
                     f"reorganize: deleted h264 backup folder {h264_dir} "
-                    f"after {delay_seconds}s (recoverable via Dropbox history)"
+                    f"after {delay_seconds}s (audit log at {audit_log_path}; "
+                    f"recoverable via Dropbox history)"
                 )
             else:
                 logger.info(
@@ -385,3 +400,76 @@ def schedule_h264_delete(
         daemon=True,
     )
     t.start()
+
+
+def _write_h264_deletion_log(
+    dropbox: DropboxClient,
+    h264_dir: str,
+    audit_log_path: str,
+    delay_seconds: int,
+) -> None:
+    """List the h264/ backups about to be deleted and append a record to the
+    audit log file. Idempotent across multiple deletions in the same parent —
+    each batch appends a new section."""
+    try:
+        entries = list(dropbox.list_folder(h264_dir, recursive=False))
+    except Exception:
+        entries = []
+
+    if not entries:
+        # Folder is empty or unreadable — nothing meaningful to log.
+        return
+
+    files = sorted(entries, key=lambda e: e.name.lower())
+    total_bytes = sum(e.size for e in files)
+
+    now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    name_width = max((len(e.name) for e in files), default=4)
+    name_width = max(name_width, len("FILENAME"))
+
+    lines = [
+        "================================================================",
+        f"DELETED AT: {now_str}",
+        f"FOLDER:     {h264_dir}",
+        f"REASON:     legacy_reorganize_delete_h264_after_seconds = {delay_seconds}s",
+        f"RECOVERY:   Dropbox version history (Plus 30d / Business 180d)",
+        "",
+        f"{'FILENAME'.ljust(name_width)}    SIZE",
+    ]
+    for e in files:
+        lines.append(f"{e.name.ljust(name_width)}    {_format_size(e.size)}")
+    lines.append("")
+    lines.append(f"Total: {len(files)} file(s), {_format_size(total_bytes)} freed")
+    lines.append("")
+    lines.append("")
+    new_section = "\n".join(lines)
+
+    existing = dropbox.read_text_file(audit_log_path) or ""
+    if not existing:
+        # First time — add a header.
+        header = (
+            "HeavyDrops Transcoder — h264 backup deletion log\n"
+            "=================================================\n"
+            "\n"
+            "Each section below records one batch deletion of the h264/\n"
+            "backup folder that sat next to this file. Files are recoverable\n"
+            "via Dropbox version history for the timeframe shown.\n"
+            "\n"
+            "\n"
+        )
+        existing = header
+    elif not existing.endswith("\n"):
+        existing += "\n"
+
+    dropbox.write_text_file(audit_log_path, existing + new_section)
+
+
+def _format_size(num_bytes: int) -> str:
+    """Human-readable size (binary units)."""
+    for unit in ('B', 'KB', 'MB', 'GB', 'TB'):
+        if num_bytes < 1024 or unit == 'TB':
+            if unit == 'B':
+                return f"{num_bytes} {unit}"
+            return f"{num_bytes:.2f} {unit}"
+        num_bytes /= 1024
+    return f"{num_bytes:.2f} PB"

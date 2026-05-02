@@ -481,6 +481,19 @@ class Config(BaseModel):
         default=[],
         description="Extra arguments to pass to ffmpeg"
     )
+    preflight_hevc_probe_mb: int = Field(
+        default=16,
+        ge=0,
+        le=512,
+        description=(
+            "Range-download N MB from the head (and from the tail if the head "
+            "probe is inconclusive) before the full download, then run ffprobe "
+            "on the chunk to detect natively-encoded HEVC files. When detected, "
+            "the full download is short-circuited to SKIPPED_HEVC. Set 0 to "
+            "disable. 16 MB covers the typical MP4 moov atom for camera/Premiere "
+            "exports without burning bandwidth."
+        ),
+    )
 
     # GOP size
     gop_size: int = Field(

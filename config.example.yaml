@@ -117,6 +117,10 @@ legacy_reorganize_min_age_days: 60
 # /h264 backup folder this many seconds later. Default 0 = keep the backups
 # forever. Dropbox version history (30d Plus, 180d Business) covers recovery.
 legacy_reorganize_delete_h264_after_seconds: 0
+# Range-download N MB from the head/tail of each candidate before the full
+# download to detect natively-encoded H.265 files via ffprobe. When detected,
+# the full download is skipped and the job is marked SKIPPED_HEVC. 0 disables.
+preflight_hevc_probe_mb: 16
 allow_delete_original: false
 delete_original_delay_hours: 168
 allow_mkv_fallback: false
