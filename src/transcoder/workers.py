@@ -15,7 +15,7 @@ import subprocess
 import threading
 import time
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from queue import Empty, Queue
 from typing import TYPE_CHECKING, Callable
 
@@ -754,8 +754,11 @@ class UploadWorker(BaseWorker):
             self.db.update_job_state(job.id, JobState.DONE)
             return
 
-        # Create h265 folder if needed
-        output_dir = str(Path(job.output_path).parent)
+        # Create h265 folder if needed. job.output_path is a Dropbox path
+        # (POSIX, forward-slash separated) — never wrap it in Path() on
+        # Windows because that produces backslashes and Dropbox rejects the
+        # request with malformed_path.
+        output_dir = str(PurePosixPath(job.output_path).parent)
         self.dropbox.create_folder(output_dir)
 
         # Upload to /<parent>/h265/<name>.MP4 — the temporary location
@@ -802,8 +805,6 @@ class UploadWorker(BaseWorker):
         actual swap to reorganize.reorganize_pair so the same code path is
         shared with `hd reorganize-existing`.
         """
-        from pathlib import PurePosixPath
-
         from .reorganize import is_folder_settled, reorganize_pair
 
         original_p = PurePosixPath(job.dropbox_path)
