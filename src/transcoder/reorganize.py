@@ -565,18 +565,36 @@ def cleanup_dot_underscore_files(
     dropbox: DropboxClient,
     parent: str,
     delete_after_seconds: int,
+    target_folder_names: list[str] | None = None,
+    max_size_bytes: int = 10240,
 ) -> int:
     """Sweep `._*` resource forks out of `parent` (non-recursive).
 
-    Lists `parent`, finds entries whose name starts with '._', and moves
-    each into `<parent>/ponto tracinho/<name>`. After all moves succeed,
-    schedules deletion of that subfolder via schedule_h264_delete (same
-    background-thread mechanism). Errors per file are logged and counted
-    but never raised — this is best-effort housekeeping.
+    Only runs when:
+      (a) `parent`'s last segment matches one of `target_folder_names`
+          (case-insensitive) — typically the ATEM "Video ISO Files" and
+          "Audio Source Files" folders, the only places these resource
+          forks belong; and
+      (b) the file is smaller than `max_size_bytes` — real macOS
+          resource forks are ~4 KB, the limit catches anomalies.
+
+    Files matching both criteria are moved into
+    `<parent>/ponto tracinho/<name>` and the subfolder is queued for
+    cleanup via schedule_h264_delete (folder kept, files deleted, audit
+    log left inside).
 
     Returns the number of files actually moved.
     """
     parent = parent.rstrip('/') if parent != '/' else ''
+
+    if target_folder_names is None:
+        target_folder_names = ["Video ISO Files", "Audio Source Files"]
+    targets_lower = {name.lower() for name in target_folder_names}
+
+    # Gate (a): must be one of the configured ATEM folders. Anything else
+    # we leave alone, even if it has tiny ._ files in it.
+    if PurePosixPath(parent).name.lower() not in targets_lower:
+        return 0
 
     try:
         entries = list(dropbox.list_folder(parent or '/', recursive=False))
@@ -584,7 +602,10 @@ def cleanup_dot_underscore_files(
         logger.warning(f"cleanup_dot_underscore: list {parent} failed: {e}")
         return 0
 
-    targets = [e for e in entries if e.name.startswith('._')]
+    targets = [
+        e for e in entries
+        if e.name.startswith('._') and e.size < max_size_bytes
+    ]
     if not targets:
         return 0
 

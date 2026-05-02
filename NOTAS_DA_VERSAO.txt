@@ -2,6 +2,41 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.1.0
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+MINOR BUMP: pipeline audio + ._ cleanup escopado por pasta ATEM
+
+  Esse bump consolida o trabalho do v6.0.34-6.0.36 (audio pipeline,
+  reorganize generalizado com layout, cleanup ._, log dentro da pasta
+  preservada) e adiciona o filtro final no cleanup ._.
+
+  [REFINE] Cleanup ._ escopado por pasta + tamanho
+  ------------------------------------------------
+  ANTES: cleanup_dot_underscore varria QUALQUER `._*` em qualquer
+         pasta que terminasse um reorganize batch. Risco de tocar em
+         ._ legítimos fora das pastas ATEM.
+
+  AGORA: dois filtros novos no config:
+    dot_underscore_target_folder_names:
+      - "Video ISO Files"
+      - "Audio Source Files"
+    dot_underscore_max_size_bytes: 10240
+
+  Cleanup só roda quando o nome da pasta-pai (case-insensitive)
+  estiver na lista, E o arquivo for menor que o limite. Resource
+  forks reais do macOS sao ~4 KB; 10 KB da folga sem deixar passar
+  algo que seja dado real prefixado com `._`.
+
+  Comportamento desejado: pasta tipo
+    /HeavyDrops/.../Video ISO Files/._Live CAM 1.mp4 (4 KB)
+  vai pra quarentena. Pasta tipo
+    /HeavyDrops/.../OutraCoisa/._algo.txt
+  fica intocada.
+
+================================================================================
+
 Versão: 6.0.36
 Data: 02/05/2026
 --------------------------------------------------------------------------------
