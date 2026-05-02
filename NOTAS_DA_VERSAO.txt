@@ -2,6 +2,69 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.3.3
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+URGENT BUGFIXES: 4 fixes (color tag whitelist, /assets defensive skip,
+image-codec skip, audio fallback gating)
+
+  [BUGFIX] gbr / RGB colorspace quebrava qualquer encode
+  ------------------------------------------------------
+  ANTES: passthrough da v6.2.0 emitia `-colorspace gbr` quando
+         ffprobe reportava color_space=gbr (PNG/RGB sources). Nem
+         hevc_qsv nem libx265 aceitam 'gbr' como valor — eles
+         cuspem "Undefined constant or missing '(' in 'gbr'" e o
+         encode falha antes do primeiro frame.
+
+  AGORA: ffmpeg_builder._color_metadata_args filtra os valores
+         por whitelist enum (_VALID_COLOR_PRIMARIES, _VALID_COLOR_TRC,
+         _VALID_COLORSPACE). Se o valor reportado pelo ffprobe nao
+         tiver na lista (gbr, rgb, valor exotico), a flag e dropada.
+         RGB sources sao sempre convertidos pra YUV no output entao
+         a colormatrix RGB original nao se aplica mesmo.
+
+  [BUGFIX] Jobs antigos de /assets/ continuavam rodando
+  -----------------------------------------------------
+  ANTES: o filtro /assets/ que adicionei na v6.2.2 era so no scanner.
+         Jobs criados ANTES desse update (em estado NEW no DB)
+         continuavam sendo despachados pra download/transcode e
+         falhavam horrivel (PNG, ProRes 4444, etc).
+
+  AGORA: novo state JobState.SKIPPED_EXCLUDED (DB migration auto-
+         aplica o novo index excluindo dispatch). DownloadWorker
+         checa path_has_assets_segment ANTES de baixar. Se bater,
+         marca SKIPPED_EXCLUDED com error_message explicativo,
+         libera o slot, prossegue.
+
+         Bonus: path_has_assets_segment migrou pra utils.py pra
+         scanner e workers compartilharem a mesma logica.
+
+  [BUGFIX] PNG / image codecs entravam como video
+  -----------------------------------------------
+  ANTES: After Effects exporta logos/overlays como .mov com codec
+         PNG/MJPEG dentro. Era tratado como video de 50fps de 2s.
+         Tentava transcodar e falhava com gbr/rgb24.
+
+  AGORA: TranscodeWorker checa codec_name contra IMAGE_CODECS
+         (png, mjpeg, gif, bmp, tiff, webp, exr, dpx, etc) DEPOIS
+         do probe. Se bater, marca SKIPPED_EXCLUDED e cleanup
+         staging. Sem ffmpeg, sem retry.
+
+  [BUGFIX] Audio fallback rodava em sources sem audio
+  ---------------------------------------------------
+  ANTES: quando o transcode primario falhava, worker SEMPRE tentava
+         "audio re-encode fallback". Pra source sem audio (ProRes
+         4444 com -an no cmd), o fallback era no-op mas DESPERDICAVA
+         outro launch falho do ffmpeg + 100ms de tempo + log noise.
+
+  AGORA: worker checa probe_result.video_info.has_audio antes de
+         tentar o fallback. Se source nao tem audio, pula direto
+         pro CPU fallback ou marca FAILED. Vale tanto pro QSV
+         quanto pro libx265 retry path.
+
+================================================================================
+
 Versão: 6.3.2
 Data: 02/05/2026
 --------------------------------------------------------------------------------

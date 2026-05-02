@@ -634,21 +634,6 @@ def _cursor_preview(cursor: str | None) -> str:
     return cursor[:16] + "..."
 
 
-_ASSETS_SEGMENT_NAMES = {"assets", "Assets", "ASSETS"}
-
-
-def _path_has_assets_segment(path: str) -> bool:
-    """True when any path segment matches an 'assets' folder name.
-
-    Independent of config.exclude_patterns so a user override on that
-    list can never accidentally re-enable scanning of project resource
-    folders. The check walks all segments so deeply-nested files like
-    `/foo/assets/sub/sub/file.mp4` are caught.
-    """
-    if not path:
-        return False
-    parts = PurePosixPath(path).parts
-    for seg in parts:
-        if seg in _ASSETS_SEGMENT_NAMES:
-            return True
-    return False
+# Re-export the canonical helper from utils so existing call sites in
+# scanner keep working without churn.
+from .utils import path_has_assets_segment as _path_has_assets_segment  # noqa: E402

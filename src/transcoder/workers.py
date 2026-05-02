@@ -124,6 +124,22 @@ class DownloadWorker(BaseWorker):
 
     def process_job(self, job: Job) -> None:
         """Download the file for the given job."""
+        # Defensive: even though scanner skips /assets/ paths since v6.2.2,
+        # jobs created BEFORE that update may still be sitting in the DB
+        # in NEW state. Catch them here BEFORE wasting bandwidth on the
+        # download — dispatcher feeds whatever's in NEW, regardless of
+        # which scanner version queued it.
+        from .utils import path_has_assets_segment
+        if path_has_assets_segment(job.dropbox_path):
+            logger.info(
+                f"[{self.name}] Skipping (under /assets/): {job.dropbox_path}"
+            )
+            self.db.update_job_state(
+                job.id, JobState.SKIPPED_EXCLUDED,
+                error_message="path under /assets/ — project resources never transcoded",
+            )
+            return
+
         logger.info(f"[{self.name}] Downloading: {job.dropbox_path}")
         REGISTRY.begin(
             self.name, "download", job.id, job.dropbox_path,
@@ -463,6 +479,25 @@ class TranscodeWorker(BaseWorker):
         except ProbeError as e:
             raise ValueError(f"Probe failed: {e}")
 
+        # Skip when source is actually an image codec wrapped in a movie
+        # container (PNG / MJPEG / etc — common for After Effects motion
+        # graphics templates exported as .mov). They tend to fail with
+        # gbr/rgb24 colorspaces the encoders don't understand, and even
+        # if they didn't, transcoding 2s of a logo to H.265 makes no sense.
+        from .utils import is_image_codec
+        if is_image_codec(probe_result.video_info.codec_name):
+            logger.info(
+                f"[{self.name}] Skipping (image codec wrapped in container): "
+                f"{job.dropbox_path} — codec={probe_result.video_info.codec_name}"
+            )
+            self.db.update_job_state(
+                job.id, JobState.SKIPPED_EXCLUDED,
+                input_codec=probe_result.video_info.codec_name,
+                error_message=f"image codec '{probe_result.video_info.codec_name}' is not real video",
+            )
+            self._cleanup_staging(job)
+            return
+
         # R1: Skip if already HEVC
         if probe_result.is_hevc:
             logger.info(f"[{self.name}] Skipping (already HEVC): {job.dropbox_path}")
@@ -588,8 +623,11 @@ class TranscodeWorker(BaseWorker):
         # Run FFmpeg
         success = self._run_ffmpeg(cmd, job)
 
-        if not success:
-            # Try with audio re-encode fallback
+        if not success and probe_result.video_info.has_audio:
+            # Try with audio re-encode fallback (only meaningful when the
+            # source actually has an audio stream — otherwise the cmd has
+            # `-an` and the substitution would be a no-op, just wasting
+            # another failed launch).
             logger.warning(f"[{self.name}] Retrying with audio re-encode")
             cmd = self.command_builder.build_audio_fallback_command(
                 input_path,
@@ -618,7 +656,7 @@ class TranscodeWorker(BaseWorker):
             )
             logger.info(f"[{self.name}] {cmd.description}")
             success = self._run_ffmpeg(cmd, job)
-            if not success:
+            if not success and probe_result.video_info.has_audio:
                 logger.warning(f"[{self.name}] CPU retry with audio re-encode")
                 cmd = self.command_builder.build_audio_fallback_command(
                     input_path,

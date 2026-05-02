@@ -20,6 +20,29 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+# Values ffmpeg's encoders accept for -color_primaries / -color_trc /
+# -colorspace. Everything else (notably 'gbr', which ffprobe reports for
+# RGB24 sources like PNGs in mov containers) gets dropped by
+# _color_metadata_args because passing them produces the lovely:
+#   [hevc_qsv] Unable to parse "colorspace" option value "gbr"
+# and the encode never starts.
+_VALID_COLOR_PRIMARIES = frozenset({
+    "bt709", "bt470m", "bt470bg", "smpte170m", "smpte240m", "film",
+    "bt2020", "smpte428", "smpte431", "smpte432", "ebu3213", "unknown",
+})
+_VALID_COLOR_TRC = frozenset({
+    "bt709", "bt470m", "bt470bg", "smpte170m", "smpte240m", "linear",
+    "log100", "log316", "iec61966-2-4", "bt1361e", "iec61966-2-1",
+    "bt2020-10", "bt2020-12", "smpte2084", "smpte428", "arib-std-b67",
+    "unknown",
+})
+_VALID_COLORSPACE = frozenset({
+    "bt709", "fcc", "bt470bg", "smpte170m", "smpte240m", "ycgco",
+    "bt2020nc", "bt2020c", "smpte2085", "chroma-derived-nc",
+    "chroma-derived-c", "ictcp", "unknown",
+})
+
+
 @dataclass
 class VideoInfo:
     """Information about input video from ffprobe."""
@@ -361,17 +384,27 @@ class FFmpegCommandBuilder:
     def _color_metadata_args(self, video_info: VideoInfo) -> list[str]:
         """Build -color_* flags from probe data.
 
-        Each tag is emitted only when the input declared it. Range is the
-        one exception — most muxers / NLEs assume 'tv' so we set it
-        explicitly to match the input or default 'tv'.
+        Each tag is emitted only when the input declared it AND the value
+        is in the encoder-accepted whitelist. Tags like 'gbr' (which
+        ffprobe reports for RGB24 sources like PNGs in mov containers)
+        are NOT valid `-colorspace` values for QSV / NVENC / libx265 —
+        they reject the option with "Undefined constant" and the whole
+        encode bails. Since we always convert RGB sources to YUV anyway,
+        the original RGB matrix tag has no meaning post-conversion.
+
+        Range is the exception — most muxers / NLEs assume 'tv' so we
+        set it explicitly to match the input or default 'tv'.
         """
         out: list[str] = []
-        if video_info.color_primaries:
-            out.extend(["-color_primaries", video_info.color_primaries])
-        if video_info.color_transfer:
-            out.extend(["-color_trc", video_info.color_transfer])
-        if video_info.color_space:
-            out.extend(["-colorspace", video_info.color_space])
+        prim = video_info.color_primaries
+        if prim and prim.lower() in _VALID_COLOR_PRIMARIES:
+            out.extend(["-color_primaries", prim])
+        trc = video_info.color_transfer
+        if trc and trc.lower() in _VALID_COLOR_TRC:
+            out.extend(["-color_trc", trc])
+        cs = video_info.color_space
+        if cs and cs.lower() in _VALID_COLORSPACE:
+            out.extend(["-colorspace", cs])
         # Range: pass through what we have, else default tv. Sony S-Log3
         # is the canonical "pc" (full range) source.
         out.extend(["-color_range", video_info.color_range or "tv"])
