@@ -108,9 +108,10 @@ class Scanner:
             _REGISTRY.scan_end()
 
         logger.info(
-            "scan complete: scanned=%d new=%d waiting=%d skipped_h265_log=%d youtube=%d",
+            "scan complete: scanned=%d new=%d new_audio=%d waiting=%d skipped_h265_log=%d youtube=%d",
             stats['scanned'],
             stats['new'],
+            stats['new_audio'],
             stats['waiting_stable'],
             stats['skipped_h265_log'],
             stats['skipped_youtube'],
@@ -287,6 +288,12 @@ class Scanner:
     ) -> str | None:
         path = file_info.path
 
+        # Audio path takes priority: extension matches AND the file lives
+        # directly inside a folder whose name matches the configured audio
+        # source folder name. WAVs anywhere else are intentionally ignored.
+        if self._is_audio_candidate(path):
+            return self._process_audio_file(file_info, dry_run, stability_cfg)
+
         if not is_video_file(path, self.config.video_extensions):
             return None
 
@@ -455,6 +462,100 @@ class Scanner:
             mirror_root=self.config.output_mirror_root,
         )
 
+    # ----------------------------------------------------------- audio (WAV→MP3)
+
+    def _is_audio_candidate(self, dropbox_path: str) -> bool:
+        """True when this file matches an audio extension AND its parent folder
+        is the configured Audio Source Files folder. Both checks are required —
+        WAVs scattered around other folders are not converted.
+        """
+        if not self.config.audio.enabled:
+            return False
+        p = PurePosixPath(dropbox_path)
+        ext = p.suffix.lower()
+        if ext not in {e.lower() for e in self.config.audio.extensions}:
+            return False
+        # Skip macOS resource forks (._<name>) — handled elsewhere if at all.
+        if p.name.startswith('._'):
+            return False
+        if p.parent.name.lower() != self.config.audio.source_folder_name.lower():
+            return False
+        return True
+
+    def _audio_output_path(self, dropbox_path: str) -> str:
+        """Where the MP3 lands before the per-folder reorganize swap."""
+        p = PurePosixPath(dropbox_path)
+        return str(p.parent / "mp3" / (p.stem + ".mp3"))
+
+    def _process_audio_file(
+        self,
+        file_info: DropboxFileInfo,
+        dry_run: bool,
+        stability_cfg: "StabilitySettings",
+    ) -> str | None:
+        path = file_info.path
+
+        if is_partial_file(path):
+            return 'skipped_excluded'
+        if matches_exclude_pattern(path, self.config.exclude_patterns):
+            return 'skipped_excluded'
+
+        # Tiny .wav files are usually placeholders or online-only stubs; skip.
+        if file_info.size < 4096:
+            return 'skipped_small'
+
+        output_path = self._audio_output_path(path)
+        if self.dropbox.file_exists(output_path):
+            if not dry_run:
+                self._create_skipped_audio_job(file_info, JobState.SKIPPED_ALREADY_EXISTS)
+            return 'skipped_exists'
+
+        # Already-reorganized: the swap moved <name>.wav → wav/<name>.wav and
+        # placed <name>.mp3 in its spot. The original WAV path no longer
+        # exists, so we'll never reach this branch — but check defensively
+        # for the swapped MP3 too.
+        mp3_final = str(PurePosixPath(path).parent / (PurePosixPath(path).stem + ".mp3"))
+        if self.dropbox.file_exists(mp3_final):
+            if not dry_run:
+                self._create_skipped_audio_job(file_info, JobState.SKIPPED_ALREADY_EXISTS)
+            return 'skipped_exists'
+
+        existing_job = self.db.get_job_by_path(path)
+        if existing_job:
+            if existing_job.dropbox_rev == file_info.rev:
+                if existing_job.state not in {JobState.FAILED, JobState.RETRY_WAIT}:
+                    return 'already_queued'
+
+        stability = self._check_stability(file_info, stability_cfg)
+        if stability == StabilityResult.STABLE:
+            if not dry_run:
+                self.db.create_job(
+                    dropbox_path=path,
+                    dropbox_rev=file_info.rev,
+                    dropbox_size=file_info.size,
+                    output_path=output_path,
+                    state=JobState.NEW,
+                    kind="audio",
+                )
+                self.db.clear_stability_checks(path)
+            logger.info(f"New audio job created: {path}")
+            return 'new_audio'
+        return 'waiting_stable'
+
+    def _create_skipped_audio_job(
+        self,
+        file_info: DropboxFileInfo,
+        state: JobState,
+    ) -> None:
+        self.db.create_job(
+            dropbox_path=file_info.path,
+            dropbox_rev=file_info.rev,
+            dropbox_size=file_info.size,
+            output_path=self._audio_output_path(file_info.path),
+            state=state,
+            kind="audio",
+        )
+
     def _create_new_job(self, file_info: DropboxFileInfo) -> None:
         self.db.create_job(
             dropbox_path=file_info.path,
@@ -485,6 +586,7 @@ class Scanner:
         return {
             'scanned': 0,
             'new': 0,
+            'new_audio': 0,
             'skipped_small': 0,
             'skipped_excluded': 0,
             'skipped_exists': 0,

@@ -47,7 +47,7 @@ from .rate_limit import TokenBucket
 from .scanner import Scanner
 from .updater import apply_update, check_for_update_async, installed_version
 from .watchdog import HealthChecker, Watchdog
-from .workers import DownloadWorker, TranscodeWorker, UploadWorker
+from .workers import AudioTranscoder, DownloadWorker, TranscodeWorker, UploadWorker
 from .inventory import (
     FileCategory,
     Inventory,
@@ -415,6 +415,19 @@ class Daemon:
             worker.start()
             self.workers.append(worker)
 
+        # Audio transcoders (CPU only, parallel to QSV/NVENC video pool)
+        if self.config.audio.enabled:
+            for i in range(self.config.concurrency.audio_workers):
+                worker = AudioTranscoder(
+                    i,
+                    self.config,
+                    self.db,
+                    self.stop_event,
+                    self.dispatcher,
+                )
+                worker.start()
+                self.workers.append(worker)
+
         # Upload workers
         for i in range(self.config.concurrency.upload_workers):
             worker = UploadWorker(
@@ -434,10 +447,12 @@ class Daemon:
         watchdog.start()
         self.workers.append(watchdog)
 
+        audio_n = self.config.concurrency.audio_workers if self.config.audio.enabled else 0
         logger.info(
             f"Started dispatcher + {len(self.workers) - 2} workers + watchdog: "
             f"{self.config.concurrency.download_workers} download, "
             f"{self.config.concurrency.transcode_workers} transcode, "
+            f"{audio_n} audio, "
             f"{self.config.concurrency.upload_workers} upload"
         )
 

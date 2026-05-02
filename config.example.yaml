@@ -61,6 +61,7 @@ concurrency:
   download_workers: 2
   transcode_workers: 2
   upload_workers: 2
+  audio_workers: 2
 watchdog:
   download_timeout_sec: 7200
   transcode_timeout_sec: 86400
@@ -117,6 +118,20 @@ legacy_reorganize_min_age_days: 60
 # /h264 backup folder this many seconds later. Default 0 = keep the backups
 # forever. Dropbox version history (30d Plus, 180d Business) covers recovery.
 legacy_reorganize_delete_h264_after_seconds: 0
+# Same as above but for the /wav backup folder the audio pipeline produces.
+# Default 300 = 5 minutes — keep just long enough to confirm the MP3 is fine.
+legacy_reorganize_delete_wav_after_seconds: 300
+
+# WAV → MP3 192kbps pipeline. CPU-only (libmp3lame), runs in parallel with
+# the QSV/NVENC video transcoder so they don't compete for the encoder.
+# Discovery is locked to folders named exactly 'Audio Source Files'
+# (case-insensitive) — the layout the ATEM hardware writes.
+audio:
+  enabled: true
+  source_folder_name: "Audio Source Files"
+  bitrate_kbps: 192
+  extensions: [".wav"]
+
 # Range-download N MB from the head/tail of each candidate before the full
 # download to detect natively-encoded H.265 files via ffprobe. When detected,
 # the full download is skipped and the job is marked SKIPPED_HEVC. 0 disables.

@@ -54,6 +54,9 @@ class JobDispatcher(threading.Thread):
         self.transcode_q: Queue[Job] = Queue(
             maxsize=max(1, config.concurrency.transcode_workers) * mult
         )
+        self.audio_transcode_q: Queue[Job] = Queue(
+            maxsize=max(1, config.concurrency.audio_workers) * mult
+        )
         self.upload_q: Queue[Job] = Queue(
             maxsize=max(1, config.concurrency.upload_workers) * mult
         )
@@ -91,6 +94,8 @@ class JobDispatcher(threading.Thread):
             return self.download_q
         if stage == "transcode":
             return self.transcode_q
+        if stage == "audio_transcode":
+            return self.audio_transcode_q
         if stage == "upload":
             return self.upload_q
         raise ValueError(f"unknown stage: {stage}")
@@ -100,6 +105,7 @@ class JobDispatcher(threading.Thread):
         return {
             "download": self.download_q.qsize(),
             "transcode": self.transcode_q.qsize(),
+            "audio_transcode": self.audio_transcode_q.qsize(),
             "upload": self.upload_q.qsize(),
             "active": len(self._active_set),
         }
@@ -108,9 +114,10 @@ class JobDispatcher(threading.Thread):
 
     def run(self) -> None:
         logger.info(
-            "dispatcher started: queues=download(%d)/transcode(%d)/upload(%d), poll=%.1fs",
+            "dispatcher started: queues=download(%d)/transcode(%d)/audio(%d)/upload(%d), poll=%.1fs",
             self.download_q.maxsize,
             self.transcode_q.maxsize,
+            self.audio_transcode_q.maxsize,
             self.upload_q.maxsize,
             self.poll_interval,
         )
@@ -118,7 +125,10 @@ class JobDispatcher(threading.Thread):
             try:
                 if not self._paused.is_set():
                     self._refill(self.download_q, DOWNLOAD_STATES)
-                    self._refill(self.transcode_q, TRANSCODE_STATES)
+                    # Video jobs only — audio jobs in DOWNLOADED state route
+                    # to audio_transcode_q below.
+                    self._refill(self.transcode_q, TRANSCODE_STATES, kind="video")
+                    self._refill(self.audio_transcode_q, TRANSCODE_STATES, kind="audio")
                     self._refill(self.upload_q, UPLOAD_STATES)
             except Exception:
                 logger.exception("dispatcher refill error")
@@ -131,13 +141,16 @@ class JobDispatcher(threading.Thread):
 
     # ----------------------------------------------------------------- private
 
-    def _refill(self, q: Queue[Job], states: set[JobState]) -> None:
+    def _refill(self, q: Queue[Job], states: set[JobState], kind: str | None = None) -> None:
         free = q.maxsize - q.qsize()
         if free <= 0:
             return
 
         # Over-fetch: dispatchable jobs may already be in flight (active_set).
-        candidates = self.db.get_dispatchable_jobs(states, limit=free * 2)
+        # If a kind filter is set we over-fetch more aggressively because the
+        # candidate list may contain mostly the wrong kind for this queue.
+        fetch_limit = free * (4 if kind else 2)
+        candidates = self.db.get_dispatchable_jobs(states, limit=fetch_limit)
         if not candidates:
             return
 
@@ -145,6 +158,8 @@ class JobDispatcher(threading.Thread):
             for job in candidates:
                 if free <= 0:
                     break
+                if kind is not None and job.kind != kind:
+                    continue
                 if job.id in self._active_set:
                     continue
                 try:

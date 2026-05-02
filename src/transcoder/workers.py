@@ -812,6 +812,139 @@ class TranscodeWorker(BaseWorker):
             )
 
 
+class AudioTranscoder(BaseWorker):
+    """CPU-only WAV → MP3 worker (libmp3lame).
+
+    Lives on its own dispatcher queue so it never competes with QSV/NVENC
+    for the GPU encoder. Output goes to the same /<parent>/<output_subdir>/
+    layout as video so the per-folder reorganize gate (audio_layout) finds
+    it via find_unreorganized_pairs_in_folder.
+    """
+
+    stage = "audio_transcode"
+
+    def __init__(
+        self,
+        worker_id: int,
+        config: Config,
+        db: Database,
+        stop_event: threading.Event,
+        dispatcher: JobDispatcher,
+    ):
+        super().__init__(f"audio-{worker_id}", config, db, stop_event, dispatcher)
+        self._ffmpeg_process: subprocess.Popen | None = None
+
+    def process_job(self, job: Job) -> None:
+        logger.info(f"[{self.name}] Audio transcoding: {job.dropbox_path}")
+        REGISTRY.begin(self.name, "audio_transcode", job.id, job.dropbox_path)
+        try:
+            self._audio_job(job)
+        except Exception as e:
+            logger.error(f"[{self.name}] Audio transcode failed: {e}")
+            self._handle_failure(job, str(e))
+        finally:
+            self._ffmpeg_process = None
+
+    def _audio_job(self, job: Job) -> None:
+        if not job.local_input_path:
+            raise ValueError("Job has no local input path")
+        input_path = Path(job.local_input_path)
+        if not input_path.exists():
+            raise ValueError(f"Input WAV not found: {input_path}")
+
+        job_dir = input_path.parent
+        # Output extension is fixed .mp3 regardless of input extension casing.
+        output_path = job_dir / "output.mp3"
+        temp_output_path = job_dir / "output.tmp.mp3"
+
+        bitrate = self.config.audio.bitrate_kbps
+        cmd = [
+            self.config.ffmpeg_path or "ffmpeg",
+            "-hide_banner", "-y",
+            "-i", str(input_path),
+            "-c:a", "libmp3lame",
+            "-b:a", f"{bitrate}k",
+            "-f", "mp3",
+            str(temp_output_path),
+        ]
+        logger.info(f"[{self.name}] libmp3lame {bitrate}k: wav -> mp3 ({input_path.name})")
+        logger.info(f"[{self.name}] ffmpeg cmd: " + " ".join(repr(a) for a in cmd))
+
+        self.db.update_job_state(
+            job.id,
+            JobState.TRANSCODING,
+            input_codec="pcm",
+            transcode_start=datetime.now(timezone.utc),
+        )
+
+        log_dir = self.config.log_dir / f"job_{job.id}"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "ffmpeg.log"
+        with open(log_file, "w", encoding="utf-8", errors="replace") as log_f:
+            log_f.write("# command: " + " ".join(repr(a) for a in cmd) + "\n\n")
+            log_f.flush()
+            self._ffmpeg_process = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT)
+            try:
+                while True:
+                    if self.should_stop():
+                        try:
+                            self._ffmpeg_process.terminate()
+                        except Exception:
+                            pass
+                        raise WorkerStop("Worker stopping")
+                    try:
+                        return_code = self._ffmpeg_process.wait(timeout=1.0)
+                        break
+                    except subprocess.TimeoutExpired:
+                        continue
+            finally:
+                self._ffmpeg_process = None
+
+        if return_code != 0:
+            tail = ""
+            try:
+                tail = log_file.read_text(encoding="utf-8", errors="replace")[-2000:]
+            except Exception:
+                pass
+            raise ValueError(f"ffmpeg returned {return_code}; tail: {tail}")
+
+        # Same Path.replace pattern as the video worker — overwrite any stale
+        # output.mp3 left from a previous attempt whose later step failed.
+        if temp_output_path.exists():
+            temp_output_path.replace(output_path)
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise ValueError("MP3 output missing or empty after ffmpeg")
+
+        self.db.update_job_state(
+            job.id,
+            JobState.UPLOADING,
+            local_output_path=str(output_path),
+            output_codec="mp3",
+            output_bitrate_kbps=bitrate,
+            transcode_end=datetime.now(timezone.utc),
+        )
+        logger.info(
+            f"[{self.name}] Audio transcode complete: {job.dropbox_path} "
+            f"({format_bytes(input_path.stat().st_size)} -> "
+            f"{format_bytes(output_path.stat().st_size)})"
+        )
+
+    def _handle_failure(self, job: Job, error: str) -> None:
+        new_count, will_retry = self.db.increment_retry(
+            job.id, self.config.watchdog.max_retries,
+        )
+        if will_retry:
+            self.db.update_job_state(
+                job.id, JobState.RETRY_WAIT, error_message=error[:500],
+            )
+            logger.info(f"[{self.name}] Will retry job {job.id} ({new_count}/{self.config.watchdog.max_retries})")
+        else:
+            self.db.update_job_state(
+                job.id, JobState.FAILED, error_message=error[:500],
+            )
+            logger.error(f"[{self.name}] Job {job.id} permanently failed after {new_count} retries")
+
+
 class UploadWorker(BaseWorker):
     """Worker that uploads transcoded files to Dropbox."""
 
@@ -934,12 +1067,26 @@ class UploadWorker(BaseWorker):
         per-folder locks.
         """
         from .reorganize import (
+            AUDIO_LAYOUT,
+            VIDEO_LAYOUT,
             find_unreorganized_pairs_in_folder,
             is_folder_complete,
             is_folder_settled,
             reorganize_pair,
             schedule_h264_delete,
         )
+
+        # Pick the layout that matches the just-finished job — every job in a
+        # given parent folder is either all-video or all-audio (audio jobs
+        # only land inside "Audio Source Files" folders, which never contain
+        # video files). If we ever mix them, this check still picks the right
+        # subdir scheme for the file that triggered the call.
+        if just_finished_job.kind == "audio":
+            layout = AUDIO_LAYOUT
+            delete_delay = self.config.legacy_reorganize_delete_wav_after_seconds
+        else:
+            layout = VIDEO_LAYOUT
+            delete_delay = self.config.legacy_reorganize_delete_h264_after_seconds
 
         parent = str(PurePosixPath(just_finished_job.dropbox_path).parent)
 
@@ -968,7 +1115,7 @@ class UploadWorker(BaseWorker):
             return
 
         # Both gates passed — reorganize all pending pairs in this folder.
-        pairs = find_unreorganized_pairs_in_folder(self.dropbox, parent)
+        pairs = find_unreorganized_pairs_in_folder(self.dropbox, parent, layout)
         if not pairs:
             logger.info(
                 f"[{self.name}] Reorganize: nothing to do in {parent} "
@@ -978,7 +1125,7 @@ class UploadWorker(BaseWorker):
 
         logger.info(
             f"[{self.name}] Reorganize batch starting: {len(pairs)} pair(s) "
-            f"in {parent}"
+            f"in {parent} (layout={layout.backup_subdir}->{layout.output_subdir})"
         )
         succeeded = 0
         for pair in pairs:
@@ -989,6 +1136,7 @@ class UploadWorker(BaseWorker):
                     pair.name,
                     int(pair.original.size),
                     int(pair.h265.size),
+                    layout=layout,
                 )
                 # Bring the corresponding job's output_path in line with the
                 # new canonical location. Best-effort: if no DB row matches
@@ -1012,17 +1160,17 @@ class UploadWorker(BaseWorker):
             f"swapped in {parent}"
         )
 
-        # Schedule h264/ backup deletion only when the WHOLE batch landed.
+        # Schedule backup-folder deletion only when the WHOLE batch landed.
         # A partial batch would mean some originals were already swapped while
-        # others stayed in the parent — deleting h264/ then would lose data.
-        delay = self.config.legacy_reorganize_delete_h264_after_seconds
-        if delay > 0 and succeeded == len(pairs):
-            h264_dir = (parent.rstrip('/') + '/h264') if parent else '/h264'
+        # others stayed in the parent — deleting the backup then would lose
+        # data. The delay knob is layout-specific (h264 vs wav).
+        if delete_delay > 0 and succeeded == len(pairs):
+            backup_dir = (parent.rstrip('/') + '/' + layout.backup_subdir) if parent else '/' + layout.backup_subdir
             logger.info(
-                f"[{self.name}] Scheduling deletion of {h264_dir} in {delay}s "
+                f"[{self.name}] Scheduling deletion of {backup_dir} in {delete_delay}s "
                 f"(Dropbox version history preserves the backups)"
             )
-            schedule_h264_delete(self.dropbox, h264_dir, delay)
+            schedule_h264_delete(self.dropbox, backup_dir, delete_delay)
 
     def _make_progress_callback(
         self,

@@ -18,6 +18,7 @@
     --download: #4d8aff;
     --transcode: #b76dff;
     --upload: #4dd2a7;
+    --audio: #f59e0b;
   }
   * { box-sizing: border-box; }
   body { font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -82,7 +83,12 @@
   .worker-head .stage { font-size: .8em; padding: 2px 9px; border-radius: 11px; font-weight: 600; }
   .stage-download { background: rgba(77,138,255,.15); color: var(--download); }
   .stage-transcode { background: rgba(183,109,255,.15); color: var(--transcode); }
+  .stage-audio_transcode { background: rgba(245,158,11,.18); color: var(--audio); }
   .stage-upload { background: rgba(77,210,167,.15); color: var(--upload); }
+  .bar-download > span { background: var(--download) !important; }
+  .bar-transcode > span { background: var(--transcode) !important; }
+  .bar-audio_transcode > span { background: var(--audio) !important; }
+  .bar-upload > span { background: var(--upload) !important; }
   .worker .path { word-break: break-all; font-size: .92em; color: var(--text); margin-bottom: .4em; }
   .worker .path .dir { color: var(--muted); }
   .worker .meta { color: var(--muted); font-size: .82em; }
@@ -385,6 +391,8 @@ function renderWorkers(active) {
       const enc = w.encoder ? `${w.encoder} · ` : '';
       meta = enc + `${fmtDuration(w.time_sec)} / ${fmtDuration(w.duration_sec)} · ${(w.fps||0).toFixed(1)} fps · ${(w.speed||0).toFixed(2)}x`;
       if (w.bitrate_kbps) meta += ` · ${(w.bitrate_kbps/1024).toFixed(1)} Mb/s`;
+    } else if (w.stage === 'audio_transcode') {
+      meta = `libmp3lame 192k · CPU encode in progress`;
     } else {
       meta = `${fmtBytes(w.bytes_done)} / ${fmtBytes(w.bytes_total)}`;
       if (w.elapsed_sec > 0 && w.bytes_done > 0) {
@@ -508,6 +516,28 @@ async function renderSettings() {
       <span class="hint">Once the folder reorganize batch succeeds, schedule deletion of /h264 backup after this delay. Recoverable via Dropbox version history.</span>
     </div>
     <div class="field">
+      <label>${lbl('audio_enabled', 'Convert WAV → MP3 192k (CPU, parallel to QSV)')}</label>
+      <label class="switch">
+        <input id="set-audio-enabled" type="checkbox" ${s.audio_enabled ? 'checked' : ''}>
+        <span class="track"></span>
+        <span style="color: var(--muted); font-size: .9em">Only inside folders named "Audio Source Files"</span>
+      </label>
+    </div>
+    <div class="field">
+      <label for="set-audio-workers">${lbl('audio_workers', 'Parallel audio (libmp3lame) workers')}</label>
+      <select id="set-audio-workers">
+        ${[1,2,3,4,6,8].map(v => `<option value="${v}" ${v === s.audio_workers ? 'selected' : ''}>${v}</option>`).join('')}
+      </select>
+      <span class="hint">CPU-bound, doesn't compete with QSV/NVENC video encoding.</span>
+    </div>
+    <div class="field">
+      <label for="set-wav-del">${lbl('legacy_reorganize_delete_wav_after_seconds', 'Delete /wav backup after audio reorganize (seconds)')}</label>
+      <select id="set-wav-del">
+        ${[0,30,60,300,1800,3600,86400].map(v => `<option value="${v}" ${v === s.legacy_reorganize_delete_wav_after_seconds ? 'selected' : ''}>${v === 0 ? 'keep forever' : v < 60 ? v + 's' : v < 3600 ? Math.round(v/60) + 'min' : v < 86400 ? Math.round(v/3600) + 'h' : '24h'}</option>`).join('')}
+      </select>
+      <span class="hint">Same idea as the /h264 deletion but for the audio pipeline. Default 5 min.</span>
+    </div>
+    <div class="field">
       <label for="set-health">${lbl('health_check_interval_minutes', 'Self-health agent interval (min)')}</label>
       <select id="set-health">
         ${[1,5,10,30,60,180,360].map(v => `<option value="${v}" ${v === s.health_check_interval_minutes ? 'selected' : ''}>${v === 1 ? '1 minute' : v + ' minutes'}</option>`).join('')}
@@ -560,6 +590,9 @@ async function saveSettings() {
     legacy_reorganize: document.getElementById('set-reorg').checked,
     legacy_reorganize_min_age_days: parseInt(document.getElementById('set-age').value),
     legacy_reorganize_delete_h264_after_seconds: parseInt(document.getElementById('set-h264-del').value),
+    legacy_reorganize_delete_wav_after_seconds: parseInt(document.getElementById('set-wav-del').value),
+    audio_enabled: document.getElementById('set-audio-enabled').checked,
+    audio_workers: parseInt(document.getElementById('set-audio-workers').value),
     health_check_interval_minutes: parseInt(document.getElementById('set-health').value),
     api_bind: document.getElementById('set-bind').value,
     transcode_workers: parseInt(document.getElementById('set-tw').value),
