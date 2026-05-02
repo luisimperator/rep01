@@ -2,6 +2,29 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.32
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+DASHBOARD: cache-busting headers (browser nao serve UI velha apos update)
+
+  [BUGFIX] Browser servindo HTML velho apos atualizar daemon
+  ----------------------------------------------------------
+  ANTES: dashboard.html e responses /api/* eram servidos sem
+         Cache-Control. O browser cacheava agressivamente — apos
+         um `git pull` + restart do daemon (versao nova), abrir
+         http://127.0.0.1:9123/ continuava mostrando a UI velha,
+         mesmo o banner indicando a versao nova. Forcava Ctrl+F5
+         pra ver as mudancas.
+
+  AGORA: todas as responses HTML/JSON/text agora mandam:
+           Cache-Control: no-store, no-cache, must-revalidate, max-age=0
+           Pragma: no-cache
+           Expires: 0
+         Atualizou o daemon? Recarrega normal e voce ja ve a UI nova.
+
+================================================================================
+
 Versão: 6.0.31
 Data: 02/05/2026
 --------------------------------------------------------------------------------

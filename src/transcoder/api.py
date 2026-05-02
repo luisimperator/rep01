@@ -272,11 +272,21 @@ def _build_handler(api: ApiServer):
                 )
                 self._set_cookie_value = None
 
+        def _no_cache_headers(self) -> None:
+            # Without these the browser happily serves a stale dashboard.html
+            # (or stale /api/* JSON) for hours after a daemon update, and the
+            # user keeps seeing the OLD UI even though the version banner
+            # says new. Belt-and-braces directives that work across browsers.
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+
         def _send_json(self, payload: dict) -> None:
             body = json.dumps(payload, default=str).encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self._no_cache_headers()
             self._stamp_token_cookie()
             self.end_headers()
             self.wfile.write(body)
@@ -286,6 +296,7 @@ def _build_handler(api: ApiServer):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self._no_cache_headers()
             self._stamp_token_cookie()
             self.end_headers()
             self.wfile.write(body)
@@ -295,6 +306,7 @@ def _build_handler(api: ApiServer):
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
+            self._no_cache_headers()
             self._stamp_token_cookie()
             self.end_headers()
             self.wfile.write(body)
