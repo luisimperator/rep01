@@ -754,8 +754,11 @@ class UploadWorker(BaseWorker):
             self.db.update_job_state(job.id, JobState.DONE)
             return
 
-        # Create h265 folder if needed
-        output_dir = str(Path(job.output_path).parent)
+        # Create h265 folder if needed. Use PurePosixPath so this stays a
+        # Dropbox path (`/.../h265`) instead of a Windows path (`\...\h265`),
+        # which the API rejects with malformed_path.
+        from pathlib import PurePosixPath
+        output_dir = str(PurePosixPath(job.output_path).parent)
         self.dropbox.create_folder(output_dir)
 
         # Upload to /<parent>/h265/<name>.MP4 — the temporary location

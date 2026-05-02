@@ -210,9 +210,11 @@ class DropboxClient:
 
         files_list_folder rejects paths that end in '/' with "not_found", so we
         strip them defensively. Empty paths and '/' are mapped to '' which is
-        the form the SDK wants for the account root.
+        the form the SDK wants for the account root. Backslashes are converted
+        to forward slashes so callers that accidentally route a Dropbox path
+        through pathlib.Path on Windows still produce a valid Dropbox path.
         """
-        path = path.strip()
+        path = path.strip().replace('\\', '/')
         if not path.startswith('/'):
             path = '/' + path
         # Strip trailing slashes, but never let the path become empty before
