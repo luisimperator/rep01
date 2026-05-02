@@ -2,6 +2,34 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.33
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+URGENT BUGFIX: loop infinito de transcode (rename falhando no Windows)
+
+  [BUGFIX CRITICO] FFmpeg termina, rename falha, repete pra sempre
+  ----------------------------------------------------------------
+  ANTES: workers._transcode_job() promovia o output via
+         cmd.temp_output_path.rename(output_path). No Windows,
+         Path.rename() levanta WinError 183 ("Cannot create a file
+         when that file already exists") se o destino ja existe.
+         Cenario: transcode anterior renomeou com sucesso, mas
+         validation ou upload falhou e o job foi reenfileirado.
+         O output.mp4 ficou no staging. Na retry, ffmpeg gera novo
+         output.tmp.mp4, tenta rename, falha — e fica em loop
+         infinito reencodando o mesmo arquivo, queimando QSV. O
+         downloader 0 e o transcoder 0 ficavam presos no mesmo job.
+
+  AGORA: usa cmd.temp_output_path.replace(output_path). replace()
+         e o "rename atomico que sobrescreve" multiplataforma —
+         no Windows usa MoveFileEx com MOVEFILE_REPLACE_EXISTING.
+         Se sobrar um output.mp4 velho, e sobrescrito sem erro.
+         Validation roda em seguida — entao corrupcao real e
+         pega normalmente.
+
+================================================================================
+
 Versão: 6.0.32
 Data: 02/05/2026
 --------------------------------------------------------------------------------

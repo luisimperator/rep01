@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "heavydrops-transcoder"
-version = "6.0.32"
+version = "6.0.33"
 description = "Minimal Dropbox H.264→H.265 transcoder. Daemon + dashboard."
 readme = "README.md"
 license = {text = "MIT"}

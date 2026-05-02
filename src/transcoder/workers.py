@@ -578,9 +578,14 @@ class TranscodeWorker(BaseWorker):
                 )
             raise ValueError("FFmpeg transcode failed")
 
-        # Rename temp to final
+        # Promote temp to final. Use Path.replace (NOT .rename) so we
+        # overwrite any stale output.mp4 left over from a previous attempt
+        # whose rename succeeded but later steps (validation/upload) failed.
+        # On Windows, rename() raises WinError 183 if the destination
+        # exists — replace() is the cross-platform "overwrite atomically"
+        # that we actually want here.
         if cmd.temp_output_path.exists():
-            cmd.temp_output_path.rename(output_path)
+            cmd.temp_output_path.replace(output_path)
 
         # Validate output
         is_valid, error = validate_output(
