@@ -81,10 +81,21 @@ class Job:
     transcode_end: datetime | None
     created_at: datetime
     updated_at: datetime
+    # 'video' (H.264 → H.265 via QSV/NVENC/CPU) or 'audio' (WAV → MP3 via libmp3lame).
+    # Lets the dispatcher route into the right worker pool without competing for
+    # the same encoder.
+    kind: str = "video"
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Job:
         """Create Job from database row."""
+        # row['kind'] is missing on databases predating the audio pipeline; the
+        # ALTER TABLE migration backfills it but old in-flight rows might still
+        # be NULL until updated.
+        try:
+            kind = row['kind'] or "video"
+        except (IndexError, KeyError):
+            kind = "video"
         return cls(
             id=row['id'],
             dropbox_path=row['dropbox_path'],
@@ -181,6 +192,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     encoder_used TEXT,
     transcode_start TEXT,
     transcode_end TEXT,
+    kind TEXT NOT NULL DEFAULT 'video',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(dropbox_path, dropbox_rev)
@@ -314,6 +326,10 @@ class Database:
         existing = {row[1] for row in cursor.fetchall()}
         if 'output_size' not in existing:
             conn.execute("ALTER TABLE jobs ADD COLUMN output_size INTEGER")
+        if 'kind' not in existing:
+            # Older DBs predate the audio pipeline. Backfill 'video' for every
+            # existing row so dispatcher routing is unambiguous.
+            conn.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'")
 
     @contextmanager
     def transaction(self) -> Generator[sqlite3.Connection, None, None]:
@@ -343,6 +359,7 @@ class Database:
         dropbox_size: int,
         output_path: str,
         state: JobState = JobState.NEW,
+        kind: str = "video",
     ) -> Job | None:
         """
         Create a new job (idempotent by path+rev).
@@ -355,10 +372,10 @@ class Database:
             try:
                 cursor = conn.execute(
                     """
-                    INSERT INTO jobs (dropbox_path, dropbox_rev, dropbox_size, output_path, state)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO jobs (dropbox_path, dropbox_rev, dropbox_size, output_path, state, kind)
+                    VALUES (?, ?, ?, ?, ?, ?)
                     """,
-                    (dropbox_path, dropbox_rev, dropbox_size, output_path, state.value),
+                    (dropbox_path, dropbox_rev, dropbox_size, output_path, state.value, kind),
                 )
                 job_id = cursor.lastrowid
             except sqlite3.IntegrityError:

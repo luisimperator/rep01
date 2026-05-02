@@ -2,6 +2,53 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.34
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+NOVA PIPELINE: WAV -> MP3 192kbps em paralelo (CPU)
+
+  [FEATURE] Conversao automatica de WAVs do ATEM
+  ----------------------------------------------
+  O daemon agora descobre arquivos .wav que estao DENTRO de pastas
+  com nome exato "Audio Source Files" (case-insensitive — o layout
+  que a hardware ATEM grava) e converte pra MP3 192kbps em paralelo
+  ao transcode de video. Como usa libmp3lame na CPU, nao briga com
+  o QSV/NVENC do video.
+
+  Arquitetura:
+    - Coluna nova `kind` na tabela jobs (video|audio), migration
+      auto-aplicada no startup.
+    - Pool dedicado de workers AudioTranscoder (config:
+      concurrency.audio_workers, default 2). Dispatcher filtra a
+      fila TRANSCODE por kind: video vai pra transcode_q (QSV),
+      audio vai pra audio_transcode_q (CPU).
+    - Reorganize generalizado: novo ReorganizeLayout abstrai
+      h264/h265/.mp4 vs wav/mp3/.mp3. Mesmo gate per-folder
+      (is_folder_complete + is_folder_settled) cobre os dois.
+    - Layout no Dropbox espelha o de video:
+        Audio Source Files/
+          Mic 1.wav (original) -> wav/Mic 1.wav (backup)
+          mp3/Mic 1.mp3 (output) -> Mic 1.mp3 (swap final)
+      Apos batch reorganize, schedule deletion de wav/ baseado em
+      legacy_reorganize_delete_wav_after_seconds (default 300 = 5min).
+
+  Dashboard:
+    - Cor ambar (#f59e0b) distinta das 3 ja existentes (azul
+      download, roxo transcode, verde upload).
+    - Card "AUDIO-N" com badge AUDIO_TRANSCODE laranja, barra ambar.
+    - Settings novas: toggle audio_enabled, dropdown
+      audio_workers, dropdown de delay pra delete da pasta wav/.
+
+  Config defaults seguros:
+    - audio.enabled: true
+    - audio.source_folder_name: "Audio Source Files"
+    - audio.bitrate_kbps: 192 (CBR, mesmo padrao do GUI legado)
+    - concurrency.audio_workers: 2
+    - legacy_reorganize_delete_wav_after_seconds: 300
+
+================================================================================
+
 Versão: 6.0.33
 Data: 02/05/2026
 --------------------------------------------------------------------------------

@@ -102,6 +102,44 @@ class ConcurrencySettings(BaseModel):
         le=8,
         description="Number of parallel upload workers"
     )
+    audio_workers: int = Field(
+        default=2,
+        ge=1,
+        le=8,
+        description=(
+            "Number of parallel WAV→MP3 workers. CPU-bound (libmp3lame), "
+            "doesn't compete with QSV/NVENC video transcoding."
+        ),
+    )
+
+
+class AudioSettings(BaseModel):
+    """WAV → MP3 conversion pipeline (CPU only, parallel to video QSV)."""
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Enable WAV → MP3 192kbps conversion for files inside any folder "
+            "named exactly 'Audio Source Files' (case-insensitive, the layout "
+            "the ATEM hardware writes). Disabled = scanner ignores audio."
+        ),
+    )
+    source_folder_name: str = Field(
+        default="Audio Source Files",
+        description=(
+            "Folder name (case-insensitive) that gates audio discovery. WAVs "
+            "outside folders matching this name are never queued."
+        ),
+    )
+    bitrate_kbps: int = Field(
+        default=192,
+        ge=64,
+        le=320,
+        description="MP3 bitrate (CBR) in kbps. 192 matches the legacy GUI default.",
+    )
+    extensions: list[str] = Field(
+        default_factory=lambda: [".wav"],
+        description="File extensions (lowercase, dot-prefixed) treated as audio sources.",
+    )
 
 
 class OutputLayout(str, Enum):
@@ -371,6 +409,9 @@ class Config(BaseModel):
     # Concurrency
     concurrency: ConcurrencySettings = Field(default_factory=ConcurrencySettings)
 
+    # WAV → MP3 audio pipeline (runs in parallel to video transcode)
+    audio: AudioSettings = Field(default_factory=AudioSettings)
+
     # Watchdog
     watchdog: WatchdogSettings = Field(default_factory=WatchdogSettings)
 
@@ -452,6 +493,16 @@ class Config(BaseModel):
             "0 disables deletion (default — keep backups). Dropbox keeps "
             "deleted files in its history for 30 days (Plus) or 180 days "
             "(Business), so this is recoverable."
+        ),
+    )
+    legacy_reorganize_delete_wav_after_seconds: int = Field(
+        default=300,
+        ge=0,
+        description=(
+            "Same as legacy_reorganize_delete_h264_after_seconds but for the "
+            "<parent>/wav/ backup that the audio pipeline produces. Default "
+            "300 = 5 minutes; the originals are recoverable from Dropbox "
+            "version history."
         ),
     )
     allow_delete_original: bool = Field(

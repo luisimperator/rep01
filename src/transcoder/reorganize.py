@@ -71,17 +71,56 @@ def is_folder_settled(
     return FolderActivity(newest < threshold, newest, days_since, min_age_days)
 
 
+@dataclass
+class ReorganizeLayout:
+    """Defines the directory + extension scheme for one reorganize batch.
+
+    The video pipeline backs <name>.mp4 up to h264/<name>.mp4 and lifts
+    h265/<name>.mp4 into the original's spot. The audio pipeline does the
+    same dance with wav/ and mp3/ — but the output extension differs from
+    the input, so output_ext is what the swapped file ends up named with
+    (instead of preserving the original ext).
+    """
+    backup_subdir: str       # 'h264' or 'wav'
+    output_subdir: str       # 'h265' or 'mp3'
+    output_ext: str | None   # None = keep original extension; else '.mp3' etc.
+    feito_filename: str      # journal file written inside <parent>/<output_subdir>/
+
+    def output_name(self, original_name: str) -> str:
+        """The filename the swapped file should have under <parent>/."""
+        if self.output_ext is None:
+            return original_name
+        return PurePosixPath(original_name).stem + self.output_ext
+
+
+VIDEO_LAYOUT = ReorganizeLayout(
+    backup_subdir="h264",
+    output_subdir="h265",
+    output_ext=None,                  # H.265 keeps the .mp4 extension
+    feito_filename="h265 feito.txt",
+)
+
+AUDIO_LAYOUT = ReorganizeLayout(
+    backup_subdir="wav",
+    output_subdir="mp3",
+    output_ext=".mp3",
+    feito_filename="mp3 feito.txt",
+)
+
+
 def reorganize_pair(
     dropbox: DropboxClient,
     parent: str,
     name: str,
     original_size: int,
-    h265_size: int,
+    output_size: int,
+    layout: ReorganizeLayout = VIDEO_LAYOUT,
 ) -> str:
     """
-    Atomically swap the H.265 into the original's spot.
+    Atomically swap the transcoded output into the original's spot.
 
-    Steps:
+    Steps (illustrated for the video layout — audio is identical with
+    h264→wav, h265→mp3, and an extension change):
       1. Ensure /<parent>/h264/ exists.
       2. Move /<parent>/<name> (the H.264 original) to /<parent>/h264/<name>.
       3. Move /<parent>/h265/<name> (the H.265) to /<parent>/<name>.
@@ -90,46 +129,48 @@ def reorganize_pair(
       4. Append a line to /<parent>/h265/h265 feito.txt in the legacy
          GUI's format.
 
-    Returns the final Dropbox path of the H.265 file (== /<parent>/<name>).
-    Raises on unrecoverable failure.
+    Returns the final Dropbox path of the swapped file. Raises on
+    unrecoverable failure.
     """
     parent = parent.rstrip('/') if parent != '/' else ''
-    h264_dir = parent + '/h264'
-    h264_backup = h264_dir + '/' + name
-    h265_temp = parent + '/h265/' + name
-    original = parent + '/' + name
-    feito_path = parent + '/h265/h265 feito.txt'
+    backup_dir = parent + '/' + layout.backup_subdir
+    backup_path = backup_dir + '/' + name
+    output_name = layout.output_name(name)
+    output_temp = parent + '/' + layout.output_subdir + '/' + output_name
+    final_path = parent + '/' + output_name
+    feito_path = parent + '/' + layout.output_subdir + '/' + layout.feito_filename
+    original_path = parent + '/' + name
 
-    logger.info(f"reorganize: backing original up to {h264_backup}")
-    dropbox.create_folder(h264_dir)
-    dropbox.move_file(original, h264_backup, allow_overwrite=True)
+    logger.info(f"reorganize: backing original up to {backup_path}")
+    dropbox.create_folder(backup_dir)
+    dropbox.move_file(original_path, backup_path, allow_overwrite=True)
 
     try:
-        logger.info(f"reorganize: swapping H.265 into {original}")
-        dropbox.move_file(h265_temp, original, allow_overwrite=False)
+        logger.info(f"reorganize: swapping output into {final_path}")
+        dropbox.move_file(output_temp, final_path, allow_overwrite=False)
     except Exception:
         logger.warning(
             f"reorganize: swap failed; rolling back backup "
-            f"from {h264_backup} to {original}"
+            f"from {backup_path} to {original_path}"
         )
         try:
-            dropbox.move_file(h264_backup, original, allow_overwrite=False)
+            dropbox.move_file(backup_path, original_path, allow_overwrite=False)
         except Exception as rollback_err:
             logger.error(
                 f"reorganize: rollback also failed: {rollback_err}. "
-                f"Original is at {h264_backup}; H.265 at {h265_temp}."
+                f"Original is at {backup_path}; output at {output_temp}."
             )
         raise
 
     try:
-        _append_feito_log(dropbox, feito_path, name, original_size, h265_size)
+        _append_feito_log(dropbox, feito_path, name, original_size, output_size)
     except Exception as log_err:
         logger.warning(f"reorganize: feito.txt append failed: {log_err}")
 
     logger.info(
-        f"reorganize complete: original at {h264_backup}, H.265 at {original}"
+        f"reorganize complete: original at {backup_path}, output at {final_path}"
     )
-    return original
+    return final_path
 
 
 def _append_feito_log(
@@ -301,17 +342,23 @@ def is_folder_complete(db: "Database", parent: str) -> FolderCompletion:
 def find_unreorganized_pairs_in_folder(
     dropbox: DropboxClient,
     parent: str,
+    layout: ReorganizeLayout = VIDEO_LAYOUT,
 ) -> list[PairCandidate]:
     """
     Single-folder version of find_unreorganized_pairs.
 
-    Lists `<parent>/`, `<parent>/h265/` and `<parent>/h264/` (each non-recursive)
-    and returns the pairs where:
-      - `<parent>/<name>`        (original) still exists
-      - `<parent>/h265/<name>`   (transcode output) exists
-      - `<parent>/h264/<name>`   (already-reorganized backup) does NOT exist
+    Lists `<parent>/`, `<parent>/<output_subdir>/` and
+    `<parent>/<backup_subdir>/` (each non-recursive) and returns the pairs
+    where:
+      - `<parent>/<name>`                       (original) still exists
+      - `<parent>/<output_subdir>/<output>`    (transcode output) exists
+      - `<parent>/<backup_subdir>/<name>`       (already-reorganized backup)
+                                                 does NOT exist
 
-    Survives missing h264/ and h265/ subfolders by treating them as empty.
+    For audio the output filename has a different extension than the
+    original (.wav → .mp3); we look it up via layout.output_name().
+
+    Survives missing subfolders by treating them as empty.
     """
     parent = parent.rstrip('/') if parent != '/' else ''
 
@@ -322,29 +369,32 @@ def find_unreorganized_pairs_in_folder(
             return []
 
     parent_entries = _safe_list(parent)
-    h265_entries = _safe_list(parent + '/h265')
-    if not h265_entries:
+    out_entries = _safe_list(parent + '/' + layout.output_subdir)
+    if not out_entries:
         return []
-    h264_entries = _safe_list(parent + '/h264')
+    backup_entries = _safe_list(parent + '/' + layout.backup_subdir)
 
-    h265_by_lower = {e.name.lower(): e for e in h265_entries}
-    h264_lower = {e.name.lower() for e in h264_entries}
+    out_by_lower = {e.name.lower(): e for e in out_entries}
+    backup_lower = {e.name.lower() for e in backup_entries}
 
     pairs: list[PairCandidate] = []
     for entry in parent_entries:
-        if entry.name.lower() == 'h265 feito.txt':
+        if entry.name.lower() == layout.feito_filename.lower():
             continue
-        h265_match = h265_by_lower.get(entry.name.lower())
-        if h265_match is None:
+        # Map the original name to its expected output name (extension may
+        # differ for audio). Match in the output subfolder.
+        expected_output = layout.output_name(entry.name)
+        out_match = out_by_lower.get(expected_output.lower())
+        if out_match is None:
             continue
-        if entry.name.lower() in h264_lower:
+        if entry.name.lower() in backup_lower:
             # Already reorganized in a previous run.
             continue
         pairs.append(PairCandidate(
             parent=parent,
             name=entry.name,
             original=entry,
-            h265=h265_match,
+            h265=out_match,
         ))
     return pairs
 
