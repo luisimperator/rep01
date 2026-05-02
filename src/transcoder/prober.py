@@ -126,6 +126,30 @@ def probe_video(
     # Detect bit depth
     bit_depth = _detect_bit_depth(video_stream, pix_fmt)
 
+    # Detect chroma subsampling from pix_fmt (or H.264 profile string fallback).
+    chroma = _detect_chroma(video_stream, pix_fmt)
+
+    # Color metadata. Ffprobe omits the field entirely when the encoder
+    # didn't write it (Sony S-Log3 from A7siii is the canonical case),
+    # so a missing key stays None and the builder will skip the flag.
+    color_primaries = video_stream.get('color_primaries')
+    color_transfer = video_stream.get('color_transfer')
+    color_space = video_stream.get('color_space')
+    color_range = video_stream.get('color_range')
+    # Normalize 'unknown' / empty / 'reserved' to None so callers don't
+    # forward useless tags.
+    def _norm(v: str | None) -> str | None:
+        if not v:
+            return None
+        s = str(v).strip().lower()
+        if s in {"unknown", "unspecified", "reserved", "n/a", ""}:
+            return None
+        return s
+    color_primaries = _norm(color_primaries)
+    color_transfer = _norm(color_transfer)
+    color_space = _norm(color_space)
+    color_range = _norm(color_range)
+
     # Audio codec
     audio_codec = audio_stream.get('codec_name') if audio_stream else None
 
@@ -154,6 +178,11 @@ def probe_video(
         has_subtitles=has_subtitles,
         audio_codec=audio_codec,
         timecode=timecode,
+        chroma=chroma,
+        color_primaries=color_primaries,
+        color_transfer=color_transfer,
+        color_space=color_space,
+        color_range=color_range,
     )
 
     # Check if already HEVC (R1)
@@ -175,6 +204,29 @@ def _parse_frame_rate(rate_str: str) -> float:
         return float(rate_str)
     except (ValueError, ZeroDivisionError):
         return 30.0
+
+
+def _detect_chroma(video_stream: dict[str, Any], pix_fmt: str) -> str:
+    """Detect chroma subsampling — '420' | '422' | '444'.
+
+    pix_fmt is the canonical signal (yuv420p, yuv422p10le, yuv444p, etc.).
+    H.264 'profile' strings ('High 4:2:2', 'High 4:4:4 Predictive') are a
+    secondary fallback when pix_fmt isn't recognized.
+    """
+    pf = (pix_fmt or "").lower()
+    if "444" in pf:
+        return "444"
+    if "422" in pf:
+        return "422"
+    if "420" in pf:
+        return "420"
+
+    profile = (video_stream.get("profile") or "").lower()
+    if "4:4:4" in profile:
+        return "444"
+    if "4:2:2" in profile:
+        return "422"
+    return "420"  # safe default
 
 
 def _detect_bit_depth(video_stream: dict[str, Any], pix_fmt: str) -> int:

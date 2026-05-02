@@ -130,6 +130,19 @@ legacy_reorganize_delete_wav_after_seconds: 300
 # version history.
 cleanup_dot_underscore: true
 cleanup_dot_underscore_delete_after_seconds: 300
+# Run a recursive sweep across dropbox_root every N scans to catch ._
+# files that arrived AFTER a per-folder reorganize batch already ran.
+# 0 disables the periodic sweep (only per-batch + manual trigger via
+# the dashboard "Sweep ._ now" button will clean). Default 1 = every scan.
+cleanup_dot_underscore_sweep_every_n_scans: 1
+
+# DANGER: when ON, sources with 4:2:2 chroma keep 4:2:2 on output.
+# Forces libx265 (CPU) for those jobs because QSV / NVENC consumer
+# hardware does not implement HEVC Main 4:2:2. Encoding is roughly
+# 10x slower (4K 10-bit 4:2:2 ~0.1-0.2x real-time on a strong CPU).
+# Default OFF: all output goes 4:2:0 main10 / main12 — fast on QSV.
+# Flip ON only for masters that need chroma fidelity (graphics, key).
+preserve_chroma_422: false
 # Cleanup is scoped to these folder names (case-insensitive, last path
 # segment match). ATEM writes resource forks specifically into these.
 dot_underscore_target_folder_names:

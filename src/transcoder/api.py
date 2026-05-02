@@ -225,6 +225,32 @@ def _build_handler(api: ApiServer):
             if route == "/api/retry-failed":
                 count = api.db.reset_failed_jobs()
                 return self._send_json({"ok": True, "reset": count})
+            if route == "/api/cleanup-dotunderscore-now":
+                # Manual one-shot sweep across the configured target folders.
+                # Useful for cleaning up the backlog of ._ files that arrived
+                # before the periodic sweep was wired up, or after the user
+                # bulk-uploads from a Mac mid-batch.
+                from .dropbox_client import make_client_from_config
+                from .reorganize import sweep_dot_underscore_under_root
+                cfg = api.config
+                try:
+                    dropbox = make_client_from_config(cfg)
+                    results = sweep_dot_underscore_under_root(
+                        dropbox,
+                        cfg.dropbox_root,
+                        cfg.cleanup_dot_underscore_delete_after_seconds,
+                        cfg.dot_underscore_target_folder_names,
+                        max_size_bytes=cfg.dot_underscore_max_size_bytes,
+                    )
+                    total = sum(results.values()) if results else 0
+                    return self._send_json({
+                        "ok": True,
+                        "folders_touched": len(results),
+                        "files_quarantined": total,
+                        "details": results,
+                    })
+                except Exception as e:
+                    return self._send_json({"ok": False, "error": str(e)})
             if route == "/api/settings":
                 body = self._read_json_body()
                 try:
@@ -548,6 +574,11 @@ _SETTINGS_KNOBS: dict[str, dict] = {
         "yaml_key": "concurrency.audio_workers",
         "label": "Parallel audio (libmp3lame) workers",
     },
+    "preserve_chroma_422": {
+        "type": "bool",
+        "yaml_key": "preserve_chroma_422",
+        "label": "Preserve Chroma 4:2:2 (forces libx265 — ~10x slower)",
+    },
     "cleanup_dot_underscore": {
         "type": "bool",
         "yaml_key": "cleanup_dot_underscore",
@@ -620,6 +651,7 @@ def _settings_payload(api: ApiServer) -> dict:
             "legacy_reorganize_delete_wav_after_seconds": cfg.legacy_reorganize_delete_wav_after_seconds,
             "audio_enabled": cfg.audio.enabled,
             "audio_workers": cfg.concurrency.audio_workers,
+            "preserve_chroma_422": cfg.preserve_chroma_422,
             "cleanup_dot_underscore": cfg.cleanup_dot_underscore,
             "cleanup_dot_underscore_delete_after_seconds": cfg.cleanup_dot_underscore_delete_after_seconds,
             "dropbox_root": cfg.dropbox_root,
