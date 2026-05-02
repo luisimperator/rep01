@@ -2,6 +2,41 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.3.2
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+SAFETY: cleanup de h264/wav valida sucessor antes de deletar
+
+  [SAFETY] Pra cada arquivo no h264/ ou wav/, valida que o
+           sucessor esperado existe no parent ANTES de deletar.
+
+  ANTES: schedule_h264_delete listava o backup folder e deletava
+         tudo dentro (excluindo o audit log). Risco hipotetico:
+         se reorganize_pair tivesse falhado pra alguns arquivos do
+         lote, o cleanup dispararia mesmo assim em batches futuros
+         e o backup desses arquivos seria perdido. (Dropbox version
+         history e backstop, mas nao licenca pra ser irresponsavel.)
+
+  AGORA: schedule_h264_delete aceita um successor_resolver opcional.
+         No worker uploader e no _reorganize_run a gente passa:
+           VIDEO_LAYOUT -> _video_successor_name (mesmo nome)
+           AUDIO_LAYOUT -> _audio_successor_name (.wav -> .mp3)
+         Pra cada arquivo no backup folder:
+           - calcula sucessor esperado
+           - lista o parent uma vez
+           - se sucessor existe -> safe to delete
+           - se nao existe -> SKIP esse arquivo (warning logado)
+
+         A pasta `ponto tracinho/` (cleanup de ._) continua sem
+         resolver — esses items nao tem sucessor por design.
+
+         Bonus: se a listagem do parent falhar (rede), aborta o
+         cleanup INTEIRO em vez de deletar as cegas. Tenta de novo
+         no proximo batch.
+
+================================================================================
+
 Versão: 6.3.1
 Data: 02/05/2026
 --------------------------------------------------------------------------------

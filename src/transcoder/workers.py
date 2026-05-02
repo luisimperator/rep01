@@ -1244,11 +1244,21 @@ class UploadWorker(BaseWorker):
         # data. The delay knob is layout-specific (h264 vs wav).
         if delete_delay > 0 and succeeded == len(pairs):
             backup_dir = (parent.rstrip('/') + '/' + layout.backup_subdir) if parent else '/' + layout.backup_subdir
+            # Pick the successor name resolver matching this layout. The
+            # cleanup will skip any backup whose corresponding output is
+            # missing from the parent — guards against stray files that
+            # weren't part of this batch.
+            from .reorganize import _audio_successor_name, _video_successor_name
+            resolver = _audio_successor_name if layout is AUDIO_LAYOUT else _video_successor_name
             logger.info(
                 f"[{self.name}] Scheduling deletion of {backup_dir} in {delete_delay}s "
-                f"(Dropbox version history preserves the backups)"
+                f"(Dropbox version history preserves the backups; "
+                f"successor-existence check active)"
             )
-            schedule_h264_delete(self.dropbox, backup_dir, delete_delay)
+            schedule_h264_delete(
+                self.dropbox, backup_dir, delete_delay,
+                successor_resolver=resolver,
+            )
 
         # Sweep `._*` resource forks out of the same parent. Best-effort
         # housekeeping; only runs on a fully-successful batch so we don't

@@ -410,6 +410,7 @@ def schedule_h264_delete(
     dropbox: DropboxClient,
     dir_path: str,
     delay_seconds: int,
+    successor_resolver: "Callable[[str], str] | None" = None,
 ) -> None:
     """
     Spawn a background daemon thread that sleeps `delay_seconds` and then
@@ -420,6 +421,19 @@ def schedule_h264_delete(
     (so the parent stays clean) listing every file that was removed plus the
     deletion timestamp. Subsequent batches append a new section to the same
     file. Originals are recoverable via Dropbox version history.
+
+    SAFETY (when `successor_resolver` is provided): for each file in
+    `dir_path`, look up `successor_resolver(filename)` in the parent folder
+    BEFORE deleting. If the expected successor isn't there, skip just that
+    file (logged) — we never delete a backup whose original was supposed
+    to take its place but didn't. This guards against:
+      - A reorganize batch that succeeded for some pairs but failed for
+        others (the successful ones get cleaned, failed backups stay).
+      - Manual intervention between schedule + execution that removed
+        the swapped file from the parent.
+      - Stale schedule lingering after a folder was already cleaned up.
+    Pass `None` (default) to disable the check — used for ponto tracinho
+    where the items being deleted have no successor by design.
 
     Errors are logged, never raised.
     """
@@ -448,6 +462,51 @@ def schedule_h264_delete(
             logger.info(
                 f"reorganize: {dir_path} already empty (or only audit log), "
                 f"nothing to delete"
+            )
+            return
+
+        # SAFETY: drop any file whose expected successor is missing from
+        # the parent folder. Best to bail conservatively here than risk
+        # deleting an unrecoverable original (Dropbox history is a
+        # backstop, not a license to be reckless).
+        skipped_no_successor: list[str] = []
+        if successor_resolver is not None:
+            parent_path = str(PurePosixPath(dir_path).parent)
+            try:
+                parent_entries = list(
+                    dropbox.list_folder(parent_path, recursive=False)
+                )
+                parent_lower = {e.name.lower() for e in parent_entries}
+            except Exception as e:
+                logger.warning(
+                    f"reorganize: couldn't list parent {parent_path} for "
+                    f"successor check ({e}); ABORTING cleanup of {dir_path} "
+                    f"to avoid risk of orphan deletion. Will retry next batch."
+                )
+                return
+
+            safe = []
+            for entry in files_to_delete:
+                expected = successor_resolver(entry.name)
+                if expected.lower() in parent_lower:
+                    safe.append(entry)
+                else:
+                    skipped_no_successor.append(entry.name)
+            files_to_delete = safe
+
+            if skipped_no_successor:
+                logger.warning(
+                    f"reorganize: skipped {len(skipped_no_successor)} file(s) "
+                    f"in {dir_path} — no matching successor in {parent_path}: "
+                    f"{skipped_no_successor[:5]}"
+                    + (f" (+{len(skipped_no_successor)-5} more)"
+                       if len(skipped_no_successor) > 5 else "")
+                )
+
+        if not files_to_delete:
+            logger.info(
+                f"reorganize: nothing safe to delete in {dir_path} "
+                f"(skipped {len(skipped_no_successor)} for missing successor)"
             )
             return
 
@@ -485,6 +544,16 @@ def schedule_h264_delete(
         daemon=True,
     )
     t.start()
+
+
+def _video_successor_name(backup_name: str) -> str:
+    """For h264/<name>, expect <name> in the parent (same name)."""
+    return backup_name
+
+
+def _audio_successor_name(backup_name: str) -> str:
+    """For wav/<stem>.wav, expect <stem>.mp3 in the parent."""
+    return PurePosixPath(backup_name).stem + ".mp3"
 
 
 def _write_h264_deletion_log(
