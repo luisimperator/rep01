@@ -2,6 +2,32 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.2.3
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+DASHBOARD: Copy log funciona em iPhone Safari sobre HTTP
+
+  [BUGFIX] Botoes Copy log / Copy last 2000 falhavam silenciosamente
+           em browsers mobile via Tailscale
+  ------------------------------------------------------------------
+  ANTES: o handler chamava navigator.clipboard.writeText() direto.
+         iOS Safari (e Chrome mobile via WKWebView) so honra esse
+         API quando window.isSecureContext === true, ou seja
+         HTTPS ou localhost. O dashboard via Tailscale e HTTP
+         (100.x.y.z), entao o write era rejeitado em silencio e o
+         botao "fazia nada".
+
+  AGORA: helper copyText(text) tenta o API moderno em secure
+         context, e cai pro padrao classico textarea + execCommand
+         ("copy") em HTTP. Esse caminho funciona em iOS Safari /
+         Chrome mobile / qualquer browser de PC mesmo sem TLS
+         desde que a chamada saia de um user gesture (clique do
+         botao). Aplica tambem ao botao Copy do "Open on phone /
+         iPad" no painel de LAN access.
+
+================================================================================
+
 Versão: 6.2.2
 Data: 02/05/2026
 --------------------------------------------------------------------------------

@@ -840,21 +840,45 @@ function confirmBrowse() {
   toast(`Selected: ${browseCurrent}. Click Save to apply.`, 'ok');
 }
 
+// Cross-browser clipboard write that works on HTTP (Tailscale, LAN) and on
+// iOS Safari, which silently rejects navigator.clipboard.writeText() outside
+// secure contexts. Falls back to the legacy textarea + execCommand("copy")
+// pattern, which iOS still honors when called from a user gesture.
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve, reject) => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '0';
+    ta.style.left = '0';
+    ta.style.width = '1px';
+    ta.style.height = '1px';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    // iOS quirks: focus + setSelectionRange — plain .select() doesn't
+    // surface the selection on Safari mobile.
+    ta.focus();
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    let ok = false;
+    try { ok = document.execCommand('copy'); }
+    catch (e) { /* fall through */ }
+    document.body.removeChild(ta);
+    if (ok) resolve();
+    else reject(new Error('execCommand("copy") returned false'));
+  });
+}
+
 async function copyLog(n) {
   const lines = n || 200;
   try {
     const r = await fetchJSON('/api/log?lines=' + lines);
     const text = (r.lines || []).join('\n');
-    if (!navigator.clipboard) {
-      // Fallback: select the visible <pre> and let user Ctrl+C
-      const sel = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(document.getElementById('log'));
-      sel.removeAllRanges(); sel.addRange(range);
-      toast('Selected log — press Ctrl+C', 'ok');
-      return;
-    }
-    await navigator.clipboard.writeText(text);
+    await copyText(text);
     toast(`Copied ${(r.lines || []).length} log lines to clipboard`, 'ok');
   } catch (e) {
     toast('Copy failed: ' + e.message, 'err');
@@ -952,7 +976,7 @@ function renderLanCard(s) {
       const full = link(url);
       body += `<div style="display:flex;gap:.6em;align-items:center;flex-wrap:wrap;">
         <code style="background:var(--panel-2);padding:.3em .6em;border-radius:4px;flex:1;min-width:0;word-break:break-all;">${escapeHtml(full)}</code>
-        <button onclick="navigator.clipboard.writeText('${escapeHtml(full)}').then(()=>toast('Copied','ok'))">Copy</button>
+        <button onclick="copyText('${escapeHtml(full)}').then(()=>toast('Copied','ok')).catch(e=>toast('Copy failed: '+e.message,'err'))">Copy</button>
       </div>`;
     }
     body += `</div>`;
