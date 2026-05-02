@@ -2,6 +2,25 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.29
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+DASHBOARD: clarificar opcao "no wait" no reorganize
+
+  [UX] Dropdown "Skip reorganize for active folders"
+  -------------------------------------------------
+  ANTES: opcao 0 mostrava "always", com label "Skip reorganize for
+         active folders". Confuso: parecia "sempre pular" quando na
+         verdade significa "nunca pular = reorganize imediato".
+
+  AGORA: label virou "Wait before reorganize (skip if folder still
+         active)" e a opcao 0 mostra "no wait (reorganize immediately)".
+         Hint explica explicitamente que "no wait" reorganiza todo job
+         independente de atividade da pasta.
+
+================================================================================
+
 Versão: 6.0.28
 Data: 02/05/2026
 --------------------------------------------------------------------------------
