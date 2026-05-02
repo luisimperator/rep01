@@ -603,7 +603,7 @@ async function renderSettings() {
       <select id="set-tw">
         ${[1,2,3,4].map(v => `<option value="${v}" ${v === s.transcode_workers ? 'selected' : ''}>${v}</option>`).join('')}
       </select>
-      <span class="hint">1 = max QSV speed. Higher splits the encoder (slower per job).</span>
+      <span class="hint">1 = max QSV speed. Higher splits the encoder (slower per job). Daemon restart needed after change.</span>
     </div>
     <div class="field">
       <label for="set-dw">${lbl('download_workers', 'Parallel downloads')}</label>
