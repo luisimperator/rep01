@@ -538,6 +538,21 @@ async function renderSettings() {
       <span class="hint">Same idea as the /h264 deletion but for the audio pipeline. Default 5 min.</span>
     </div>
     <div class="field">
+      <label>${lbl('cleanup_dot_underscore', "Quarantine ._ macOS metadata into 'ponto tracinho/'")}</label>
+      <label class="switch">
+        <input id="set-cleanup-dotu" type="checkbox" ${s.cleanup_dot_underscore ? 'checked' : ''}>
+        <span class="track"></span>
+        <span style="color: var(--muted); font-size: .9em">After every per-folder reorganize batch</span>
+      </label>
+    </div>
+    <div class="field">
+      <label for="set-cleanup-dotu-del">${lbl('cleanup_dot_underscore_delete_after_seconds', "Delete 'ponto tracinho/' after (seconds)")}</label>
+      <select id="set-cleanup-dotu-del">
+        ${[0,30,60,300,1800,3600,86400].map(v => `<option value="${v}" ${v === s.cleanup_dot_underscore_delete_after_seconds ? 'selected' : ''}>${v === 0 ? 'keep forever' : v < 60 ? v + 's' : v < 3600 ? Math.round(v/60) + 'min' : v < 86400 ? Math.round(v/3600) + 'h' : '24h'}</option>`).join('')}
+      </select>
+      <span class="hint">Quarantined ._ files survive in Dropbox version history regardless.</span>
+    </div>
+    <div class="field">
       <label for="set-health">${lbl('health_check_interval_minutes', 'Self-health agent interval (min)')}</label>
       <select id="set-health">
         ${[1,5,10,30,60,180,360].map(v => `<option value="${v}" ${v === s.health_check_interval_minutes ? 'selected' : ''}>${v === 1 ? '1 minute' : v + ' minutes'}</option>`).join('')}
@@ -593,6 +608,8 @@ async function saveSettings() {
     legacy_reorganize_delete_wav_after_seconds: parseInt(document.getElementById('set-wav-del').value),
     audio_enabled: document.getElementById('set-audio-enabled').checked,
     audio_workers: parseInt(document.getElementById('set-audio-workers').value),
+    cleanup_dot_underscore: document.getElementById('set-cleanup-dotu').checked,
+    cleanup_dot_underscore_delete_after_seconds: parseInt(document.getElementById('set-cleanup-dotu-del').value),
     health_check_interval_minutes: parseInt(document.getElementById('set-health').value),
     api_bind: document.getElementById('set-bind').value,
     transcode_workers: parseInt(document.getElementById('set-tw').value),

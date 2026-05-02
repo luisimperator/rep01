@@ -122,6 +122,15 @@ legacy_reorganize_delete_h264_after_seconds: 0
 # Default 300 = 5 minutes — keep just long enough to confirm the MP3 is fine.
 legacy_reorganize_delete_wav_after_seconds: 300
 
+# After every successful per-folder reorganize batch, sweep `._*` macOS
+# resource-fork files (4 KB Finder metadata that the ATEM scatters around)
+# into a `<parent>/ponto tracinho/` quarantine subfolder, then schedule
+# deletion of that subfolder. Best-effort housekeeping — failures don't
+# abort the pipeline. Quarantined files are recoverable via Dropbox
+# version history.
+cleanup_dot_underscore: true
+cleanup_dot_underscore_delete_after_seconds: 300
+
 # WAV → MP3 192kbps pipeline. CPU-only (libmp3lame), runs in parallel with
 # the QSV/NVENC video transcoder so they don't compete for the encoder.
 # Discovery is locked to folders named exactly 'Audio Source Files'

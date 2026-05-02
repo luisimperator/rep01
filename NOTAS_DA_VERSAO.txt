@@ -2,6 +2,40 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.35
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+CLEANUP: ._ macOS resource forks (lixo de 4 KB que a ATEM espalha)
+
+  [FEATURE] Quarantine + auto-delete dos arquivos ._
+  --------------------------------------------------
+  Apos cada batch reorganize per-folder bem-sucedido, o daemon agora
+  varre o `._*` (resource forks Finder, ~4 KB cada) que ficam
+  espalhados pela pasta. Eles sao movidos pra subpasta
+  `<parent>/ponto tracinho/`, e essa subpasta tem deletion agendada
+  apos N segundos.
+
+  Fluxo:
+    1. Reorganize batch termina (15/15 swapped, por exemplo)
+    2. Cleanup lista <parent>/ nao-recursivo, filtra entries que
+       comecam com `._`
+    3. Cria <parent>/ponto tracinho/ (idempotent)
+    4. Move cada `._<arquivo>` pra la
+    5. Agenda delete da pasta apos delay configurado
+       (cleanup_dot_underscore_delete_after_seconds, default 300s)
+
+  Configuracoes novas:
+    - cleanup_dot_underscore: true/false (default true)
+    - cleanup_dot_underscore_delete_after_seconds: int (default 300)
+    - Ambas expostas no dashboard
+
+  Best-effort: falhas individuais (move falha pra um arquivo) sao
+  logadas mas nao abortam o pipeline. Arquivos quarantinados sao
+  recuperaveis via Dropbox version history sempre.
+
+================================================================================
+
 Versão: 6.0.34
 Data: 02/05/2026
 --------------------------------------------------------------------------------
