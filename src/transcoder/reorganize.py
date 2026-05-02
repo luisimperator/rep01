@@ -401,52 +401,80 @@ def find_unreorganized_pairs_in_folder(
 
 def schedule_h264_delete(
     dropbox: DropboxClient,
-    h264_dir: str,
+    dir_path: str,
     delay_seconds: int,
 ) -> None:
     """
     Spawn a background daemon thread that sleeps `delay_seconds` and then
-    deletes the entire h264/ backup folder. Dropbox keeps the originals in
-    its 30-day version history (Plus) or longer (Business), so the user can
-    always restore. Errors are logged, never raised.
+    deletes every file inside `dir_path` while keeping the folder itself.
+    Works for any backup/quarantine subfolder — h264/, wav/, ponto tracinho/.
 
-    Before deleting, writes/appends an audit log to
-    `<parent>/h264 deletado.txt` listing every backup file (name + size +
-    deletion timestamp). The log survives the deletion and gives the user a
-    paper trail to recover from Dropbox history if needed.
+    A `<basename> deletado.txt` audit log is written INSIDE the same folder
+    (so the parent stays clean) listing every file that was removed plus the
+    deletion timestamp. Subsequent batches append a new section to the same
+    file. Originals are recoverable via Dropbox version history.
+
+    Errors are logged, never raised.
     """
     if delay_seconds <= 0:
         return
 
-    parent = str(PurePosixPath(h264_dir).parent)
-    audit_log_path = parent.rstrip('/') + '/h264 deletado.txt' if parent != '/' else '/h264 deletado.txt'
+    folder_basename = PurePosixPath(dir_path).name
+    audit_log_filename = f"{folder_basename} deletado.txt"
+    audit_log_path = dir_path.rstrip('/') + '/' + audit_log_filename
 
     def _worker() -> None:
         time.sleep(delay_seconds)
-        try:
-            _write_h264_deletion_log(dropbox, h264_dir, audit_log_path, delay_seconds)
-        except Exception as log_err:
-            # Don't block the delete on a log failure.
-            logger.warning(f"reorganize: failed to write deletion log {audit_log_path}: {log_err}")
 
         try:
-            existed = dropbox.delete_file(h264_dir)
-            if existed:
-                logger.info(
-                    f"reorganize: deleted h264 backup folder {h264_dir} "
-                    f"after {delay_seconds}s (audit log at {audit_log_path}; "
-                    f"recoverable via Dropbox history)"
-                )
-            else:
-                logger.info(
-                    f"reorganize: h264 folder already gone, skipping delete: {h264_dir}"
-                )
+            entries = list(dropbox.list_folder(dir_path, recursive=False))
         except Exception as e:
-            logger.warning(f"reorganize: failed to delete {h264_dir}: {e}")
+            logger.warning(f"reorganize: list {dir_path} for cleanup failed: {e}")
+            return
+
+        # Skip the audit log itself so we never delete our own paper trail.
+        files_to_delete = [
+            e for e in entries
+            if e.name.lower() != audit_log_filename.lower()
+        ]
+        if not files_to_delete:
+            logger.info(
+                f"reorganize: {dir_path} already empty (or only audit log), "
+                f"nothing to delete"
+            )
+            return
+
+        # Write the log BEFORE deletion so the file list is captured even if
+        # the per-file deletes fail halfway.
+        try:
+            _write_h264_deletion_log(
+                dropbox, dir_path, audit_log_path,
+                files_to_delete, delay_seconds, folder_basename,
+            )
+        except Exception as log_err:
+            logger.warning(
+                f"reorganize: failed to write deletion log {audit_log_path}: {log_err}"
+            )
+
+        deleted = 0
+        for entry in files_to_delete:
+            file_path = dir_path.rstrip('/') + '/' + entry.name
+            try:
+                dropbox.delete_file(file_path)
+                deleted += 1
+            except Exception as e:
+                logger.warning(f"reorganize: delete {file_path} failed: {e}")
+
+        logger.info(
+            f"reorganize: cleaned {deleted}/{len(files_to_delete)} file(s) "
+            f"inside {dir_path} after {delay_seconds}s "
+            f"(folder kept; audit log at {audit_log_path}; "
+            f"recoverable via Dropbox history)"
+        )
 
     t = threading.Thread(
         target=_worker,
-        name=f"h264-delete-{h264_dir}",
+        name=f"backup-cleanup-{dir_path}",
         daemon=True,
     )
     t.start()
@@ -454,42 +482,38 @@ def schedule_h264_delete(
 
 def _write_h264_deletion_log(
     dropbox: DropboxClient,
-    h264_dir: str,
+    dir_path: str,
     audit_log_path: str,
+    files: list,
     delay_seconds: int,
+    folder_basename: str,
 ) -> None:
-    """List the h264/ backups about to be deleted and append a record to the
-    audit log file. Idempotent across multiple deletions in the same parent —
-    each batch appends a new section."""
-    try:
-        entries = list(dropbox.list_folder(h264_dir, recursive=False))
-    except Exception:
-        entries = []
-
-    if not entries:
-        # Folder is empty or unreadable — nothing meaningful to log.
+    """Append a deletion record to the audit log inside `dir_path`. Receives
+    the pre-computed file list so we don't list twice — the caller already
+    excluded the audit log itself from the deletion set."""
+    if not files:
         return
 
-    files = sorted(entries, key=lambda e: e.name.lower())
-    total_bytes = sum(e.size for e in files)
+    files_sorted = sorted(files, key=lambda e: e.name.lower())
+    total_bytes = sum(e.size for e in files_sorted)
 
     now_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    name_width = max((len(e.name) for e in files), default=4)
+    name_width = max((len(e.name) for e in files_sorted), default=4)
     name_width = max(name_width, len("FILENAME"))
 
     lines = [
         "================================================================",
         f"DELETED AT: {now_str}",
-        f"FOLDER:     {h264_dir}",
-        f"REASON:     legacy_reorganize_delete_h264_after_seconds = {delay_seconds}s",
+        f"FOLDER:     {dir_path}",
+        f"REASON:     scheduled cleanup after {delay_seconds}s",
         f"RECOVERY:   Dropbox version history (Plus 30d / Business 180d)",
         "",
         f"{'FILENAME'.ljust(name_width)}    SIZE",
     ]
-    for e in files:
+    for e in files_sorted:
         lines.append(f"{e.name.ljust(name_width)}    {_format_size(e.size)}")
     lines.append("")
-    lines.append(f"Total: {len(files)} file(s), {_format_size(total_bytes)} freed")
+    lines.append(f"Total: {len(files_sorted)} file(s), {_format_size(total_bytes)} freed")
     lines.append("")
     lines.append("")
     new_section = "\n".join(lines)
@@ -498,12 +522,13 @@ def _write_h264_deletion_log(
     if not existing:
         # First time — add a header.
         header = (
-            "HeavyDrops Transcoder — h264 backup deletion log\n"
-            "=================================================\n"
+            f"HeavyDrops Transcoder — {folder_basename}/ cleanup log\n"
+            f"{'=' * (40 + len(folder_basename))}\n"
             "\n"
-            "Each section below records one batch deletion of the h264/\n"
-            "backup folder that sat next to this file. Files are recoverable\n"
-            "via Dropbox version history for the timeframe shown.\n"
+            f"Each section below records one batch cleanup of the {folder_basename}/\n"
+            "folder. The folder itself is preserved; only the files inside are\n"
+            "removed. Files are recoverable via Dropbox version history for the\n"
+            "timeframe shown.\n"
             "\n"
             "\n"
         )
