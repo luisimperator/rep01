@@ -466,6 +466,20 @@ class Config(BaseModel):
         default=True,
         description="Delete local staging files after successful upload"
     )
+    preserve_chroma_422: bool = Field(
+        default=False,
+        description=(
+            "When the source is 4:2:2 (typically ATEM ProRes proxies or "
+            "A7siii XAVC-S-I High 4:2:2 in 10-bit), preserve the chroma "
+            "subsampling on output instead of downsampling to 4:2:0. "
+            "DANGER: forces libx265 (CPU) for those jobs because QSV / "
+            "NVENC consumer hardware does not implement HEVC Main 4:2:2. "
+            "Encoding is roughly 10x slower (4K 10-bit 4:2:2 at preset "
+            "medium runs ~0.1-0.2x real-time on a strong CPU). Leave OFF "
+            "for the default workflow; flip ON only for masters that "
+            "need the chroma fidelity (graphics, chroma key)."
+        ),
+    )
     legacy_reorganize: bool = Field(
         default=True,
         description=(
@@ -526,6 +540,17 @@ class Config(BaseModel):
             "Delay before the `ponto tracinho` quarantine folder is "
             "cleaned (folder kept, files inside deleted). 0 = keep "
             "forever. Default 300 = 5 minutes."
+        ),
+    )
+    cleanup_dot_underscore_sweep_every_n_scans: int = Field(
+        default=1,
+        ge=0,
+        description=(
+            "Run a full recursive sweep across dropbox_root every N scans "
+            "to catch ._ files that arrived AFTER a per-folder reorganize "
+            "batch already ran. 0 disables the periodic sweep entirely "
+            "(only the per-batch hook + manual /api/cleanup-dotunderscore-"
+            "now endpoint will clean). Default 1 = sweep every scan."
         ),
     )
     dot_underscore_target_folder_names: list[str] = Field(

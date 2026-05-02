@@ -157,6 +157,7 @@
   <button onclick="post('/api/scan-now')">Scan now</button>
   <button id="pause-btn" onclick="togglePause()">Pause</button>
   <button onclick="post('/api/retry-failed')">Retry FAILED</button>
+  <button onclick="sweepDotUnderscoreNow()">Sweep ._ now</button>
   <button class="danger" onclick="killFfmpeg()">Kill all ffmpeg</button>
   <button class="danger" onclick="restartDaemon()">Restart daemon</button>
 </div>
@@ -538,6 +539,15 @@ async function renderSettings() {
       <span class="hint">Same idea as the /h264 deletion but for the audio pipeline. Default 5 min.</span>
     </div>
     <div class="field">
+      <label style="color: #f59e0b; font-weight: 600;">${lbl('preserve_chroma_422', '⚠ Preserve Chroma 4:2:2 (rare — masters only)')}</label>
+      <label class="switch">
+        <input id="set-preserve-422" type="checkbox" ${s.preserve_chroma_422 ? 'checked' : ''} onchange="confirm422Toggle(this)">
+        <span class="track"></span>
+        <span style="color: var(--muted); font-size: .9em">${s.preserve_chroma_422 ? 'ON — using libx265 for 4:2:2 sources' : 'OFF — all output as 4:2:0 main10 (default)'}</span>
+      </label>
+      <span class="hint" style="color: #f59e0b;">⚠ Forces libx265 (CPU) for 4:2:2 sources. Encoding is roughly <b>10× slower</b> than QSV — a 4K 10-bit 4:2:2 clip of 1h becomes 5-10h of transcode. Only enable for masters that need chroma fidelity (graphics, chroma key). Default OFF.</span>
+    </div>
+    <div class="field">
       <label>${lbl('cleanup_dot_underscore', "Quarantine ._ macOS metadata into 'ponto tracinho/'")}</label>
       <label class="switch">
         <input id="set-cleanup-dotu" type="checkbox" ${s.cleanup_dot_underscore ? 'checked' : ''}>
@@ -597,11 +607,29 @@ async function renderSettings() {
       `<div class="empty err">Settings render failed: ${escapeHtml(e.message)}.<br>Try Ctrl+F5 to refresh, or check the daemon log.</div>`;
   }
 }
+function confirm422Toggle(checkbox) {
+  // Only confirm on the OFF -> ON transition. Turning OFF is harmless.
+  if (!checkbox.checked) return;
+  const ok = confirm(
+    "⚠ Preserve Chroma 4:2:2 — Are you sure?\n\n" +
+    "This forces libx265 (CPU) for any 4:2:2 source. Encoding will be roughly " +
+    "10× slower than QSV.\n\n" +
+    "A 4K 10-bit 4:2:2 file of 1h will take 5-10h to transcode.\n\n" +
+    "Only enable for masters that genuinely need 4:2:2 fidelity (graphics, " +
+    "chroma key, color correction headroom).\n\n" +
+    "Click OK to confirm, Cancel to keep OFF."
+  );
+  if (!ok) {
+    checkbox.checked = false;
+  }
+}
+
 async function saveSettings() {
   const body = {
     dropbox_root: document.getElementById('set-root').value,
     cq_value: parseInt(document.getElementById('set-cq').value),
     min_size_gb: parseFloat(document.getElementById('set-min').value),
+    preserve_chroma_422: document.getElementById('set-preserve-422').checked,
     legacy_reorganize: document.getElementById('set-reorg').checked,
     legacy_reorganize_min_age_days: parseInt(document.getElementById('set-age').value),
     legacy_reorganize_delete_h264_after_seconds: parseInt(document.getElementById('set-h264-del').value),
@@ -831,6 +859,23 @@ async function copyLog(n) {
   } catch (e) {
     toast('Copy failed: ' + e.message, 'err');
   }
+}
+
+async function sweepDotUnderscoreNow() {
+  try {
+    toast('Sweeping ._ files across configured folders...', 'info');
+    const r = await fetchJSON('/api/cleanup-dotunderscore-now', { method: 'POST' });
+    if (r.ok === false) {
+      toast('Sweep failed: ' + (r.error || 'unknown'), 'err');
+      return;
+    }
+    if ((r.files_quarantined || 0) === 0) {
+      toast('No ._ files found in target folders.', 'ok');
+    } else {
+      toast(`Quarantined ${r.files_quarantined} ._ file(s) across ${r.folders_touched} folder(s).`, 'ok');
+    }
+    setTimeout(tick, 1000);
+  } catch (e) { toast('Sweep failed: ' + e.message, 'err'); }
 }
 
 async function killFfmpeg() {

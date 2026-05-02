@@ -39,6 +39,18 @@ class VideoInfo:
     # frame as the original H.264 — critical for projects relying on
     # timecode-based sync across cameras.
     timecode: str | None = None
+    # Chroma subsampling — '420' | '422' | '444'. Derived from pix_fmt /
+    # profile in prober. Drives the per-job encoder + output pix_fmt
+    # choice when the user enables Preserve Chroma.
+    chroma: str = "420"
+    # Color metadata (None when ffprobe didn't report — e.g. Sony S-Log3
+    # which writes none of these). Builder passes through whatever exists
+    # without fabricating; for log/raw sources omitting is the correct
+    # behavior so the NLE doesn't mis-interpret the curve.
+    color_primaries: str | None = None
+    color_transfer: str | None = None
+    color_space: str | None = None
+    color_range: str | None = None  # 'tv' | 'pc' | None
 
 
 @dataclass
@@ -147,14 +159,16 @@ class FFmpegCommandBuilder:
         # without re-syncing): keep input timestamps, don't drop or dup
         # frames, don't override the input fps.
         args.extend(["-fps_mode", "passthrough"])
-        # Color metadata is carried in the bitstream by default — ffmpeg
-        # propagates BT.709/BT.2020 primaries, transfer and matrix from
-        # the source codec context to the output codec context without
-        # us asking. (Earlier versions tried to pass `-color_primaries
-        # copy` etc. but those flags are per-codec options that take
-        # literal values like 'bt709', not 'copy', and libx265 rejected
-        # them with "Error applying encoder options: Invalid argument" —
-        # see the v6.0.20 incident.)
+
+        # Color metadata passthrough. Pass each tag explicitly when the
+        # input declared it; omit when ffprobe returned None so we don't
+        # mis-tag log/raw sources. Sony A7siii in S-Log3 is the canonical
+        # case where color_primaries / color_transfer / color_space are
+        # all absent — fabricating a tag would lie to the NLE.
+        # Range is the one value we always set (defaulting to 'tv' for
+        # broadcast/limited if the source didn't say) because most
+        # encoders pick 'tv' silently anyway.
+        args.extend(self._color_metadata_args(video_info))
 
         # Video encoder settings
         args.extend(self._get_video_encoder_args(encoder, profile, video_info))
@@ -203,6 +217,89 @@ class FFmpegCommandBuilder:
             return ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
         return []
 
+    def _resolve_output_format(self, video_info: VideoInfo) -> tuple[str, str, int, str]:
+        """Decide output pix_fmt + profile + bit depth + chroma from input.
+
+        Rules (also documented in the v6.2.0 release notes):
+          - Bit depth: never downgrade. 8-bit upgrades to 10-bit because
+            x265 compresses 10-bit better with no perceptible cost (the
+            extra precision absorbs the rate-distortion penalty). 12-bit
+            inputs stay at 12. >12 caps at 12 (HEVC limit) with warning.
+          - Chroma: 4:2:0 by default. When preserve_chroma_422 is on AND
+            input is 4:2:2, output 4:2:2 (forces libx265 because QSV /
+            NVENC consumer don't support Main 4:2:2). 4:4:4 is treated
+            as 4:2:2 (still preserves more than 4:2:0) with warning.
+
+        Returns (pix_fmt, profile, bit_depth, chroma).
+        """
+        in_depth = max(8, int(video_info.bit_depth or 8))
+        if in_depth > 12:
+            logger.warning(
+                "ffmpeg: source bit_depth=%d is above HEVC's 12-bit limit; "
+                "capping output at 12-bit (bitdepth_capped_at_12)", in_depth,
+            )
+            in_depth = 12
+        # Round 9/11 to next even — HEVC profiles only define main / main10 / main12.
+        out_depth = 8 if in_depth <= 8 else (10 if in_depth <= 10 else 12)
+        # Always upgrade 8→10. x265 docs and benchmarks both confirm
+        # better compression efficiency on 10-bit even for 8-bit sources.
+        if out_depth == 8:
+            out_depth = 10
+
+        in_chroma = video_info.chroma or "420"
+        if in_chroma == "444":
+            logger.warning(
+                "ffmpeg: source chroma 4:4:4 not supported in this pipeline; "
+                "downgrading to 4:2:2 (chroma_444_downgraded)"
+            )
+            in_chroma = "422"
+
+        preserve_422 = bool(getattr(self.config, "preserve_chroma_422", False))
+        out_chroma = in_chroma if (preserve_422 and in_chroma == "422") else "420"
+
+        if out_chroma == "422":
+            pix_fmt = f"yuv422p{out_depth}le"
+            profile = "main-422-10" if out_depth == 10 else "main-422-12"
+        else:  # 420
+            pix_fmt = f"yuv420p{out_depth}le"
+            profile = "main10" if out_depth == 10 else "main12"
+
+        return pix_fmt, profile, out_depth, out_chroma
+
+    def _color_metadata_args(self, video_info: VideoInfo) -> list[str]:
+        """Build -color_* flags from probe data.
+
+        Each tag is emitted only when the input declared it. Range is the
+        one exception — most muxers / NLEs assume 'tv' so we set it
+        explicitly to match the input or default 'tv'.
+        """
+        out: list[str] = []
+        if video_info.color_primaries:
+            out.extend(["-color_primaries", video_info.color_primaries])
+        if video_info.color_transfer:
+            out.extend(["-color_trc", video_info.color_transfer])
+        if video_info.color_space:
+            out.extend(["-colorspace", video_info.color_space])
+        # Range: pass through what we have, else default tv. Sony S-Log3
+        # is the canonical "pc" (full range) source.
+        out.extend(["-color_range", video_info.color_range or "tv"])
+
+        # Heuristic info log when we suspect a log/raw camera source so
+        # the operator can confirm the daemon understood. The signature:
+        # 10-bit, primaries+transfer+space all None, range=pc.
+        if (
+            (video_info.bit_depth or 8) >= 10
+            and not video_info.color_primaries
+            and not video_info.color_transfer
+            and not video_info.color_space
+            and (video_info.color_range or "").lower() == "pc"
+        ):
+            logger.info(
+                "ffmpeg: detected likely log/raw source (e.g. Sony S-Log3) — "
+                "passing color metadata through as-is, no conversion"
+            )
+        return out
+
     def _get_video_encoder_args(
         self,
         encoder: EncoderType,
@@ -210,35 +307,37 @@ class FFmpegCommandBuilder:
         video_info: VideoInfo,
     ) -> list[str]:
         """Get video encoder arguments based on encoder and profile."""
-        from .config import TranscodeProfile
+        out_pix_fmt, out_profile, out_depth, out_chroma = self._resolve_output_format(video_info)
 
-        args: list[str] = []
-
-        # Determine if we should use 10-bit
-        use_10bit = video_info.bit_depth >= 10 or "10" in video_info.pix_fmt
+        # 4:2:2 output requires libx265 — QSV/NVENC consumer chips don't
+        # implement Main 4:2:2 10/12. Caller (workers._transcode_job)
+        # already overrode the encoder to CPU when appropriate; this
+        # function trusts that decision but logs a hard error if the
+        # combination is impossible (defensive — should never fire).
+        if out_chroma == "422" and encoder != EncoderType.CPU:
+            logger.error(
+                "ffmpeg: 4:2:2 output requires libx265 but encoder=%s — "
+                "falling back to libx265 args anyway. Job will run on CPU.",
+                encoder.value,
+            )
+            encoder = EncoderType.CPU
 
         if encoder == EncoderType.QSV:
-            args.extend(self._get_qsv_args(profile, use_10bit))
+            args = self._get_qsv_args(profile, out_pix_fmt, out_profile)
         elif encoder == EncoderType.NVENC:
-            args.extend(self._get_nvenc_args(profile, use_10bit))
+            args = self._get_nvenc_args(profile, out_pix_fmt, out_profile)
         else:  # CPU
-            args.extend(self._get_cpu_args(profile, use_10bit))
-
+            args = self._get_cpu_args(profile, out_pix_fmt, out_profile)
         return args
 
-    def _get_qsv_args(self, profile: TranscodeProfile, use_10bit: bool) -> list[str]:
-        """Get Intel QuickSync encoder arguments."""
+    def _get_qsv_args(self, profile: TranscodeProfile, pix_fmt: str, profile_str: str) -> list[str]:
+        """Get Intel QuickSync encoder arguments. QSV only handles 4:2:0
+        Main / Main10. The pix_fmt is set on the QSV-side via the encoder
+        (not via -pix_fmt because the pipeline runs in qsv_surface format
+        from -hwaccel_output_format qsv)."""
         from .config import TranscodeProfile
 
-        args = ["-c:v", "hevc_qsv"]
-
-        # Profile (main10 for 10-bit, main otherwise)
-        if use_10bit:
-            args.extend(["-profile:v", "main10"])
-        else:
-            args.extend(["-profile:v", "main"])
-
-        args.extend(["-preset", "medium"])
+        args = ["-c:v", "hevc_qsv", "-profile:v", profile_str, "-preset", "medium"]
 
         if profile == TranscodeProfile.QUALITY:
             # CQ mode with global_quality (R6).
@@ -246,12 +345,8 @@ class FFmpegCommandBuilder:
             # (anything pre-11th gen Tiger Lake) the lookahead path falls
             # back to a software/hybrid implementation that drops hevc_qsv
             # throughput from ~200 fps to ~20 fps (0.6x real-time).
-            # Removing it lets the pure-hardware fast path kick in.
-            args.extend([
-                "-global_quality:v", str(self.config.cq_value),
-            ])
+            args.extend(["-global_quality:v", str(self.config.cq_value)])
         else:  # BALANCED
-            # Bitrate mode
             args.extend([
                 "-b:v", f"{self.config.bitrate.target_mbps}M",
                 "-maxrate", f"{self.config.bitrate.max_mbps}M",
@@ -260,33 +355,18 @@ class FFmpegCommandBuilder:
 
         return args
 
-    def _get_nvenc_args(self, profile: TranscodeProfile, use_10bit: bool) -> list[str]:
-        """Get NVIDIA NVENC encoder arguments."""
+    def _get_nvenc_args(self, profile: TranscodeProfile, pix_fmt: str, profile_str: str) -> list[str]:
+        """Get NVIDIA NVENC encoder arguments. Consumer NVENC supports
+        Main / Main10 4:2:0 only — 4:2:2 / 4:4:4 are Pro-card features."""
         from .config import TranscodeProfile
 
-        args = ["-c:v", "hevc_nvenc"]
-
-        # Profile
-        if use_10bit:
-            args.extend(["-profile:v", "main10"])
-        else:
-            args.extend(["-profile:v", "main"])
-
-        # Preset (p5 is a good balance; p7 is slower/better)
-        args.extend(["-preset", "p5"])
-
-        # Tune for high quality
-        args.extend(["-tune", "hq"])
+        args = ["-c:v", "hevc_nvenc", "-profile:v", profile_str, "-preset", "p5", "-tune", "hq"]
 
         if profile == TranscodeProfile.QUALITY:
-            # VBR with CQ mode (R6)
             args.extend([
                 "-rc:v", "vbr",
                 "-cq:v", str(self.config.cq_value),
-                "-b:v", "0",  # Let CQ control quality
-            ])
-            # Optional: add maxrate for streaming compatibility
-            args.extend([
+                "-b:v", "0",
                 "-maxrate", f"{self.config.bitrate.max_mbps}M",
                 "-bufsize", f"{self.config.bitrate.bufsize_mbps}M",
             ])
@@ -298,44 +378,30 @@ class FFmpegCommandBuilder:
                 "-bufsize", f"{self.config.bitrate.bufsize_mbps}M",
             ])
 
-        # B-frames for better compression
         args.extend(["-bf", "4"])
-
         return args
 
-    def _get_cpu_args(self, profile: TranscodeProfile, use_10bit: bool) -> list[str]:
-        """Get CPU (libx265) encoder arguments."""
+    def _get_cpu_args(self, profile: TranscodeProfile, pix_fmt: str, profile_str: str) -> list[str]:
+        """Get CPU (libx265) encoder arguments. Handles every Main /
+        Main10 / Main12 / Main 4:2:2 / Main 4:4:4 combination — used as
+        the fallback for chroma-preserving jobs."""
         from .config import TranscodeProfile
 
-        args = ["-c:v", "libx265"]
-        args.extend(["-preset", "medium"])
-
-        # x265 params
-        x265_params = []
+        args = ["-c:v", "libx265", "-preset", "medium"]
+        x265_params = [f"profile={profile_str}"]
 
         if profile == TranscodeProfile.QUALITY:
-            # CRF mode (R6: equivalent to CQ 24)
             x265_params.append(f"crf={self.config.cpu_crf_equivalent}")
-            x265_params.append("aq-mode=3")  # Adaptive quantization
+            x265_params.append("aq-mode=3")
         else:  # BALANCED
-            # ABR mode
             args.extend([
                 "-b:v", f"{self.config.bitrate.target_mbps}M",
                 "-maxrate", f"{self.config.bitrate.max_mbps}M",
                 "-bufsize", f"{self.config.bitrate.bufsize_mbps}M",
             ])
 
-        # 10-bit output
-        if use_10bit:
-            args.extend(["-pix_fmt", "yuv420p10le"])
-            x265_params.append("profile=main10")
-        else:
-            args.extend(["-pix_fmt", "yuv420p"])
-
-        # Add x265 params if any
-        if x265_params:
-            args.extend(["-x265-params", ":".join(x265_params)])
-
+        args.extend(["-pix_fmt", pix_fmt])
+        args.extend(["-x265-params", ":".join(x265_params)])
         return args
 
     def _get_audio_args(self, video_info: VideoInfo) -> list[str]:

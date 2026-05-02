@@ -460,6 +460,8 @@ class Daemon:
         """Run periodic scanning; /api/scan-now shortens the inter-scan sleep."""
         assert self.scanner is not None
 
+        scans_since_dotu_sweep = 0
+
         while not self.stop_event.is_set():
             try:
                 logger.info("Starting scan...")
@@ -484,6 +486,37 @@ class Daemon:
                             "namespace": getattr(self.dropbox, "namespace", "unknown") if self.dropbox else "n/a",
                         },
                     )
+
+            # Periodic ._ sweep across the configured target folders. Catches
+            # files that arrived AFTER a per-folder reorganize batch already
+            # ran (the per-batch hook only fires once per batch). Disabled
+            # when the user sets sweep_every_n_scans = 0.
+            scans_since_dotu_sweep += 1
+            sweep_every = self.config.cleanup_dot_underscore_sweep_every_n_scans
+            if (
+                self.config.cleanup_dot_underscore
+                and self.dropbox is not None
+                and sweep_every > 0
+                and scans_since_dotu_sweep >= sweep_every
+            ):
+                scans_since_dotu_sweep = 0
+                try:
+                    from .reorganize import sweep_dot_underscore_under_root
+                    results = sweep_dot_underscore_under_root(
+                        self.dropbox,
+                        self.config.dropbox_root,
+                        self.config.cleanup_dot_underscore_delete_after_seconds,
+                        self.config.dot_underscore_target_folder_names,
+                        max_size_bytes=self.config.dot_underscore_max_size_bytes,
+                    )
+                    if results:
+                        total = sum(results.values())
+                        logger.info(
+                            f"._ sweep: quarantined {total} file(s) across "
+                            f"{len(results)} folder(s)"
+                        )
+                except Exception as e:
+                    logger.warning(f"._ sweep failed: {e}")
 
             # Sleep until either stop or scan-now trigger fires
             self.scan_trigger.clear()

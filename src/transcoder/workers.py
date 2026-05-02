@@ -478,6 +478,24 @@ class TranscodeWorker(BaseWorker):
         # Select encoder
         encoder = self.encoder or select_best_encoder(self.config, verify=False)
 
+        # Per-job override: when the operator enabled Preserve Chroma AND
+        # the source is 4:2:2, force libx265 because QSV/NVENC consumer
+        # hardware doesn't implement HEVC Main 4:2:2. Worker also disables
+        # the QSV input hwaccel via the encoder switch below — the
+        # ffmpeg_builder branches on encoder type, so changing it here is
+        # enough.
+        if (
+            getattr(self.config, "preserve_chroma_422", False)
+            and probe_result.video_info.chroma == "422"
+            and encoder != EncoderType.CPU
+        ):
+            logger.warning(
+                f"[{self.name}] Preserve Chroma is ON and source is 4:2:2 — "
+                f"forcing libx265 (CPU). This job will run roughly 10x slower "
+                f"than QSV/NVENC. File: {job.dropbox_path}"
+            )
+            encoder = EncoderType.CPU
+
         # Setup output path
         job_dir = input_path.parent
         output_path = job_dir / f"output{input_path.suffix}"

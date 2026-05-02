@@ -561,6 +561,60 @@ def _format_size(num_bytes: int) -> str:
 PONTO_TRACINHO_SUBDIR = "ponto tracinho"
 
 
+def sweep_dot_underscore_under_root(
+    dropbox: DropboxClient,
+    dropbox_root: str,
+    delete_after_seconds: int,
+    target_folder_names: list[str],
+    max_size_bytes: int = 10240,
+) -> dict[str, int]:
+    """Walk `dropbox_root` recursively and clean ._ files in every folder
+    whose name matches one of `target_folder_names` (case-insensitive).
+
+    Designed to be called on a periodic schedule from the scan loop AND
+    on demand from the dashboard ('Sweep now' button). Either way, this
+    closes the gap where ._ files arrive AFTER the per-folder reorganize
+    batch already ran — those files would otherwise stay orphaned because
+    cleanup only fires at batch end.
+
+    Returns {parent_path: count_quarantined} for every folder we touched.
+    Empty dict if nothing was found. Errors per-folder are logged but
+    don't abort the sweep.
+    """
+    targets_lower = {n.lower() for n in target_folder_names}
+    seen_parents: set[str] = set()
+    results: dict[str, int] = {}
+
+    try:
+        entries = list(dropbox.list_folder(dropbox_root, recursive=True))
+    except Exception as e:
+        logger.warning(f"sweep_dot_underscore: list root failed: {e}")
+        return results
+
+    # Group entries by parent so we only call cleanup once per matching folder.
+    for entry in entries:
+        parent = str(PurePosixPath(entry.path).parent)
+        if parent in seen_parents:
+            continue
+        if PurePosixPath(parent).name.lower() not in targets_lower:
+            continue
+        seen_parents.add(parent)
+        try:
+            moved = cleanup_dot_underscore_files(
+                dropbox,
+                parent,
+                delete_after_seconds,
+                target_folder_names=target_folder_names,
+                max_size_bytes=max_size_bytes,
+            )
+            if moved > 0:
+                results[parent] = moved
+        except Exception as e:
+            logger.warning(f"sweep_dot_underscore: {parent} failed: {e}")
+
+    return results
+
+
 def cleanup_dot_underscore_files(
     dropbox: DropboxClient,
     parent: str,

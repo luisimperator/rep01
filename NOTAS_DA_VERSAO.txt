@@ -2,6 +2,94 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.2.0
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+MINOR BUMP: ATEM ._ sweep periódico + roteamento bit-depth/chroma + color
+metadata passthrough
+
+  Três entregas relacionadas, todas independentes mas cobrindo o
+  pipeline antes da chegada das pastas A7siii (10-bit 4:2:2).
+
+  [A] Sweep periódico de ._ + botão manual
+  ----------------------------------------
+  ANTES: cleanup_dot_underscore só rodava DENTRO do batch reorganize
+         per-folder. Se um ._ chegava no Dropbox depois do batch (lag
+         de sync), ele ficava orfão indefinidamente.
+
+  AGORA:
+    - Sweep periódico no scan loop. Cada N scans (default 1) o daemon
+      varre dropbox_root recursivamente, identifica pastas matching
+      'Video ISO Files' / 'Audio Source Files', e roda cleanup nelas.
+      Config: cleanup_dot_underscore_sweep_every_n_scans (0 = desliga).
+    - Endpoint POST /api/cleanup-dotunderscore-now + botão "Sweep ._
+      now" no dashboard. One-shot manual pra resolver backlog.
+
+  [B] Roteamento bit-depth / chroma com toggle Preserve Chroma 4:2:2
+  ------------------------------------------------------------------
+  ANTES: builder usava regra simples: 10-bit no input -> main10,
+         senao main. Sempre yuv420p (4:2:0). Nao havia opcao pra
+         preservar 4:2:2 do source.
+
+  AGORA: novo metodo _resolve_output_format(probe) que decide:
+    - Bit-depth nunca downgrade. 8 vira 10 (x265 comprime melhor em
+      10-bit). 12 fica 12. >12 cap em 12 com warning bitdepth_capped_at_12.
+    - Chroma: 4:2:0 default. Se preserve_chroma_422 ON E source 4:2:2,
+      entao output 4:2:2. Source 4:4:4 trata como 4:2:2 com warning
+      chroma_444_downgraded.
+
+  Tabela de output (depth, chroma):
+       (10, 420) -> yuv420p10le, profile main10
+       (10, 422) -> yuv422p10le, profile main-422-10
+       (12, 420) -> yuv420p12le, profile main12
+       (12, 422) -> yuv422p12le, profile main-422-12
+
+  Quando o output e 4:2:2, o worker DETECTA o source (probe) ANTES de
+  chamar o builder e FORCA encoder=libx265 (CPU). QSV e NVENC consumer
+  nao implementam HEVC Main 4:2:2, entao tentar QSV ali quebra.
+
+  Toggle no dashboard:
+    - Cor laranja chamativa, label começa com "⚠"
+    - Hint expande explicando ~10x mais lento
+    - Modal de confirmacao na primeira vez que liga ("vc tem certeza?
+      Vai virar 5-10h um clip de 1h.")
+    - Default OFF — workflow padrao 4:2:0 em todos os jobs.
+
+  [C] Color metadata passthrough
+  ------------------------------
+  ANTES: ffmpeg_builder nao passava color flags. Confiava no
+         propagacao automatica do ffmpeg, que funciona OK pra Rec.709
+         mas falha em log/raw (S-Log3). Sony em S-Log3 nao escreve
+         color_primaries / transfer / space — so color_range='pc'.
+         Sem passthrough, o output ficava com tags inferidas erradas
+         e o NLE renderizava errado.
+
+  AGORA: prober extrai color_primaries, color_transfer, color_space,
+         color_range e normaliza 'unknown'/'unspecified'/'reserved'
+         para None. Builder passa cada flag SO se o input declarou:
+           if probe.color_primaries: -color_primaries <X>
+           if probe.color_transfer:  -color_trc <X>
+           if probe.color_space:     -colorspace <X>
+           always: -color_range <X or 'tv'>
+
+         Resultado:
+           - Rec.709 (bt709) -> 4 flags setados, output mantem bt709
+           - S-Log3 (Sony A7siii) -> so -color_range pc, outros
+             omitidos. Curva log preservada, NLE aplica LUT como
+             sempre.
+           - Zero conversao de cor: nao passamos zscale ou colormatrix.
+
+         Heuristica info-log: se 10-bit + primaries/transfer/space
+         todos None + range 'pc', loga "detected likely log/raw
+         source" pra confirmar pro operador que entendemos.
+
+  Tambem adicionei probe extra: chroma ('420' | '422' | '444')
+  derivado do pix_fmt. Disponivel via VideoInfo.chroma pra todo o
+  pipeline.
+
+================================================================================
+
 Versão: 6.1.0
 Data: 02/05/2026
 --------------------------------------------------------------------------------
