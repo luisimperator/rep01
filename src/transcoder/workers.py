@@ -1182,6 +1182,8 @@ class UploadWorker(BaseWorker):
                     self.dropbox,
                     parent,
                     self.config.cleanup_dot_underscore_delete_after_seconds,
+                    target_folder_names=self.config.dot_underscore_target_folder_names,
+                    max_size_bytes=self.config.dot_underscore_max_size_bytes,
                 )
                 if cleaned > 0:
                     logger.info(

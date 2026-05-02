@@ -130,6 +130,15 @@ legacy_reorganize_delete_wav_after_seconds: 300
 # version history.
 cleanup_dot_underscore: true
 cleanup_dot_underscore_delete_after_seconds: 300
+# Cleanup is scoped to these folder names (case-insensitive, last path
+# segment match). ATEM writes resource forks specifically into these.
+dot_underscore_target_folder_names:
+  - "Video ISO Files"
+  - "Audio Source Files"
+# Skip ._ files larger than this. Real macOS resource forks are ~4 KB;
+# 10 KB is generous headroom while still skipping anything that looks
+# like real data accidentally prefixed with `._`.
+dot_underscore_max_size_bytes: 10240
 
 # WAV → MP3 192kbps pipeline. CPU-only (libmp3lame), runs in parallel with
 # the QSV/NVENC video transcoder so they don't compete for the encoder.

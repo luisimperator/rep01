@@ -512,7 +512,11 @@ class Config(BaseModel):
             "`._*` macOS resource-fork files (4 KB Finder metadata that "
             "ATEM scatters around) into a `<parent>/ponto tracinho/` "
             "subfolder, then schedule deletion of that subfolder. Best-"
-            "effort: failures are logged but never abort the pipeline."
+            "effort: failures are logged but never abort the pipeline. "
+            "Scoped to the ATEM 'Video ISO Files' folder by "
+            "dot_underscore_target_folder_name and to small files only "
+            "via dot_underscore_max_size_bytes — we don't touch ._ files "
+            "elsewhere."
         ),
     )
     cleanup_dot_underscore_delete_after_seconds: int = Field(
@@ -520,7 +524,26 @@ class Config(BaseModel):
         ge=0,
         description=(
             "Delay before the `ponto tracinho` quarantine folder is "
-            "deleted. 0 = keep forever. Default 300 = 5 minutes."
+            "cleaned (folder kept, files inside deleted). 0 = keep "
+            "forever. Default 300 = 5 minutes."
+        ),
+    )
+    dot_underscore_target_folder_names: list[str] = Field(
+        default_factory=lambda: ["Video ISO Files", "Audio Source Files"],
+        description=(
+            "Folder names (case-insensitive) the ._ cleanup is scoped to. "
+            "ATEM hardware writes resource forks specifically here; we "
+            "intentionally never touch ._ files in other folders."
+        ),
+    )
+    dot_underscore_max_size_bytes: int = Field(
+        default=10240,
+        ge=0,
+        description=(
+            "Upper bound on ._ file size eligible for cleanup. Real "
+            "macOS resource forks are typically 4 KB; 10 KB gives "
+            "headroom while still skipping anything that looks like "
+            "real data accidentally prefixed with ._."
         ),
     )
     allow_delete_original: bool = Field(
