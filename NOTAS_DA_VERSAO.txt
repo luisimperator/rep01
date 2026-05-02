@@ -2,6 +2,33 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.36
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+CLEANUP: manter pasta de backup, deletar arquivos, log dentro
+
+  [POLISH] schedule_h264_delete agora preserva a pasta
+  ----------------------------------------------------
+  ANTES: passado o delay, a pasta inteira (h264/, wav/, ponto tracinho/)
+         era deletada e um audit log "h264 deletado.txt" ficava SOBRANDO
+         no parent. Resultado: os arquivos do parent (15 H.265s) ficavam
+         convivendo com o txt vazio do log, sujando a pasta.
+
+  AGORA: o cleanup deleta os ARQUIVOS dentro da subpasta, mantem a pasta,
+         e poe o log DENTRO dela. Layout final fica:
+           Video ISO Files/
+             ├─ Live CAM 1.mp4 (H.265)
+             ├─ ...
+             └─ h264/
+                 └─ h264 deletado.txt    ← log fica aqui, parent limpo
+
+         Mesma logica pra wav/ (audio pipeline) e ponto tracinho/ (._
+         quarantine). O log loga seu proprio arquivo na lista de skip
+         pra nao se autodeletar nas execucoes seguintes.
+
+================================================================================
+
 Versão: 6.0.35
 Data: 02/05/2026
 --------------------------------------------------------------------------------
