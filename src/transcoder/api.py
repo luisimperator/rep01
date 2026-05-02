@@ -548,6 +548,18 @@ _SETTINGS_KNOBS: dict[str, dict] = {
         "yaml_key": "concurrency.audio_workers",
         "label": "Parallel audio (libmp3lame) workers",
     },
+    "cleanup_dot_underscore": {
+        "type": "bool",
+        "yaml_key": "cleanup_dot_underscore",
+        "label": "Sweep ._ macOS resource forks into 'ponto tracinho/' after each reorganize batch",
+    },
+    "cleanup_dot_underscore_delete_after_seconds": {
+        "type": "int",
+        "min": 0,
+        "max": 86400,
+        "yaml_key": "cleanup_dot_underscore_delete_after_seconds",
+        "label": "Delete 'ponto tracinho/' quarantine after N seconds (0 = keep)",
+    },
     "cq_value": {
         "type": "int",
         "min": 14,
@@ -608,6 +620,8 @@ def _settings_payload(api: ApiServer) -> dict:
             "legacy_reorganize_delete_wav_after_seconds": cfg.legacy_reorganize_delete_wav_after_seconds,
             "audio_enabled": cfg.audio.enabled,
             "audio_workers": cfg.concurrency.audio_workers,
+            "cleanup_dot_underscore": cfg.cleanup_dot_underscore,
+            "cleanup_dot_underscore_delete_after_seconds": cfg.cleanup_dot_underscore_delete_after_seconds,
             "dropbox_root": cfg.dropbox_root,
             "health_check_interval_minutes": cfg.incidents.health_check_interval_minutes,
             "api_bind": cfg.api.bind,

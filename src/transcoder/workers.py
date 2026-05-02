@@ -1069,6 +1069,7 @@ class UploadWorker(BaseWorker):
         from .reorganize import (
             AUDIO_LAYOUT,
             VIDEO_LAYOUT,
+            cleanup_dot_underscore_files,
             find_unreorganized_pairs_in_folder,
             is_folder_complete,
             is_folder_settled,
@@ -1171,6 +1172,25 @@ class UploadWorker(BaseWorker):
                 f"(Dropbox version history preserves the backups)"
             )
             schedule_h264_delete(self.dropbox, backup_dir, delete_delay)
+
+        # Sweep `._*` resource forks out of the same parent. Best-effort
+        # housekeeping; only runs on a fully-successful batch so we don't
+        # touch a folder that's still mid-pipeline.
+        if self.config.cleanup_dot_underscore and succeeded == len(pairs):
+            try:
+                cleaned = cleanup_dot_underscore_files(
+                    self.dropbox,
+                    parent,
+                    self.config.cleanup_dot_underscore_delete_after_seconds,
+                )
+                if cleaned > 0:
+                    logger.info(
+                        f"[{self.name}] Cleanup: quarantined {cleaned} ._ file(s) "
+                        f"in {parent} (will delete in "
+                        f"{self.config.cleanup_dot_underscore_delete_after_seconds}s)"
+                    )
+            except Exception as e:
+                logger.warning(f"[{self.name}] Cleanup ._ sweep failed: {e}")
 
     def _make_progress_callback(
         self,

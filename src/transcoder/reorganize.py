@@ -523,3 +523,74 @@ def _format_size(num_bytes: int) -> str:
             return f"{num_bytes:.2f} {unit}"
         num_bytes /= 1024
     return f"{num_bytes:.2f} PB"
+
+
+# --------------------------------------------------------------------------
+# ATEM cleanup: ._ macOS resource forks (4 KB Finder metadata files) that
+# get scattered everywhere when ATEM writes media. We move them into a
+# 'ponto tracinho' subfolder, then schedule deletion so Dropbox version
+# history still has them in case anyone needs the metadata.
+# --------------------------------------------------------------------------
+
+
+PONTO_TRACINHO_SUBDIR = "ponto tracinho"
+
+
+def cleanup_dot_underscore_files(
+    dropbox: DropboxClient,
+    parent: str,
+    delete_after_seconds: int,
+) -> int:
+    """Sweep `._*` resource forks out of `parent` (non-recursive).
+
+    Lists `parent`, finds entries whose name starts with '._', and moves
+    each into `<parent>/ponto tracinho/<name>`. After all moves succeed,
+    schedules deletion of that subfolder via schedule_h264_delete (same
+    background-thread mechanism). Errors per file are logged and counted
+    but never raised — this is best-effort housekeeping.
+
+    Returns the number of files actually moved.
+    """
+    parent = parent.rstrip('/') if parent != '/' else ''
+
+    try:
+        entries = list(dropbox.list_folder(parent or '/', recursive=False))
+    except Exception as e:
+        logger.warning(f"cleanup_dot_underscore: list {parent} failed: {e}")
+        return 0
+
+    targets = [e for e in entries if e.name.startswith('._')]
+    if not targets:
+        return 0
+
+    quarantine_dir = parent + '/' + PONTO_TRACINHO_SUBDIR
+    try:
+        dropbox.create_folder(quarantine_dir)
+    except Exception as e:
+        logger.warning(
+            f"cleanup_dot_underscore: create {quarantine_dir} failed: {e}; "
+            f"skipping cleanup for this folder"
+        )
+        return 0
+
+    moved = 0
+    for entry in targets:
+        src = parent + '/' + entry.name
+        dst = quarantine_dir + '/' + entry.name
+        try:
+            dropbox.move_file(src, dst, allow_overwrite=True)
+            moved += 1
+        except Exception as e:
+            logger.warning(f"cleanup_dot_underscore: move {src} -> {dst} failed: {e}")
+
+    if moved == 0:
+        return 0
+
+    logger.info(
+        f"cleanup_dot_underscore: quarantined {moved} ._ file(s) "
+        f"into {quarantine_dir}"
+    )
+    if delete_after_seconds > 0:
+        schedule_h264_delete(dropbox, quarantine_dir, delete_after_seconds)
+
+    return moved

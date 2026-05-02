@@ -505,6 +505,24 @@ class Config(BaseModel):
             "version history."
         ),
     )
+    cleanup_dot_underscore: bool = Field(
+        default=True,
+        description=(
+            "After every successful per-folder reorganize batch, sweep "
+            "`._*` macOS resource-fork files (4 KB Finder metadata that "
+            "ATEM scatters around) into a `<parent>/ponto tracinho/` "
+            "subfolder, then schedule deletion of that subfolder. Best-"
+            "effort: failures are logged but never abort the pipeline."
+        ),
+    )
+    cleanup_dot_underscore_delete_after_seconds: int = Field(
+        default=300,
+        ge=0,
+        description=(
+            "Delay before the `ponto tracinho` quarantine folder is "
+            "deleted. 0 = keep forever. Default 300 = 5 minutes."
+        ),
+    )
     allow_delete_original: bool = Field(
         default=False,
         description="DANGEROUS: Allow deleting original after successful transcode"
