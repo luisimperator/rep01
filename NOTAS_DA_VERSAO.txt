@@ -2,6 +2,32 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.0.28
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+UPLOAD: BUGFIX CRITICO - malformed_path no Dropbox
+
+  [BUGFIX] Uploads de H.265 falhavam 100% com WriteError('malformed_path')
+  -----------------------------------------------------------------------
+  ANTES: workers._upload_job() construia o caminho da pasta de destino
+         no Dropbox usando str(Path(job.output_path).parent). No Windows,
+         pathlib.Path retorna WindowsPath e str() converte os '/' em '\'.
+         Resultado: o cliente chamava files_create_folder_v2 com
+         '\HeavyDrops\...\h265' e o Dropbox API rejeitava com
+         malformed_path. O upload entrava em loop de retry (5 tentativas
+         por uploader, 2 uploaders) e nunca subia o arquivo. Cada job
+         transcodado virava lixo: GPU queimada, espaco em disco preso,
+         saving zero.
+
+  AGORA: usa PurePosixPath em vez de Path para construir o caminho de
+         destino. PurePosixPath nao depende do OS e sempre retorna '/'.
+         Defesa em profundidade: DropboxClient._normalize_path tambem
+         converte qualquer '\' que escape para '/' antes de chamar a
+         SDK, entao callers futuros nao reproduzem o mesmo bug.
+
+================================================================================
+
 Versão: 6.0.8
 Data: 01/05/2026
 --------------------------------------------------------------------------------
