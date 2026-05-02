@@ -475,26 +475,85 @@ class TranscodeWorker(BaseWorker):
             self._cleanup_staging(job)
             return
 
+        # Skip when input bitrate is already low (YouTube / streaming-grade
+        # H.264). Re-encoding 5 Mbps 1080p to HEVC at our CQ either bloats
+        # the file or burns compute for trivial savings — neither helpful.
+        # Threshold scales with resolution so 4K and 1080p use the same knob.
+        threshold_mbps_per_mp = float(getattr(
+            self.config, "low_bitrate_skip_mbps_per_megapixel", 0.0
+        ))
+        if threshold_mbps_per_mp > 0:
+            vi = probe_result.video_info
+            megapixels = (vi.width * vi.height) / 1_000_000.0
+            input_mbps = (vi.bitrate_kbps or 0) / 1000.0
+            if megapixels > 0 and input_mbps > 0:
+                bpmp = input_mbps / megapixels
+                if bpmp < threshold_mbps_per_mp:
+                    threshold_mbps = threshold_mbps_per_mp * megapixels
+                    logger.info(
+                        f"[{self.name}] Skipping (low bitrate): "
+                        f"{job.dropbox_path} — input {input_mbps:.1f} Mbps "
+                        f"at {vi.width}x{vi.height} ({bpmp:.2f} Mbps/MP) "
+                        f"is below threshold {threshold_mbps:.1f} Mbps "
+                        f"({threshold_mbps_per_mp} Mbps/MP). Re-transcoding "
+                        f"would not save space."
+                    )
+                    self.db.update_job_state(
+                        job.id,
+                        JobState.SKIPPED_LOW_BITRATE,
+                        input_codec=vi.codec_name,
+                        input_bitrate_kbps=vi.bitrate_kbps,
+                    )
+                    self._cleanup_staging(job)
+                    return
+
         # Select encoder
         encoder = self.encoder or select_best_encoder(self.config, verify=False)
 
-        # Per-job override: when the operator enabled Preserve Chroma AND
-        # the source is 4:2:2, force libx265 because QSV/NVENC consumer
-        # hardware doesn't implement HEVC Main 4:2:2. Worker also disables
-        # the QSV input hwaccel via the encoder switch below — the
-        # ffmpeg_builder branches on encoder type, so changing it here is
-        # enough.
-        if (
-            getattr(self.config, "preserve_chroma_422", False)
-            and probe_result.video_info.chroma == "422"
-            and encoder != EncoderType.CPU
-        ):
-            logger.warning(
-                f"[{self.name}] Preserve Chroma is ON and source is 4:2:2 — "
-                f"forcing libx265 (CPU). This job will run roughly 10x slower "
-                f"than QSV/NVENC. File: {job.dropbox_path}"
-            )
-            encoder = EncoderType.CPU
+        # Per-job override: route to libx265 (CPU) whenever the resolved
+        # output is something QSV/NVENC consumer hardware just can't do.
+        # Cases that hit this branch:
+        #   - 4:2:2 output (preserve_chroma_422 toggle is on AND source
+        #     is 4:2:2) — QSV/NVENC consumer have no Main 4:2:2 profile.
+        #   - 4:2:2 source with chroma downsample — QSV/NVENC decoders
+        #     refuse High 4:2:2 H.264 input on most Intel iGPUs / GeForce.
+        #   - 12-bit output — neither encoder implements Main12 (the
+        #     hevc_qsv encoder rejects "main12" as an unparsable profile
+        #     string, see v6.2.2 incident report).
+        # Detecting upfront avoids the old "let it fail twice then fall
+        # back" path which burns ~30s+ of pointless ffmpeg launches.
+        if encoder != EncoderType.CPU:
+            vi = probe_result.video_info
+            in_chroma = vi.chroma or "420"
+            in_depth = vi.bit_depth or 8
+            needs_cpu = False
+            why = ""
+            if in_chroma in ("422", "444"):
+                needs_cpu = True
+                why = (
+                    f"source chroma is {in_chroma} which {encoder.value} "
+                    f"can't decode (consumer hardware limit)"
+                )
+            elif in_depth > 10:
+                needs_cpu = True
+                why = (
+                    f"source bit_depth={in_depth} requires HEVC Main12 which "
+                    f"{encoder.value} doesn't implement"
+                )
+            elif (
+                getattr(self.config, "preserve_chroma_422", False)
+                and in_chroma == "422"
+            ):
+                needs_cpu = True
+                why = "preserve_chroma_422 is ON and source is 4:2:2"
+
+            if needs_cpu:
+                logger.warning(
+                    f"[{self.name}] Forcing libx265 (CPU): {why}. "
+                    f"This job will run roughly 10x slower than {encoder.value}. "
+                    f"File: {job.dropbox_path}"
+                )
+                encoder = EncoderType.CPU
 
         # Setup output path
         job_dir = input_path.parent

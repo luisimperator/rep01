@@ -579,6 +579,13 @@ _SETTINGS_KNOBS: dict[str, dict] = {
         "yaml_key": "preserve_chroma_422",
         "label": "Preserve Chroma 4:2:2 (forces libx265 — ~10x slower)",
     },
+    "low_bitrate_skip_mbps_per_megapixel": {
+        "type": "float",
+        "min": 0.0,
+        "max": 50.0,
+        "yaml_key": "low_bitrate_skip_mbps_per_megapixel",
+        "label": "Skip files with input bitrate below N Mbps per megapixel (0 = disable)",
+    },
     "cleanup_dot_underscore": {
         "type": "bool",
         "yaml_key": "cleanup_dot_underscore",
@@ -652,6 +659,7 @@ def _settings_payload(api: ApiServer) -> dict:
             "audio_enabled": cfg.audio.enabled,
             "audio_workers": cfg.concurrency.audio_workers,
             "preserve_chroma_422": cfg.preserve_chroma_422,
+            "low_bitrate_skip_mbps_per_megapixel": cfg.low_bitrate_skip_mbps_per_megapixel,
             "cleanup_dot_underscore": cfg.cleanup_dot_underscore,
             "cleanup_dot_underscore_delete_after_seconds": cfg.cleanup_dot_underscore_delete_after_seconds,
             "dropbox_root": cfg.dropbox_root,

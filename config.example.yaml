@@ -147,6 +147,14 @@ cleanup_dot_underscore_sweep_every_n_scans: 1
 # Default OFF: all output goes 4:2:0 main10 / main12 — fast on QSV.
 # Flip ON only for masters that need chroma fidelity (graphics, key).
 preserve_chroma_422: false
+
+# Skip files whose video bitrate per megapixel is below this threshold.
+# Catches YouTube downloads / streaming-grade files where re-transcoding
+# to H.265 either bloats the file or burns compute for trivial savings.
+# Scales with resolution: 1080p (~2 MP) skips below ~6 Mbps; 4K (~8 MP)
+# skips below ~25 Mbps. Set to 0 to disable. Job is marked
+# SKIPPED_LOW_BITRATE — no transcode, no upload, no reorganize.
+low_bitrate_skip_mbps_per_megapixel: 3.0
 # Cleanup is scoped to these folder names (case-insensitive, last path
 # segment match). ATEM writes resource forks specifically into these.
 dot_underscore_target_folder_names:

@@ -320,28 +320,41 @@ class FFmpegCommandBuilder:
             in_depth = 12
         # Round 9/11 to next even — HEVC profiles only define main / main10 / main12.
         out_depth = 8 if in_depth <= 8 else (10 if in_depth <= 10 else 12)
-        # Always upgrade 8→10. x265 docs and benchmarks both confirm
-        # better compression efficiency on 10-bit even for 8-bit sources.
-        if out_depth == 8:
-            out_depth = 10
 
         in_chroma = video_info.chroma or "420"
         if in_chroma == "444":
             logger.warning(
                 "ffmpeg: source chroma 4:4:4 not supported in this pipeline; "
-                "downgrading to 4:2:2 (chroma_444_downgraded)"
+                "downgrading to 4:2:0 (chroma_444_downgraded)"
             )
-            in_chroma = "422"
+            in_chroma = "420"
 
         preserve_422 = bool(getattr(self.config, "preserve_chroma_422", False))
         out_chroma = in_chroma if (preserve_422 and in_chroma == "422") else "420"
 
+        # Build pix_fmt + profile per output spec. The 'p' (no bit-suffix)
+        # form maps to 8-bit yuv420p / yuv422p; main10 / main12 require
+        # the explicit 10le / 12le suffix.
         if out_chroma == "422":
-            pix_fmt = f"yuv422p{out_depth}le"
-            profile = "main-422-10" if out_depth == 10 else "main-422-12"
+            if out_depth == 8:
+                pix_fmt = "yuv422p"
+                profile = "main"  # libx265 handles main 4:2:2 8-bit
+            elif out_depth == 10:
+                pix_fmt = "yuv422p10le"
+                profile = "main-422-10"
+            else:  # 12
+                pix_fmt = "yuv422p12le"
+                profile = "main-422-12"
         else:  # 420
-            pix_fmt = f"yuv420p{out_depth}le"
-            profile = "main10" if out_depth == 10 else "main12"
+            if out_depth == 8:
+                pix_fmt = "yuv420p"
+                profile = "main"
+            elif out_depth == 10:
+                pix_fmt = "yuv420p10le"
+                profile = "main10"
+            else:  # 12
+                pix_fmt = "yuv420p12le"
+                profile = "main12"
 
         return pix_fmt, profile, out_depth, out_chroma
 
