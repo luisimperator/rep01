@@ -1046,6 +1046,7 @@ def _reorganize_run(api: ApiServer, body: dict) -> dict:
     from .dropbox_client import make_client_from_config
     from .reorganize import (
         AUDIO_LAYOUT, VIDEO_LAYOUT,
+        _audio_successor_name, _video_successor_name,
         cleanup_dot_underscore_files,
         find_unreorganized_pairs,
         is_folder_settled,
@@ -1165,18 +1166,26 @@ def _reorganize_run(api: ApiServer, body: dict) -> dict:
                         h264_dir = (parent.rstrip('/') + '/h264') if parent else '/h264'
                         run.push(
                             f"  · scheduling h264 cleanup in {delay}s "
-                            f"(folder kept; audit log inside)"
+                            f"(folder kept; audit log inside; "
+                            f"successor-existence check active)"
                         )
-                        schedule_h264_delete(dropbox, h264_dir, delay)
+                        schedule_h264_delete(
+                            dropbox, h264_dir, delay,
+                            successor_resolver=_video_successor_name,
+                        )
 
                 if a_pairs and audio_done_in_folder == len(a_pairs):
                     delay = cfg.legacy_reorganize_delete_wav_after_seconds
                     if delay > 0:
                         wav_dir = (parent.rstrip('/') + '/wav') if parent else '/wav'
                         run.push(
-                            f"  · scheduling wav cleanup in {delay}s"
+                            f"  · scheduling wav cleanup in {delay}s "
+                            f"(successor-existence check active)"
                         )
-                        schedule_h264_delete(dropbox, wav_dir, delay)
+                        schedule_h264_delete(
+                            dropbox, wav_dir, delay,
+                            successor_resolver=_audio_successor_name,
+                        )
 
                 # Sweep ._ resource forks in this folder if cleanup is
                 # enabled — same housekeeping the main pipeline does after
