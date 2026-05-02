@@ -2,6 +2,27 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.3.4
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+UI HINT: deixar claro que mudar "Parallel transcodes" precisa restart
+
+  [UI] Hint do dropdown "Parallel transcodes" agora menciona restart
+  ----------------------------------------------------------------
+  ANTES: hint dizia so "1 = max QSV speed. Higher splits the encoder
+         (slower per job)." — sem aviso de restart, ao contrario do
+         "Parallel downloads" logo abaixo que ja dizia "Daemon restart
+         needed after change."
+
+  AGORA: hint termina com "Daemon restart needed after change.",
+         alinhando com o sibling field. Comportamento nao mudou — os
+         workers ja sao spawned no startup baseados em
+         config.concurrency.transcode_workers e o transcode_q do
+         dispatcher dimensiona maxsize do mesmo valor, entao live-edit
+         desse campo nunca pegou; agora a UI ta honesta sobre isso.
+
+
 Versão: 6.3.3
 Data: 02/05/2026
 --------------------------------------------------------------------------------
