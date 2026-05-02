@@ -2,6 +2,62 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.3.0
+Data: 02/05/2026
+--------------------------------------------------------------------------------
+
+MINOR BUMP: dashboard vira PWA + card de uso do Dropbox com meta de TB
+
+  [FEATURE] PWA — instalavel como app no iPhone
+  ---------------------------------------------
+  O dashboard agora pode ser adicionado a tela inicial do iPhone
+  como um app de verdade:
+    1. Abre 100.99.21.105:9123 no Safari (via Tailscale)
+    2. Botao de compartilhar -> "Adicionar a Tela Inicial"
+    3. Aparece um icone "HeavyDrops" na home
+    4. Tocar abre fullscreen, sem barra de URL, sem botoes do
+       Safari, com status bar tinted matching o tema escuro
+
+  Implementacao:
+    - manifest.json (nome, scope, theme color, icons)
+    - apple-touch-icon.png 180x180 (gerado com stdlib, gradient
+      blue-purple-amber matching as cores das stages do dashboard)
+    - icon.svg (vector pra modern PWA / favicon)
+    - meta tags Apple: apple-mobile-web-app-capable, status-bar-
+      style black-translucent, apple-mobile-web-app-title
+      "HeavyDrops"
+    - Rotas /manifest.json, /icon.svg, /apple-touch-icon.png,
+      /favicon.ico no daemon (servidas SEM auth — sao metadados
+      publicos pra fluxo de instalacao funcionar antes do token)
+
+  Mesma URL antes e depois: nao precisa reinstalar nada quando
+  bumpar versao. Update do daemon (git pull) -> proximo refresh
+  ja pega as mudancas, sem republicar app store.
+
+  [FEATURE] Card de uso do Dropbox com meta de TB
+  -----------------------------------------------
+  Card novo "Dropbox storage" no topo do dashboard mostra:
+    - TB usado / TB target (default 50 TB, configuravel via
+      storage_target_tb)
+    - Barra de progresso colorida (verde < 75%, amber 75-90%,
+      vermelho > 90%)
+    - Badge TEAM ou PERSONAL pra indicar qual quota a gente esta
+      lendo (Business vs Individual)
+    - Quota da conta tambem listada (ex.: 50 TB Business plan)
+    - "% to target" como label rapido
+
+  Implementacao:
+    - dropbox_client.get_space_usage() melhorada — agora handles
+      team allocation (alem de individual). Pra Business retorna
+      tanto used (individual) quanto team_used (todo o time)
+    - api._dropbox_storage_snapshot com cache TTL 5min
+      (users_get_space_usage e uma chamada Dropbox API, nao
+      queremos hammer em todo refresh do dashboard)
+    - Novo campo no /api/status payload: dropbox_storage
+    - Novo config: storage_target_tb (default 50.0)
+
+================================================================================
+
 Versão: 6.2.3
 Data: 02/05/2026
 --------------------------------------------------------------------------------

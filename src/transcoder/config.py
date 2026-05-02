@@ -482,6 +482,15 @@ class Config(BaseModel):
             "cleaned up — no upload, no reorganize."
         ),
     )
+    storage_target_tb: float = Field(
+        default=50.0,
+        ge=0.0,
+        description=(
+            "Storage usage target in TB displayed on the dashboard. "
+            "Drives the progress bar in the 'Dropbox Storage' card "
+            "(used / target). Doesn't enforce anything — purely visual."
+        ),
+    )
     preserve_chroma_422: bool = Field(
         default=False,
         description=(
