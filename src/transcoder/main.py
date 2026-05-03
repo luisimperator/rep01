@@ -32,6 +32,7 @@ from rich.logging import RichHandler
 from rich.table import Table
 
 from .api import ApiServer
+from .census import CensusWorker, DeepScanWorker
 from .config import Config, EncoderPreference, TranscodeProfile, load_config, save_example_config
 from .database import ACTIVE_STATES, Database, Job, JobState, TERMINAL_STATES
 from .disk_budget import DiskBudget
@@ -107,6 +108,8 @@ class Daemon:
         self.rate_limiter: TokenBucket | None = None
         self.disk_budget: DiskBudget | None = None
         self.api_server: ApiServer | None = None
+        self.census_worker: CensusWorker | None = None
+        self.deep_scan: DeepScanWorker | None = None
         self.incident_reporter = None  # IncidentReporter | None, set in setup()
         self.stop_event = threading.Event()
         self.scan_trigger = threading.Event()
@@ -446,6 +449,20 @@ class Daemon:
         watchdog = Watchdog(self.config, self.db, self.stop_event)
         watchdog.start()
         self.workers.append(watchdog)
+
+        # Reduction-map census worker (daily walk + on-demand) and the
+        # on-demand deep-scan probe worker. Census shares the daemon's
+        # stop_event so it bails cleanly during shutdown; deep scan is
+        # idle until a user hits /api/deep-scan/start.
+        if self.config.census.enabled:
+            self.census_worker = CensusWorker(
+                self.config, self.db, self.dropbox, self.stop_event,
+            )
+            self.census_worker.start()
+            self.workers.append(self.census_worker)
+        self.deep_scan = DeepScanWorker(
+            self.config, self.db, self.dropbox, self.stop_event,
+        )
 
         audio_n = self.config.concurrency.audio_workers if self.config.audio.enabled else 0
         logger.info(

@@ -270,6 +270,56 @@ CREATE TABLE IF NOT EXISTS disk_reservations (
     reserved_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
+-- Per-folder rollup written by the daily census walk. Powers the dashboard's
+-- reduction-map tree. Each row is one Dropbox folder (POSIX path); counts are
+-- broken down by classification bucket (pending = will-be-transcoded, done =
+-- already H.265 in some form, ineligible = filtered out by static rules).
+CREATE TABLE IF NOT EXISTS folder_census (
+    path TEXT PRIMARY KEY,
+    pending_count INTEGER NOT NULL DEFAULT 0,
+    pending_bytes INTEGER NOT NULL DEFAULT 0,
+    done_count INTEGER NOT NULL DEFAULT 0,
+    done_bytes INTEGER NOT NULL DEFAULT 0,
+    ineligible_count INTEGER NOT NULL DEFAULT 0,
+    ineligible_bytes INTEGER NOT NULL DEFAULT 0,
+    last_scanned TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Probe-cache filled by the deep-scan worker (and opportunistically by the
+-- main pipeline when it probes a file). Lets the next census know real codec
+-- without needing to re-download the file. The deep scan reads a few MB from
+-- a temporary URL via ffprobe to populate this without a full transfer.
+CREATE TABLE IF NOT EXISTS probe_cache (
+    path TEXT PRIMARY KEY,
+    codec TEXT,
+    bitrate_kbps INTEGER,
+    pix_fmt TEXT,
+    width INTEGER,
+    height INTEGER,
+    duration_sec REAL,
+    probed_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Census run history (one row per attempt). Dashboard reads the latest row
+-- to show "last scanned X minutes ago" and totals.
+CREATE TABLE IF NOT EXISTS census_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at TEXT,
+    folders_scanned INTEGER NOT NULL DEFAULT 0,
+    files_classified INTEGER NOT NULL DEFAULT 0,
+    pending_total_count INTEGER NOT NULL DEFAULT 0,
+    pending_total_bytes INTEGER NOT NULL DEFAULT 0,
+    done_total_count INTEGER NOT NULL DEFAULT 0,
+    done_total_bytes INTEGER NOT NULL DEFAULT 0,
+    ineligible_total_count INTEGER NOT NULL DEFAULT 0,
+    ineligible_total_bytes INTEGER NOT NULL DEFAULT 0,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_folder_census_pending_bytes
+    ON folder_census(pending_bytes DESC);
+
 -- Trigger to update updated_at on jobs
 CREATE TRIGGER IF NOT EXISTS jobs_updated_at
     AFTER UPDATE ON jobs
@@ -1114,3 +1164,196 @@ class Database:
             cursor = conn.execute("SELECT COUNT(*) as count FROM jobs")
         row = cursor.fetchone()
         return row['count'] if row else 0
+
+    # =========================================================================
+    # Folder census (reduction-map snapshot)
+    # =========================================================================
+
+    def replace_folder_census(self, rows: list[dict]) -> None:
+        """Atomically replace all per-folder census rows.
+
+        Wipe + bulk-insert under a single transaction so the dashboard never
+        observes a half-written tree. `rows` items must carry: path,
+        pending_count, pending_bytes, done_count, done_bytes,
+        ineligible_count, ineligible_bytes.
+        """
+        with self.transaction() as conn:
+            conn.execute("DELETE FROM folder_census")
+            if rows:
+                conn.executemany(
+                    """
+                    INSERT INTO folder_census
+                        (path, pending_count, pending_bytes,
+                         done_count, done_bytes,
+                         ineligible_count, ineligible_bytes,
+                         last_scanned)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    """,
+                    [
+                        (
+                            r["path"],
+                            int(r.get("pending_count", 0)),
+                            int(r.get("pending_bytes", 0)),
+                            int(r.get("done_count", 0)),
+                            int(r.get("done_bytes", 0)),
+                            int(r.get("ineligible_count", 0)),
+                            int(r.get("ineligible_bytes", 0)),
+                        )
+                        for r in rows
+                    ],
+                )
+
+    def get_folder_census(self) -> list[dict]:
+        """Return all folder_census rows, sorted by path."""
+        conn = self._get_connection()
+        cursor = conn.execute(
+            """
+            SELECT path, pending_count, pending_bytes,
+                   done_count, done_bytes,
+                   ineligible_count, ineligible_bytes,
+                   last_scanned
+              FROM folder_census
+             ORDER BY path
+            """
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+    def get_folder_pending_bytes_map(self) -> dict[str, int]:
+        """Return {folder_path: pending_bytes} for fast in-memory priority sort.
+
+        Used by the dispatcher to bias the download queue toward whichever
+        folder still has the most H.264 to chew through (largest-first folder
+        drain). Empty dict before the first census run.
+        """
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT path, pending_bytes FROM folder_census WHERE pending_bytes > 0"
+        )
+        return {row["path"]: int(row["pending_bytes"]) for row in cursor.fetchall()}
+
+    # ----- census run history -----
+
+    def census_run_started(self) -> int:
+        """Insert a new in-flight census_runs row. Returns the new row id."""
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                "INSERT INTO census_runs (started_at) VALUES (datetime('now'))"
+            )
+            return cursor.lastrowid or 0
+
+    def census_run_finished(
+        self,
+        run_id: int,
+        folders_scanned: int,
+        files_classified: int,
+        totals: dict,
+        error: str | None = None,
+    ) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                UPDATE census_runs SET
+                    finished_at = datetime('now'),
+                    folders_scanned = ?,
+                    files_classified = ?,
+                    pending_total_count = ?,
+                    pending_total_bytes = ?,
+                    done_total_count = ?,
+                    done_total_bytes = ?,
+                    ineligible_total_count = ?,
+                    ineligible_total_bytes = ?,
+                    error = ?
+                 WHERE id = ?
+                """,
+                (
+                    folders_scanned,
+                    files_classified,
+                    int(totals.get("pending_count", 0)),
+                    int(totals.get("pending_bytes", 0)),
+                    int(totals.get("done_count", 0)),
+                    int(totals.get("done_bytes", 0)),
+                    int(totals.get("ineligible_count", 0)),
+                    int(totals.get("ineligible_bytes", 0)),
+                    error,
+                    run_id,
+                ),
+            )
+
+    def get_last_census_run(self) -> dict | None:
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT * FROM census_runs ORDER BY id DESC LIMIT 1"
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    # =========================================================================
+    # Probe cache (header-only ffprobe results from deep scan)
+    # =========================================================================
+
+    def get_probe_cache(self, path: str) -> dict | None:
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT * FROM probe_cache WHERE path = ?",
+            (path,),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def get_probe_cache_codecs(self) -> dict[str, str]:
+        """Return {path: codec_lower} for every cached probe with a codec.
+
+        The census uses this to classify files we've already inspected
+        (e.g. via deep scan) as done/ineligible without re-probing.
+        """
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT path, codec FROM probe_cache WHERE codec IS NOT NULL"
+        )
+        return {row["path"]: (row["codec"] or "").lower() for row in cursor.fetchall()}
+
+    def put_probe_cache(
+        self,
+        path: str,
+        codec: str | None,
+        bitrate_kbps: int | None = None,
+        pix_fmt: str | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        duration_sec: float | None = None,
+    ) -> None:
+        with self.transaction() as conn:
+            conn.execute(
+                """
+                INSERT INTO probe_cache
+                    (path, codec, bitrate_kbps, pix_fmt, width, height, duration_sec, probed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(path) DO UPDATE SET
+                    codec = excluded.codec,
+                    bitrate_kbps = excluded.bitrate_kbps,
+                    pix_fmt = excluded.pix_fmt,
+                    width = excluded.width,
+                    height = excluded.height,
+                    duration_sec = excluded.duration_sec,
+                    probed_at = excluded.probed_at
+                """,
+                (path, codec, bitrate_kbps, pix_fmt, width, height, duration_sec),
+            )
+
+    def get_done_paths(self) -> set[str]:
+        """All dropbox_paths that reached DONE — already transcoded."""
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT DISTINCT dropbox_path FROM jobs WHERE state = ?",
+            (JobState.DONE.value,),
+        )
+        return {row["dropbox_path"] for row in cursor.fetchall()}
+
+    def get_skipped_hevc_paths(self) -> set[str]:
+        """All dropbox_paths the daemon already classified as native HEVC."""
+        conn = self._get_connection()
+        cursor = conn.execute(
+            "SELECT DISTINCT dropbox_path FROM jobs WHERE state = ?",
+            (JobState.SKIPPED_HEVC.value,),
+        )
+        return {row["dropbox_path"] for row in cursor.fetchall()}

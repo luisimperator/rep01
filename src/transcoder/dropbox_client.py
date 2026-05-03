@@ -854,6 +854,30 @@ class DropboxClient:
 
         return self._retry_operation(operation, f"download_partial({dropbox_path}, {start_byte}+{length_bytes})")
 
+    def get_temporary_link(self, path: str) -> str | None:
+        """Return a short-lived CDN URL for the file, or None if missing.
+
+        Wraps files_get_temporary_link. The URL is valid for ~4 hours and
+        can be GET'd with a Range header — used by the deep-scan worker so
+        ffprobe reads only the file's MOOV header without downloading the
+        whole asset.
+        """
+        norm_path = self._normalize_path(path)
+
+        def operation() -> str | None:
+            try:
+                result = self._dbx.files_get_temporary_link(norm_path)
+            except ApiError as e:
+                if _is_path_not_found(e):
+                    return None
+                raise
+            return result.link
+
+        try:
+            return self._retry_operation(operation, f"get_temporary_link({path})")
+        except DropboxNotFoundError:
+            return None
+
     def delete_file(self, path: str) -> bool:
         """
         Delete file from Dropbox.

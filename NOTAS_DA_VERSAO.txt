@@ -2,6 +2,98 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.4.0
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+REDUCTION MAP — colored folder tree, daily census, deep-scan probe,
+folder-priority dispatch.
+
+  [FEAT] Census diário (08:30) + botão "Run census now"
+  -----------------------------------------------------
+  Walker novo (transcoder/census.py) atravessa toda a arvore Dropbox
+  uma vez por dia, classifica cada arquivo em 3 buckets:
+
+    pending     — H.264 que vai ser transcodado
+    done        — ja H.265 (sibling /h265, mirror layout, DB DONE/SKIPPED_HEVC,
+                  probe_cache, ou hint no nome tipo _HEVC, _h265, yt-dlp)
+    ineligible  — pulado por filtro estatico (/assets, partial, YouTube,
+                  abaixo de min_size_gb, image codec por extensao)
+
+  Resultado vai pra duas tabelas novas:
+    - folder_census (rollup por pasta com counts e bytes)
+    - census_runs   (historico de execucoes pra dashboard)
+
+  Schedule controlado por config.census.daily_run_at (HH:MM local).
+  Botao /api/census-now dispara fora de hora pra quando voce ta com
+  pressa de ver. Custo: minutos de walk por 50TB; pesa pouco no
+  Dropbox API porque so lista metadata, nao baixa nada.
+
+  [FEAT] Reduction map — arvore colorida no dashboard
+  ----------------------------------------------------
+  Painel novo "Reduction map" (colapsado por padrao) mostra a arvore
+  navegavel com cores:
+    🟢 verde  — 0 pending (pasta esta zerada)
+    🟡 amarelo — pending < 10% do total da pasta
+    🔴 vermelho — pending >= 10% (ainda tem trabalho ali)
+
+  Cada linha tem barra de progresso 3-cores (red=pending, green=done,
+  gray=ineligible) + contadores. Os bytes rolam de baixo pra cima:
+  pasta-mae mostra o subtree somado, entao voce ve qual ramo da
+  arvore concentra a divida.
+
+  [FEAT] Deep scan — probe header-only via Dropbox temp link
+  ----------------------------------------------------------
+  Botao "Deep scan (probe unknowns)" no painel Reduction map dispara
+  um worker que itera os arquivos "desconhecidos" (passaram nos
+  filtros estaticos mas o pipeline ainda nao os viu) e roda
+  ffprobe -probesize 5M sobre temporary links do Dropbox. ffprobe
+  le so o MOOV header (~MB) em vez de baixar o arquivo todo, entao:
+
+    - Custo de banda: ~MB por arquivo (vs GB)
+    - Tempo: ~1-2s por arquivo (rate-limit do Dropbox API mais que do probe)
+    - Resultado: codec real cacheado em probe_cache, proxima census
+      reflete a verdade
+
+  Isso resolve o problema de arquivos H.265 "selvagens" — gravados
+  diretamente como HEVC, sem irma /h265, sem hint no nome — que de
+  outro modo ficam como pending pra sempre ate o pipeline alcanca-
+  los. Botao tem progresso live, contagens (probed/skipped/failed)
+  e cancel.
+
+  [FEAT] Dispatcher folder-priority (maior pasta primeiro)
+  ---------------------------------------------------------
+  Quando a download queue precisa ser refilada, o dispatcher lê
+  folder_census (cache de 60s), agrupa as candidatas por parent
+  folder, e ordena por pending_bytes desc — pasta com maior
+  acumulado vai pra fila primeiro. FIFO entre as pastas continua
+  igual (created_at ASC). Sem gates artificiais, sem semaforo —
+  os downloaders nunca esperam nada alem do disk budget. Quando
+  uma pasta acaba a fila, a proxima maior comeca naturalmente.
+
+  Sem census ainda? cai pro comportamento antigo (FIFO global).
+
+  [INFRA] Schema novo
+  --------------------
+    CREATE TABLE folder_census (path PRIMARY KEY, pending/done/ineligible
+                                 counts + bytes, last_scanned)
+    CREATE TABLE probe_cache  (path PRIMARY KEY, codec, bitrate_kbps,
+                                pix_fmt, width, height, duration_sec, probed_at)
+    CREATE TABLE census_runs  (id, started_at, finished_at, scans + totals, error)
+    CREATE INDEX idx_folder_census_pending_bytes ON folder_census(pending_bytes DESC)
+
+  Migracao automatica no Database.initialize() — nao precisa de
+  passo manual no upgrade.
+
+  [INFRA] Config novo
+  --------------------
+    census:
+      enabled: true
+      daily_run_at: "08:30"
+      initial_run_on_startup: true
+      initial_run_delay_sec: 120
+
+
 Versão: 6.3.6
 Data: 03/05/2026
 --------------------------------------------------------------------------------

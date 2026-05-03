@@ -283,6 +283,12 @@ def _build_handler(api: ApiServer):
                 return self._send_json(_dropbox_list_payload(api, qs))
             if route == "/api/health":
                 return self._send_json(_health_payload(api))
+            if route == "/api/census-tree":
+                return self._send_json(_census_tree_payload(api))
+            if route == "/api/census-status":
+                return self._send_json(_census_status_payload(api))
+            if route == "/api/deep-scan/status":
+                return self._send_json(_deep_scan_status_payload(api))
             if route == "/healthz":
                 return self._send_text("ok")
             self.send_error(404, "not found")
@@ -351,6 +357,24 @@ def _build_handler(api: ApiServer):
             if route == "/api/reorganize/run":
                 body = self._read_json_body() or {}
                 return self._send_json(_reorganize_run(api, body))
+            if route == "/api/census-now":
+                worker = getattr(getattr(api, "daemon", None), "census_worker", None)
+                if worker is None:
+                    return self._send_json({"ok": False, "error": "census worker disabled in config"})
+                worker.trigger_now()
+                return self._send_json({"ok": True, "triggered": True})
+            if route == "/api/deep-scan/start":
+                ds = getattr(getattr(api, "daemon", None), "deep_scan", None)
+                if ds is None:
+                    return self._send_json({"ok": False, "error": "deep-scan worker not initialized"})
+                started = ds.start()
+                return self._send_json({"ok": True, "started": started, "already_running": not started})
+            if route == "/api/deep-scan/cancel":
+                ds = getattr(getattr(api, "daemon", None), "deep_scan", None)
+                if ds is None:
+                    return self._send_json({"ok": False, "error": "deep-scan worker not initialized"})
+                ds.cancel()
+                return self._send_json({"ok": True, "cancelled": True})
             if route == "/api/restart":
                 # Spawn a detached helper (End + 10s gap + Run) before
                 # exiting cleanly. The gap is between End and Run because
@@ -1446,3 +1470,141 @@ def _human_duration(seconds: float) -> str:
         return f"{hours}h {mins}m"
     days, hours = divmod(hours, 24)
     return f"{days}d {hours}h"
+
+
+# =====================================================================
+# Reduction-map census + deep-scan payloads
+# =====================================================================
+
+
+def _census_status_payload(api: ApiServer) -> dict:
+    """Return the worker's current phase + last-run timestamp/totals."""
+    worker = getattr(getattr(api, "daemon", None), "census_worker", None)
+    last = api.db.get_last_census_run()
+    out: dict = {
+        "ok": True,
+        "enabled": api.config.census.enabled,
+        "daily_run_at": api.config.census.daily_run_at,
+        "worker": worker.status() if worker is not None else None,
+        "last_run": last,
+    }
+    return out
+
+
+def _census_tree_payload(api: ApiServer) -> dict:
+    """Build a hierarchical tree from folder_census flat rows.
+
+    Each node carries its own counts/bytes (the folder itself) plus a
+    rolled-up subtree count/bytes (sum of self + descendants), so the
+    dashboard can color a parent by total backlog without doing the math
+    in JS. Children are sorted by `pending_bytes` DESC so the largest
+    backlog floats to the top.
+    """
+    rows = api.db.get_folder_census()
+    last = api.db.get_last_census_run()
+    if not rows:
+        return {
+            "ok": True,
+            "last_run": last,
+            "tree": None,
+        }
+
+    # Build a node per folder. Some intermediate folders may have no row
+    # (because they contain only subfolders, no video files of their own).
+    # We still need them in the tree so the user can navigate. Synthesize
+    # empty rows on the fly.
+    by_path: dict[str, dict] = {}
+    for r in rows:
+        node = _new_tree_node(r["path"])
+        node.update({
+            "self_pending_count": int(r["pending_count"]),
+            "self_pending_bytes": int(r["pending_bytes"]),
+            "self_done_count": int(r["done_count"]),
+            "self_done_bytes": int(r["done_bytes"]),
+            "self_ineligible_count": int(r["ineligible_count"]),
+            "self_ineligible_bytes": int(r["ineligible_bytes"]),
+        })
+        by_path[r["path"]] = node
+
+    # Synthesize ancestor folders so the tree is connected.
+    root = api.config.dropbox_root.rstrip("/") or "/"
+    for path in list(by_path.keys()):
+        cur = path
+        while cur and cur != root and cur != "/":
+            parent = "/".join(cur.rstrip("/").split("/")[:-1]) or "/"
+            if parent not in by_path:
+                by_path[parent] = _new_tree_node(parent)
+            cur = parent
+    if root not in by_path:
+        by_path[root] = _new_tree_node(root)
+
+    # Wire children. Each node's parent gets the child appended.
+    for path, node in by_path.items():
+        if path == root or path == "/":
+            continue
+        parent = "/".join(path.rstrip("/").split("/")[:-1]) or "/"
+        # Map any path that's not in by_path to root (shouldn't happen, but
+        # belt-and-braces).
+        parent_node = by_path.get(parent) or by_path[root]
+        parent_node["children"].append(node)
+
+    # Roll up subtree totals depth-first.
+    def rollup(node: dict) -> None:
+        for c in node["children"]:
+            rollup(c)
+        pending_c = node["self_pending_count"]
+        pending_b = node["self_pending_bytes"]
+        done_c = node["self_done_count"]
+        done_b = node["self_done_bytes"]
+        inel_c = node["self_ineligible_count"]
+        inel_b = node["self_ineligible_bytes"]
+        for c in node["children"]:
+            pending_c += c["pending_count"]
+            pending_b += c["pending_bytes"]
+            done_c += c["done_count"]
+            done_b += c["done_bytes"]
+            inel_c += c["ineligible_count"]
+            inel_b += c["ineligible_bytes"]
+        node["pending_count"] = pending_c
+        node["pending_bytes"] = pending_b
+        node["done_count"] = done_c
+        node["done_bytes"] = done_b
+        node["ineligible_count"] = inel_c
+        node["ineligible_bytes"] = inel_b
+        # Largest backlog first so the user's eye lands on red folders.
+        node["children"].sort(key=lambda x: -x["pending_bytes"])
+
+    rollup(by_path[root])
+
+    return {
+        "ok": True,
+        "last_run": last,
+        "tree": by_path[root],
+    }
+
+
+def _new_tree_node(path: str) -> dict:
+    return {
+        "path": path,
+        "name": path.rsplit("/", 1)[-1] or path,
+        "self_pending_count": 0,
+        "self_pending_bytes": 0,
+        "self_done_count": 0,
+        "self_done_bytes": 0,
+        "self_ineligible_count": 0,
+        "self_ineligible_bytes": 0,
+        "pending_count": 0,
+        "pending_bytes": 0,
+        "done_count": 0,
+        "done_bytes": 0,
+        "ineligible_count": 0,
+        "ineligible_bytes": 0,
+        "children": [],
+    }
+
+
+def _deep_scan_status_payload(api: ApiServer) -> dict:
+    ds = getattr(getattr(api, "daemon", None), "deep_scan", None)
+    if ds is None:
+        return {"ok": True, "status": None}
+    return {"ok": True, "status": ds.status()}

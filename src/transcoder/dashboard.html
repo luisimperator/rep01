@@ -126,6 +126,31 @@
   .reorg-table { font-size: 12px; }
   .reorg-table th { font-size: 11px; }
   .reorg-table .ready { color: var(--ok); } .reorg-table .defer { color: var(--warn); }
+  /* Reduction map tree */
+  .rmap-row { display: flex; align-items: center; gap: .6em; padding: .35em 0; }
+  .rmap-row .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+  .rmap-row .name { font-weight: 500; color: var(--text); word-break: break-all; }
+  .rmap-row .name .full { color: var(--muted); font-size: .85em; }
+  .rmap-row .meta { color: var(--muted); font-size: .82em; flex-shrink: 0; margin-left: auto; }
+  .rmap-bar { height: 5px; border-radius: 3px; overflow: hidden; display: flex;
+              background: #232730; min-width: 80px; flex: 0 0 120px; }
+  .rmap-bar > .b-pending { background: var(--err); }
+  .rmap-bar > .b-done    { background: var(--ok); }
+  .rmap-bar > .b-inel    { background: #555c6a; }
+  .rmap-children { margin-left: 1.5em; border-left: 1px solid var(--border); padding-left: .8em; }
+  .rmap details { padding: 0; border: 0; background: transparent; }
+  .rmap details > summary { cursor: pointer; list-style: none; }
+  .rmap details > summary::-webkit-details-marker { display: none; }
+  .rmap details > summary::before { content: "▸"; display: inline-block; margin-right: .4em;
+                                     color: var(--muted); transition: transform .15s; font-size: .75em; }
+  .rmap details[open] > summary::before { transform: rotate(90deg); }
+  .rmap-leaf { padding-left: 1em; }
+  .rmap-color-green  { color: var(--ok); }
+  .rmap-color-yellow { color: var(--warn); }
+  .rmap-color-red    { color: var(--err); }
+  .deep-scan-toolbar { display: flex; gap: .6em; align-items: center; flex-wrap: wrap;
+                        margin-top: 1em; padding-top: 1em; border-top: 1px solid var(--border); }
+  .deep-scan-progress { font-size: .85em; color: var(--muted); }
   .toast { position: fixed; bottom: 1.5em; right: 1.5em; background: var(--panel);
            border: 1px solid var(--border); padding: .7em 1.1em; border-radius: 8px;
            box-shadow: 0 4px 16px rgba(0,0,0,.4); max-width: 380px; }
@@ -208,6 +233,11 @@
 <details class="panel">
   <summary style="cursor:pointer; color: var(--muted); margin-bottom: .8em;"><strong style="color:var(--text)">Reorganize old conversions</strong> — swap H.265 into the original's spot for files already converted, with folder-age safety</summary>
   <div id="reorg-body" style="margin-top: 1em;"></div>
+</details>
+
+<details class="panel" id="reduction-panel">
+  <summary style="cursor:pointer; color: var(--muted); margin-bottom: .8em;"><strong style="color:var(--text)">Reduction map</strong> — colored tree of folders: red = lots to compress, yellow = some, green = done</summary>
+  <div id="reduction-body" style="margin-top: 1em;"></div>
 </details>
 
 <details class="panel">
@@ -1074,6 +1104,189 @@ function renderStorage(s) {
       <span>${fmtBytes(d.reserved_bytes)} ${d.budget_enabled ? `<span class="hint">cap ${fmtBytes(d.max_staging_bytes)}</span>` : '<span class="hint">budget off</span>'}</span></div>
   `;
 }
+
+// ---------- reduction map (folder tree) ----------
+
+async function renderReductionMap() {
+  const body = document.getElementById('reduction-body');
+  const sp = await safeFetch('/api/census-tree');
+  if (sp._error) {
+    body.innerHTML = `<div class="empty err">Could not load census: ${escapeHtml(sp._error)}</div>`;
+    return;
+  }
+  const last = sp.last_run;
+
+  let header;
+  if (!last) {
+    header = `<div class="empty">No census yet. Click <b>Run census now</b> below to scan the tree.</div>`;
+  } else if (last.error) {
+    header = `<div class="err-hint" style="padding:.5em .8em;border-radius:5px;">Last run failed: ${escapeHtml(last.error)}</div>`;
+  } else if (last.finished_at) {
+    const finished = String(last.finished_at).replace('T', ' ').slice(0, 19);
+    const t = last.pending_total_bytes;
+    const total = last.pending_total_bytes + last.done_total_bytes + last.ineligible_total_bytes;
+    const pct = total > 0 ? (100 * last.pending_total_bytes / total).toFixed(1) : '0';
+    header = `<div class="hint" style="margin-bottom:.6em">Last run: ${escapeHtml(finished)} UTC · ${last.folders_scanned} folders · ${last.files_classified} files
+      <br>Backlog: ${fmtBytes(last.pending_total_bytes)} pending (${pct}% of mapped video) ·
+      ${last.done_total_count} done · ${last.ineligible_total_count} ineligible.</div>`;
+  } else {
+    header = `<div class="hint" style="margin-bottom:.6em">Census in progress…</div>`;
+  }
+
+  let treeHtml = '';
+  if (sp.tree) {
+    treeHtml = `<div class="rmap" style="margin-top:.6em">${renderTreeNode(sp.tree, true)}</div>`;
+  }
+
+  const toolbar = `
+    <div class="deep-scan-toolbar">
+      <button onclick="censusNow()">Run census now</button>
+      <button onclick="renderReductionMap()">Refresh</button>
+      <button onclick="deepScanStart()" id="deep-scan-start-btn">Deep scan (probe unknowns)</button>
+      <button onclick="deepScanCancel()" id="deep-scan-cancel-btn" class="danger" style="display:none">Cancel deep scan</button>
+      <span class="deep-scan-progress" id="deep-scan-progress"></span>
+    </div>
+  `;
+
+  body.innerHTML = header + treeHtml + toolbar;
+  refreshDeepScanStatus();
+}
+
+function rmapColorClass(node) {
+  if (node.pending_count === 0) return 'green';
+  const total = node.pending_bytes + node.done_bytes + node.ineligible_bytes;
+  if (total === 0) return 'green';
+  const pct = node.pending_bytes / total * 100;
+  if (pct < 10) return 'yellow';
+  return 'red';
+}
+
+function rmapBarHtml(node) {
+  const total = node.pending_bytes + node.done_bytes + node.ineligible_bytes;
+  if (total === 0) {
+    return `<span class="rmap-bar"><span class="b-inel" style="width:100%"></span></span>`;
+  }
+  const p = (node.pending_bytes / total * 100).toFixed(1);
+  const d = (node.done_bytes / total * 100).toFixed(1);
+  const i = (node.ineligible_bytes / total * 100).toFixed(1);
+  return `<span class="rmap-bar" title="red=pending · green=done · gray=ineligible">
+    <span class="b-pending" style="width:${p}%"></span>
+    <span class="b-done" style="width:${d}%"></span>
+    <span class="b-inel" style="width:${i}%"></span>
+  </span>`;
+}
+
+function rmapMetaHtml(node) {
+  const color = rmapColorClass(node);
+  if (node.pending_count > 0) {
+    return `<span class="meta rmap-color-${color}">${node.pending_count} pending · ${fmtBytes(node.pending_bytes)}</span>`;
+  }
+  if (node.done_count > 0) {
+    return `<span class="meta rmap-color-${color}">${fmtBytes(node.done_bytes)} done</span>`;
+  }
+  if (node.ineligible_count > 0) {
+    return `<span class="meta" style="color:var(--muted)">${node.ineligible_count} ineligible</span>`;
+  }
+  return `<span class="meta" style="color:var(--muted)">empty</span>`;
+}
+
+function rmapDotHtml(node) {
+  const color = rmapColorClass(node);
+  const dot = color === 'green' ? 'var(--ok)' : (color === 'yellow' ? 'var(--warn)' : 'var(--err)');
+  return `<span class="dot" style="background:${dot}"></span>`;
+}
+
+function renderTreeNode(node, isRoot) {
+  const rowInner = `${rmapDotHtml(node)}<span class="name">${escapeHtml(node.name || node.path)}</span>${rmapBarHtml(node)}${rmapMetaHtml(node)}`;
+  if (node.children.length === 0) {
+    return `<div class="rmap-leaf"><span class="rmap-row">${rowInner}</span></div>`;
+  }
+  const childHtml = node.children.map(c => renderTreeNode(c, false)).join('');
+  return `<details ${isRoot ? 'open' : ''}>
+    <summary><span class="rmap-row">${rowInner}</span></summary>
+    <div class="rmap-children">${childHtml}</div>
+  </details>`;
+}
+
+async function censusNow() {
+  try {
+    const r = await fetchJSON('/api/census-now', { method: 'POST' });
+    if (r.ok) {
+      toast('Census triggered. May take a few minutes; refresh when done.', 'ok');
+    } else {
+      toast('Census trigger failed: ' + (r.error || 'unknown'), 'err');
+    }
+  } catch (e) { toast('Trigger failed: ' + e.message, 'err'); }
+}
+
+async function deepScanStart() {
+  if (!confirm('Deep scan walks the entire tree and probes every unknown file via temporary Dropbox links. This can take hours and uses some bandwidth (~MB per file). Continue?')) return;
+  try {
+    const r = await fetchJSON('/api/deep-scan/start', { method: 'POST' });
+    if (r.started) {
+      toast('Deep scan started.', 'ok');
+    } else if (r.already_running) {
+      toast('Deep scan already running.', 'warn');
+    } else if (r.error) {
+      toast('Start failed: ' + r.error, 'err');
+    }
+    refreshDeepScanStatus();
+  } catch (e) { toast('Start failed: ' + e.message, 'err'); }
+}
+
+async function deepScanCancel() {
+  try {
+    await fetchJSON('/api/deep-scan/cancel', { method: 'POST' });
+    toast('Cancelling deep scan…', 'ok');
+    refreshDeepScanStatus();
+  } catch (e) { toast('Cancel failed: ' + e.message, 'err'); }
+}
+
+let _deepScanPollTimer = null;
+async function refreshDeepScanStatus() {
+  const sp = await safeFetch('/api/deep-scan/status');
+  const elProg = document.getElementById('deep-scan-progress');
+  const elCancel = document.getElementById('deep-scan-cancel-btn');
+  const elStart = document.getElementById('deep-scan-start-btn');
+  if (!elProg) return;
+  if (sp._error || !sp.status) {
+    elProg.textContent = '';
+    if (elCancel) elCancel.style.display = 'none';
+    if (elStart) elStart.disabled = false;
+    return;
+  }
+  const s = sp.status;
+  if (s.state === 'running' || s.state === 'cancelling') {
+    const pct = s.total > 0 ? Math.round(100 * s.done / s.total) : 0;
+    elProg.textContent = `${s.state}: ${s.done}/${s.total} (${pct}%) · probed ${s.probed} · skipped ${s.skipped} · failed ${s.failed}`;
+    if (elCancel) elCancel.style.display = '';
+    if (elStart) elStart.disabled = true;
+    if (_deepScanPollTimer) clearTimeout(_deepScanPollTimer);
+    _deepScanPollTimer = setTimeout(refreshDeepScanStatus, 2500);
+  } else if (s.state === 'finished') {
+    elProg.textContent = `Finished: probed ${s.probed} · skipped ${s.skipped} · failed ${s.failed}`;
+    if (elCancel) elCancel.style.display = 'none';
+    if (elStart) elStart.disabled = false;
+  } else if (s.state === 'error') {
+    elProg.textContent = `Error: ${escapeHtml(s.error || 'unknown')}`;
+    if (elCancel) elCancel.style.display = 'none';
+    if (elStart) elStart.disabled = false;
+  } else {
+    elProg.textContent = '';
+    if (elCancel) elCancel.style.display = 'none';
+    if (elStart) elStart.disabled = false;
+  }
+}
+
+// Lazy-load the tree the first time the panel is expanded so the
+// dashboard tick stays cheap.
+let _rmapLoaded = false;
+document.getElementById('reduction-panel').addEventListener('toggle', (ev) => {
+  if (ev.target.open && !_rmapLoaded) {
+    _rmapLoaded = true;
+    renderReductionMap();
+  }
+});
 
 renderSettings();
 loadReorgPanel();
