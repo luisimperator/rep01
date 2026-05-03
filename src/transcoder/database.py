@@ -1152,6 +1152,55 @@ class Database:
 
         return [Job.from_row(row) for row in cursor.fetchall()]
 
+    def get_savings_stats_buckets(self) -> dict:
+        """Reduction ratio segmented by input bitrate band.
+
+        Bitrate is the only resolution proxy we already store on every
+        completed job (probing didn't always persist width/height into the
+        jobs table). Buckets:
+
+          - low      : < 8 Mbps   (1080p web, low-bitrate camera)
+          - mid      : 8–25 Mbps (1080p high / 4K low)
+          - high     : 25–60 Mbps (4K standard / cinema proxy)
+          - veryhigh : >= 60 Mbps  (4K10b/8K masters, RED, ProRes)
+
+        Returns {bucket: {jobs, input_bytes, output_bytes, avg_reduction_pct}}.
+        Buckets with fewer than 5 jobs are returned but the caller should
+        treat their ratios as low-confidence.
+        """
+        conn = self._get_connection()
+        cursor = conn.execute(
+            f"""
+            SELECT
+                CASE
+                    WHEN input_bitrate_kbps IS NULL OR input_bitrate_kbps <= 0 THEN 'unknown'
+                    WHEN input_bitrate_kbps < 8000  THEN 'low'
+                    WHEN input_bitrate_kbps < 25000 THEN 'mid'
+                    WHEN input_bitrate_kbps < 60000 THEN 'high'
+                    ELSE 'veryhigh'
+                END AS bucket,
+                COUNT(*) AS jobs,
+                COALESCE(SUM(dropbox_size), 0) AS input_bytes,
+                COALESCE(SUM(output_size), 0) AS output_bytes
+            FROM jobs
+            WHERE state = ? AND output_size IS NOT NULL
+            GROUP BY bucket
+            """,
+            (JobState.DONE.value,),
+        )
+        out: dict[str, dict] = {}
+        for row in cursor.fetchall():
+            ib = int(row['input_bytes']) or 0
+            ob = int(row['output_bytes']) or 0
+            ratio = (1 - ob / ib) * 100 if ib > 0 else 0.0
+            out[row['bucket']] = {
+                'jobs': int(row['jobs']),
+                'input_bytes': ib,
+                'output_bytes': ob,
+                'avg_reduction_pct': round(ratio, 1),
+            }
+        return out
+
     def count_jobs(self, state: JobState | None = None) -> int:
         """Count jobs, optionally filtered by state."""
         conn = self._get_connection()

@@ -2,6 +2,63 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.4.1
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+REDUCTION PROJECTION — quanto vai liberar e onde a gente vai parar.
+
+  [FEAT] Card "Reduction projection" abaixo do Dropbox storage
+  -------------------------------------------------------------
+  Pega a razao historica de reducao (db.get_savings_stats — ja
+  existia) e aplica nos pending_bytes da census mais recente.
+  Mostra:
+
+    "23.4 TB pending → ~8.9 TB freeable
+     · 14.5 TB H.265 output
+     Projected after backlog: 32.1 TB
+     ✓ would reach the 50 TB target with 17.9 TB to spare
+     based on 138 completed jobs · 38.0% avg reduction"
+
+  Quando a razao historica e <= 0 (caso patologico de fonte ja
+  pequena que cresce no transcode), o estimate clampa em 0 — nunca
+  promete "voce vai GANHAR storage".
+
+  [FEAT] Marker "after backlog" no Dropbox storage card
+  ------------------------------------------------------
+  Tick vertical azul na barra de progresso indica onde o uso vai
+  parar quando o backlog for processado. Tooltip e label inline
+  mostram o numero exato. Quando nao tem projecao ainda, marker
+  some silenciosamente.
+
+  [FEAT] Estimativa por pasta na arvore Reduction map
+  ----------------------------------------------------
+  Cada pasta com pending agora mostra "~X freeable" em verde ao
+  lado do count + bytes. Usa a razao GLOBAL (nao a por-pasta) —
+  precisao aceitavel pra orientar prioridade. Quando voce expande
+  uma sub-arvore, ve onde concentrar esforco pra liberar mais TB.
+
+  [FEAT] Reduction by source bitrate (segmentacao)
+  -------------------------------------------------
+  Linha extra no card mostra a razao quebrada por banda de bitrate
+  do source — proxy de resolucao:
+
+    <8 Mbps: 32%   8-25 Mbps: 51%   25-60 Mbps: 67%   ≥60 Mbps: 73%
+
+  Buckets com <5 jobs ganham um marker "·low conf" pra calibrar
+  expectativas. So aparece quando ha pelo menos um bucket com
+  amostra. Ainda usamos a razao GLOBAL pro estimate principal —
+  esse breakdown e diagnostico pra voce sanity-checar se o numero
+  faz sentido pro tipo de material que esta no pending.
+
+  [PERF] Projection cacheado por 30s no client
+  ---------------------------------------------
+  /api/projection so e refetched 1x a cada 30s no tick loop, ja
+  que os dados subjacentes (census + jobs DONE) movem em escala
+  de minutos/horas. Storage card lê window._lastProjection pra
+  desenhar o marker sem fetch extra.
+
+
 Versão: 6.4.0
 Data: 03/05/2026
 --------------------------------------------------------------------------------
