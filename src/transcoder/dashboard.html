@@ -1344,7 +1344,7 @@ async function censusNow() {
 }
 
 async function deepScanStart() {
-  if (!confirm('Deep scan walks the entire tree and probes every unknown file via temporary Dropbox links. This can take hours and uses some bandwidth (~MB per file). Continue?')) return;
+  if (!confirm('Deep scan walks the entire tree and probes every unknown file via temporary Dropbox links.\n\nWhile it runs, the main pipeline\'s downloads/uploads are THROTTLED to ~1 MB/s (~5% of WAN) so the deep-scan probes get priority. Pipeline returns to full speed automatically when the scan finishes or is cancelled.\n\nThis can take hours. Continue?')) return;
   try {
     const r = await fetchJSON('/api/deep-scan/start', { method: 'POST' });
     if (r.started) {
