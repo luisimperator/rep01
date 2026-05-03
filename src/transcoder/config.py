@@ -285,6 +285,51 @@ class WatchdogSettings(BaseModel):
     )
 
 
+class CensusSettings(BaseModel):
+    """Reduction-map census worker settings.
+
+    The census walks the entire Dropbox tree under dropbox_root once a day,
+    classifies every file (pending / done / ineligible), and stores a
+    per-folder rollup in folder_census. The dashboard renders the colored
+    tree from that snapshot. Walking 50TB takes minutes, so we run it
+    sparingly — once a day is plenty.
+    """
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Master switch. When false, the census thread doesn't start; "
+            "the reduction-map tree on the dashboard shows the last "
+            "snapshot (or empty if none yet)."
+        ),
+    )
+    daily_run_at: str = Field(
+        default="08:30",
+        description=(
+            "Local clock time HH:MM the census runs each day. The daemon "
+            "wakes up, walks the tree, refreshes folder_census, then sleeps "
+            "until the next 08:30 (or whatever's configured). The /api/"
+            "census-now endpoint can also trigger an out-of-band run."
+        ),
+    )
+    initial_run_on_startup: bool = Field(
+        default=True,
+        description=(
+            "Run a census once shortly after the daemon starts so the "
+            "dashboard has data on first boot. Subsequent runs follow the "
+            "daily_run_at schedule."
+        ),
+    )
+    initial_run_delay_sec: int = Field(
+        default=120,
+        ge=0,
+        description=(
+            "Delay before the startup census kicks off. Lets the rest of "
+            "the daemon settle (Dropbox auth, dispatcher, workers) before "
+            "the long Dropbox walk starts."
+        ),
+    )
+
+
 class IncidentsSettings(BaseModel):
     """Auto-reporting of daemon errors as GitHub Issues."""
     enabled: bool = Field(
@@ -430,6 +475,11 @@ class Config(BaseModel):
     # Update-notification via GitHub Releases (notify-only; apply via `hd update`)
     updater: UpdaterSettings = Field(default_factory=UpdaterSettings)
     incidents: IncidentsSettings = Field(default_factory=IncidentsSettings)
+
+    # Reduction-map census: daily Dropbox tree walk that classifies every
+    # file (pending/done/ineligible) and powers the dashboard's colored
+    # folder tree.
+    census: CensusSettings = Field(default_factory=CensusSettings)
 
     # Dropbox API token-bucket rate limiter
     dropbox_api: DropboxApiSettings = Field(default_factory=DropboxApiSettings)

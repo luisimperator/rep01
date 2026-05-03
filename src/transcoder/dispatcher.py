@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from pathlib import PurePosixPath
 from queue import Empty, Full, Queue
 from typing import TYPE_CHECKING
 
@@ -69,6 +70,14 @@ class JobDispatcher(threading.Thread):
         # Pause flag: when set, the dispatcher keeps running but stops refilling
         # queues. Workers drain whatever is already in flight and then idle.
         self._paused = threading.Event()
+
+        # Per-folder pending bytes, refreshed periodically from folder_census.
+        # Used to bias the download queue toward whichever folder still has
+        # the largest backlog of H.264 to chew through (folder-drain priority).
+        # Empty until the first census run completes.
+        self._folder_priority: dict[str, int] = {}
+        self._folder_priority_at: float = 0.0
+        self._folder_priority_ttl_sec: float = 60.0
 
     # ------------------------------------------------------------------ public
 
@@ -124,7 +133,10 @@ class JobDispatcher(threading.Thread):
         while not self.stop_event.is_set():
             try:
                 if not self._paused.is_set():
-                    self._refill(self.download_q, DOWNLOAD_STATES)
+                    # Download queue is the entry point — that's where folder
+                    # priority matters. Once a job is past download, the
+                    # downstream stages process whatever lands their way.
+                    self._refill(self.download_q, DOWNLOAD_STATES, prioritize_folder=True)
                     # Video jobs only — audio jobs in DOWNLOADED state route
                     # to audio_transcode_q below.
                     self._refill(self.transcode_q, TRANSCODE_STATES, kind="video")
@@ -141,7 +153,13 @@ class JobDispatcher(threading.Thread):
 
     # ----------------------------------------------------------------- private
 
-    def _refill(self, q: Queue[Job], states: set[JobState], kind: str | None = None) -> None:
+    def _refill(
+        self,
+        q: Queue[Job],
+        states: set[JobState],
+        kind: str | None = None,
+        prioritize_folder: bool = False,
+    ) -> None:
         free = q.maxsize - q.qsize()
         if free <= 0:
             return
@@ -149,10 +167,18 @@ class JobDispatcher(threading.Thread):
         # Over-fetch: dispatchable jobs may already be in flight (active_set).
         # If a kind filter is set we over-fetch more aggressively because the
         # candidate list may contain mostly the wrong kind for this queue.
-        fetch_limit = free * (4 if kind else 2)
+        # When folder-prioritizing, fetch a wider net so we have room to
+        # reorder before truncating to `free`.
+        if prioritize_folder:
+            fetch_limit = max(free * 8, 500)
+        else:
+            fetch_limit = free * (4 if kind else 2)
         candidates = self.db.get_dispatchable_jobs(states, limit=fetch_limit)
         if not candidates:
             return
+
+        if prioritize_folder:
+            candidates = self._sort_by_folder_priority(candidates)
 
         with self._active_lock:
             for job in candidates:
@@ -168,3 +194,40 @@ class JobDispatcher(threading.Thread):
                     break
                 self._active_set.add(job.id)
                 free -= 1
+
+    def _sort_by_folder_priority(self, jobs: list[Job]) -> list[Job]:
+        """Stable sort: largest folder backlog first, then FIFO by created_at.
+
+        Folders with no census data (or zero pending bytes) sink to the end.
+        This is best-effort — once a job leaves NEW state the downstream
+        stages don't re-prioritize.
+        """
+        priority = self._get_folder_priority()
+        if not priority:
+            return jobs  # no census yet → fall back to created_at order
+
+        def key(job: Job) -> tuple:
+            parent = str(PurePosixPath(job.dropbox_path).parent)
+            # Negate for descending; jobs with no folder-priority entry
+            # get 0 → sorted last but still in created_at order among
+            # themselves.
+            return (-priority.get(parent, 0), job.created_at)
+
+        return sorted(jobs, key=key)
+
+    def _get_folder_priority(self) -> dict[str, int]:
+        """Cache folder_census reads — refresh once a minute.
+
+        Census runs at most once a day; refreshing more often than every
+        minute is wasted SQLite work. The dispatcher polls every 2s by
+        default so even a 60s TTL is well within the cadence.
+        """
+        now = time.monotonic()
+        if (now - self._folder_priority_at) > self._folder_priority_ttl_sec:
+            try:
+                self._folder_priority = self.db.get_folder_pending_bytes_map()
+            except Exception:
+                logger.exception("dispatcher: folder priority refresh failed")
+                self._folder_priority = {}
+            self._folder_priority_at = now
+        return self._folder_priority
