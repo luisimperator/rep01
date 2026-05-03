@@ -2,6 +2,29 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.7.1
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+UI tidying: LAN card volta pro fim mas dentro de um collapsible;
+Storage local tambem virou collapsible.
+
+  [UX] "Open this dashboard from another device" agora colapsavel
+  ---------------------------------------------------------------
+  Antes era uma caixa permanente sempre expandida no rodape. Agora
+  e um <details> panel logo acima do Activity log com summary
+  "Open this dashboard from another device — Tailscale + LAN URLs
+  with access token". O panel aparece so quando bind != loopback
+  (caso contrario nao ha o que mostrar). renderLanCard atualizada
+  pra mostrar/esconder o panel via display:none.
+
+  [UX] Storage (local paths) tambem ficou collapsible
+  ---------------------------------------------------
+  Mesma ideia: paths locais (staging, output, logs, db) so
+  importam pra debug ocasional. Virou um <details> entre Workers
+  e Scanner pra liberar espaco vertical no scroll do dia-a-dia.
+
+
 Versão: 6.7.0
 Data: 03/05/2026
 --------------------------------------------------------------------------------
