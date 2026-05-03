@@ -959,47 +959,129 @@ function confirmBrowse() {
 }
 
 // Cross-browser clipboard write that works on HTTP (Tailscale, LAN) and on
-// iOS Safari, which silently rejects navigator.clipboard.writeText() outside
-// secure contexts. Falls back to the legacy textarea + execCommand("copy")
-// pattern, which iOS still honors when called from a user gesture.
-function copyText(text) {
-  if (navigator.clipboard && window.isSecureContext) {
-    return navigator.clipboard.writeText(text);
+// iOS Safari PWA, which silently rejects navigator.clipboard.writeText()
+// outside secure contexts AND has extra requirements on the legacy
+// textarea + execCommand("copy") fallback (readonly textareas and
+// hidden/zero-opacity elements get rejected).
+async function copyText(text) {
+  // Try the modern API even without an explicit isSecureContext check —
+  // iOS PWA standalone occasionally honours it over HTTP local network.
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return;
+    } catch (e) {
+      // Fall through to legacy path below.
+    }
   }
+
+  // Legacy fallback. iOS-friendly recipe:
+  //  - Use a contentEditable span instead of a readonly textarea
+  //    (Safari refuses copy from readonly inputs when not user-typed).
+  //  - Select via Range + Selection API (iOS ignores .select() on hidden
+  //    inputs).
+  //  - Keep the element on-screen-ish (top: 50%) but pointer-events:none
+  //    so it can't intercept touches; opacity 0 + tiny size so it's
+  //    invisible. iOS Safari's "is this element visible enough to copy
+  //    from" heuristic is satisfied this way.
   return new Promise((resolve, reject) => {
-    const ta = document.createElement('textarea');
-    ta.value = text;
-    ta.setAttribute('readonly', '');
-    ta.style.position = 'fixed';
-    ta.style.top = '0';
-    ta.style.left = '0';
-    ta.style.width = '1px';
-    ta.style.height = '1px';
-    ta.style.opacity = '0';
-    document.body.appendChild(ta);
-    // iOS quirks: focus + setSelectionRange — plain .select() doesn't
-    // surface the selection on Safari mobile.
-    ta.focus();
-    ta.select();
-    ta.setSelectionRange(0, text.length);
+    const el = document.createElement('span');
+    el.textContent = text;
+    el.contentEditable = 'true';
+    el.style.cssText = (
+      'position:fixed; top:50%; left:50%; ' +
+      'width:1px; height:1px; padding:0; ' +
+      'opacity:0; pointer-events:none; ' +
+      '-webkit-user-select:text; user-select:text;'
+    );
+    document.body.appendChild(el);
+
     let ok = false;
-    try { ok = document.execCommand('copy'); }
-    catch (e) { /* fall through */ }
-    document.body.removeChild(ta);
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+      try { ok = document.execCommand('copy'); } catch (e) { /* ignore */ }
+      sel.removeAllRanges();
+    } finally {
+      document.body.removeChild(el);
+    }
+
     if (ok) resolve();
-    else reject(new Error('execCommand("copy") returned false'));
+    else reject(new Error('clipboard blocked by browser — try the modern API on HTTPS, or use the long-press → Select All → Copy fallback below'));
   });
+}
+
+// Convenience wrapper: try copyText, fall back to the modal on failure.
+// Returns {copied: bool} so callers can decide whether to toast "Copied".
+async function copyTextOrShow(text, title) {
+  try {
+    await copyText(text);
+    return { copied: true };
+  } catch (e) {
+    showCopyFallback(text, title || 'Copy this');
+    return { copied: false };
+  }
+}
+
+// iOS PWA fallback: when copyText fails, surface the content in a modal
+// dialog with a textarea the user can long-press → Select All → Copy.
+// Works on HTTP because no clipboard API is involved — pure DOM selection.
+function showCopyFallback(text, title) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = (
+    'position:fixed; inset:0; background:rgba(0,0,0,.85); z-index:9999; ' +
+    'display:flex; flex-direction:column; padding:1em; gap:.6em; ' +
+    'padding-top:max(1em, env(safe-area-inset-top));'
+  );
+  const header = document.createElement('div');
+  header.style.cssText = 'display:flex; justify-content:space-between; align-items:center; color:var(--text);';
+  header.innerHTML = `<b>${escapeHtml(title || 'Copy this')}</b>
+    <button onclick="this.closest('.copy-fallback-overlay').remove()" style="background:#2a2e36;color:var(--text);border:1px solid #353a45;border-radius:5px;padding:.4em .9em;font:inherit;cursor:pointer">Close</button>`;
+  const hint = document.createElement('div');
+  hint.style.cssText = 'color:var(--muted); font-size:.88em;';
+  hint.textContent = 'Tap inside the box, then long-press → Select All → Copy.';
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = (
+    'flex:1; width:100%; background:#0a0b0d; color:#cbe3d3; ' +
+    'border:1px solid var(--border); border-radius:6px; padding:.6em; ' +
+    'font:12px/1.4 ui-monospace, "SF Mono", Consolas, monospace; ' +
+    'resize:none; -webkit-user-select:text; user-select:text;'
+  );
+  overlay.className = 'copy-fallback-overlay';
+  overlay.appendChild(header);
+  overlay.appendChild(hint);
+  overlay.appendChild(ta);
+  document.body.appendChild(overlay);
+  // Focus + select for instant action when the user taps Copy from
+  // the iOS contextual menu.
+  setTimeout(() => { ta.focus(); ta.setSelectionRange(0, ta.value.length); }, 50);
 }
 
 async function copyLog(n) {
   const lines = n || 200;
+  let text = '';
+  let count = 0;
   try {
     const r = await fetchJSON('/api/log?lines=' + lines);
-    const text = (r.lines || []).join('\n');
-    await copyText(text);
-    toast(`Copied ${(r.lines || []).length} log lines to clipboard`, 'ok');
+    text = (r.lines || []).join('\n');
+    count = (r.lines || []).length;
   } catch (e) {
-    toast('Copy failed: ' + e.message, 'err');
+    toast('Failed to fetch log: ' + e.message, 'err');
+    return;
+  }
+  try {
+    await copyText(text);
+    toast(`Copied ${count} log lines to clipboard`, 'ok');
+  } catch (e) {
+    // Clipboard API + execCommand both blocked (typical iOS Safari PWA
+    // over HTTP). Surface the log in a modal so the operator can long-
+    // press → Select All → Copy by hand.
+    showCopyFallback(text, `Activity log (${count} lines)`);
+    toast('Clipboard blocked — opened text view for manual copy.', 'warn');
   }
 }
 
@@ -1112,7 +1194,7 @@ function renderLanCard(s) {
       const full = link(url);
       body += `<div style="display:flex;gap:.6em;align-items:center;flex-wrap:wrap;">
         <code style="background:var(--panel-2);padding:.3em .6em;border-radius:4px;flex:1;min-width:0;word-break:break-all;">${escapeHtml(full)}</code>
-        <button onclick="copyText('${escapeHtml(full)}').then(()=>toast('Copied','ok')).catch(e=>toast('Copy failed: '+e.message,'err'))">Copy</button>
+        <button onclick="copyTextOrShow('${escapeHtml(full)}', 'Dashboard URL').then(r=>r.copied&&toast('Copied','ok'))">Copy</button>
       </div>`;
     }
     body += `</div>`;
