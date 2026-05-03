@@ -2,6 +2,27 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.3.6
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+RESTART TIMING FIX: 10s gap moved between End and Run
+
+  [BUGFIX] Restart helper esperava antes de matar o daemon antigo
+  ----------------------------------------------------------------
+  ANTES: a v6.3.5 colocou os 10s antes do `schtasks /End`. Mas o
+         port 9123 + ffmpeg children so liberam DEPOIS do End — entao
+         o gap antes do End nao protegia a nova instancia. O Run
+         disparava com o port ainda preso, race no bind, daemon novo
+         nao subia.
+
+  AGORA: helper roda 2s buffer + End + 10s gap + Run. O gap critico
+         fica entre End e Run, que e onde o OS realmente precisa do
+         tempo pra liberar 9123 e finalizar ffmpeg.exe orfaos. Mesma
+         logica do que o operador fazia na mao quando o restart
+         imediato falhava (rodando /Run duas vezes).
+
+
 Versão: 6.3.5
 Data: 03/05/2026
 --------------------------------------------------------------------------------
