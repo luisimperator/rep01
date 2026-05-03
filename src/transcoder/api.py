@@ -1678,19 +1678,28 @@ def _projection_payload(api: ApiServer) -> dict:
     estimated_output_bytes = pending_bytes - estimated_freed_bytes
 
     # ETA from recent throughput. Use INPUT bytes consumed (= bytes the
-    # daemon processed off the pending pile) per real day. 7-day window
-    # smooths over weekends / off-days but still tracks current pace.
-    bytes_per_day = (savings_recent.get("input_bytes") or 0) / 7.0
+    # daemon processed off the pending pile) per real day. The denominator
+    # is the SHORTER of 7 days or "time since first DONE under this root"
+    # — without that bound, a daemon that just started yesterday and
+    # processed 1 TB in 24h gets reported as 1/7 TB/day = 143 GB/day, and
+    # the ETA inflates by 7×. Min span 12h so a half-day of activity
+    # doesn't divide-by-near-zero into infinity.
+    started_at = api.db.get_earliest_done_at(path_prefix=root)
+    started_at_iso = started_at.isoformat() if started_at else None
+
+    seven_days_sec = 7 * 86400
+    if started_at and started_at > seven_days_ago:
+        span_sec = (datetime.now(timezone.utc) - started_at).total_seconds()
+    else:
+        span_sec = seven_days_sec
+    span_sec = max(43200.0, span_sec)  # floor at 12h
+    bytes_per_day = (savings_recent.get("input_bytes") or 0) * 86400.0 / span_sec
     eta_days = None
     eta_at_iso = None
     if bytes_per_day > 0 and pending_bytes > 0:
         eta_days = pending_bytes / bytes_per_day
         eta_at = datetime.now(timezone.utc) + timedelta(days=eta_days)
         eta_at_iso = eta_at.isoformat()
-
-    # Started timeline anchor — earliest DONE job under root.
-    started_at = api.db.get_earliest_done_at(path_prefix=root)
-    started_at_iso = started_at.isoformat() if started_at else None
 
     # Progress numbers for the bar.
     done_bytes_root = int(savings_root.get("input_bytes") or 0)
@@ -1716,6 +1725,7 @@ def _projection_payload(api: ApiServer) -> dict:
         "eta_days": eta_days,
         "eta_at": eta_at_iso,
         "bytes_per_day_recent": int(bytes_per_day),
+        "rate_window_days": round(span_sec / 86400.0, 2),
         "recent_jobs": int(savings_recent.get("jobs") or 0),
         "recent_input_bytes": int(savings_recent.get("input_bytes") or 0),
         # Reduction ratio (per-root)

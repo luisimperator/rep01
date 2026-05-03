@@ -1177,10 +1177,14 @@ async function renderProjection() {
   if (etaDays != null && etaIso) {
     const etaDaysInt = Math.round(etaDays);
     const dayWord = etaDaysInt === 1 ? 'day' : 'days';
+    const win = p.rate_window_days || 7;
+    const winLabel = win >= 6.5
+      ? 'last 7 days'
+      : (win < 1.5 ? `last ${(win * 24).toFixed(0)} hours` : `last ${win.toFixed(1)} days`);
     etaLine = `
       <div style="margin-top:.5em;font-size:.95em">
         ETA: <b>${fmtDateShort(etaIso)}</b>
-        <span style="color:var(--muted)"> · ~${etaDaysInt} ${dayWord} at ${ratePerDayTb >= 1 ? ratePerDayTb.toFixed(2) + ' TB' : (ratePerDayTb * 1024).toFixed(0) + ' GB'}/day (last 7 days, ${p.recent_jobs} jobs)</span>
+        <span style="color:var(--muted)"> · ~${etaDaysInt} ${dayWord} at ${ratePerDayTb >= 1 ? ratePerDayTb.toFixed(2) + ' TB' : (ratePerDayTb * 1024).toFixed(0) + ' GB'}/day (${winLabel}, ${p.recent_jobs} jobs)</span>
       </div>`;
   } else {
     etaLine = `
