@@ -462,6 +462,7 @@ class Daemon:
             self.workers.append(self.census_worker)
         self.deep_scan = DeepScanWorker(
             self.config, self.db, self.dropbox, self.stop_event,
+            dispatcher=self.dispatcher,
         )
 
         audio_n = self.config.concurrency.audio_workers if self.config.audio.enabled else 0

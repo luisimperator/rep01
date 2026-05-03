@@ -28,6 +28,67 @@ from .rate_limit import TokenBucket
 logger = logging.getLogger(__name__)
 
 
+class BandwidthGovernor:
+    """Leaky-bucket throttle shared by every download/upload chunk loop.
+
+    When `throttled` is True, each chunk completion sleeps long enough
+    that the cumulative byte rate stays at or below `max_bytes_per_sec`.
+    Used by the deep-scan worker to claim ~95% of the WAN by capping
+    the main pipeline's transfer rate to a trickle while it probes.
+
+    Singleton (module-level GOVERNOR below). Thread-safe per-call: the
+    bookkeeping is per-instance state guarded by a lock so concurrent
+    workers see one shared bucket and divide the cap between them
+    instead of each claiming the full quota.
+    """
+
+    def __init__(self) -> None:
+        self.throttled = False
+        # Default low cap — set when throttled. 1 MB/s gives the main
+        # pipeline ~5% of a typical 200 Mbps WAN, leaving the rest for
+        # deep-scan probes. Tunable via set_throttle().
+        self.max_bytes_per_sec = 1_000_000
+        self._lock = threading.Lock()
+        self._bucket_sec = time.monotonic()  # window start
+        self._bucket_bytes = 0               # bytes consumed in current window
+
+    def set_throttle(self, on: bool, max_mbps: float = 1.0) -> None:
+        with self._lock:
+            self.throttled = bool(on)
+            self.max_bytes_per_sec = max(50_000, int(max_mbps * 1_000_000))
+            # Reset the bucket so the next chunk doesn't see stale credit.
+            self._bucket_sec = time.monotonic()
+            self._bucket_bytes = 0
+
+    def consume(self, n_bytes: int) -> None:
+        """Account `n_bytes` against the bucket; sleep if we're over the cap."""
+        if not self.throttled or n_bytes <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            window = now - self._bucket_sec
+            # Roll the window each second so the bucket doesn't grow forever.
+            if window >= 1.0:
+                self._bucket_sec = now
+                self._bucket_bytes = 0
+                window = 0.0
+            self._bucket_bytes += n_bytes
+            allowed_bytes = int(self.max_bytes_per_sec * (window + 1.0))
+            if self._bucket_bytes > allowed_bytes:
+                # Sleep enough to bring effective rate back to the cap.
+                excess_bytes = self._bucket_bytes - allowed_bytes
+                sleep_sec = excess_bytes / self.max_bytes_per_sec
+                # Cap any single sleep so a chunk burst doesn't stall a
+                # whole worker for minutes.
+                sleep_sec = min(sleep_sec, 5.0)
+        if sleep_sec > 0:
+            time.sleep(sleep_sec)
+
+
+import threading
+GOVERNOR = BandwidthGovernor()
+
+
 @dataclass
 class DropboxFileInfo:
     """Information about a file in Dropbox."""
@@ -543,6 +604,7 @@ class DropboxClient:
                         bytes_downloaded += len(chunk)
                         if progress_callback:
                             progress_callback(bytes_downloaded, total_size)
+                        GOVERNOR.consume(len(chunk))
 
             return current_rev
 
@@ -608,6 +670,7 @@ class DropboxClient:
 
                         if progress_callback:
                             progress_callback(bytes_downloaded, total_size)
+                        GOVERNOR.consume(len(chunk))
 
                         # Periodic rev check
                         if bytes_downloaded - last_check_bytes >= check_interval:
@@ -653,13 +716,15 @@ class DropboxClient:
 
         def operation() -> DropboxFileInfo:
             if file_size <= self.CHUNK_SIZE:
-                # Small file: single upload
+                # Small file: single upload. Account for it post-hoc since
+                # we can't sub-chunk a single-shot upload.
                 with open(local_path, 'rb') as f:
                     metadata = self._dbx.files_upload(
                         f.read(),
                         norm_path,
                         mode=mode,
                     )
+                GOVERNOR.consume(file_size)
                 if progress_callback:
                     progress_callback(file_size, file_size)
                 return DropboxFileInfo.from_metadata(metadata)
@@ -690,6 +755,7 @@ class DropboxClient:
             session = self._dbx.files_upload_session_start(chunk)
             session_id = session.session_id
             bytes_uploaded = len(chunk)
+            GOVERNOR.consume(len(chunk))
 
             if progress_callback:
                 progress_callback(bytes_uploaded, file_size)
@@ -710,6 +776,7 @@ class DropboxClient:
                     self._dbx.files_upload_session_append_v2(chunk, cursor)
                     bytes_uploaded += len(chunk)
                     cursor.offset = bytes_uploaded
+                    GOVERNOR.consume(len(chunk))
                 else:
                     # Final chunk
                     commit = dropbox.files.CommitInfo(
@@ -722,6 +789,7 @@ class DropboxClient:
                         commit,
                     )
                     bytes_uploaded += len(chunk)
+                    GOVERNOR.consume(len(chunk))
                     if progress_callback:
                         progress_callback(bytes_uploaded, file_size)
                     return DropboxFileInfo.from_metadata(metadata)

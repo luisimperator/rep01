@@ -2,6 +2,37 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.4.3
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+DEEP SCAN BANDWIDTH PRIORITY — pipeline throttled to ~5% during scan
+
+  [FEAT] Global BandwidthGovernor (leaky bucket) em dropbox_client.py
+  -------------------------------------------------------------------
+  Singleton thread-safe que cada loop de chunk de download/upload
+  consulta. Quando throttled=True, sleeps por chunk pra manter o
+  agregado dentro do max_bytes_per_sec. Default 1 MB/s quando
+  ativo, off (full speed) quando inativo.
+
+  Wired em download_file, download_file_with_rev_check, _chunked_upload,
+  e no caminho single-shot upload (account post-hoc).
+
+  [FEAT] Deep scan ativa o throttle automaticamente
+  --------------------------------------------------
+  DeepScanWorker._run() faz GOVERNOR.set_throttle(True, max_mbps=1.0)
+  no inicio e set_throttle(False) num try/finally. Pipeline continua
+  rodando (downloads e uploads nao param), so passa a fluir devagar
+  enquanto o deep scan ataca os probes.
+
+  Resultado: deep scan herda ~95% da banda WAN sem precisar pausar
+  nada. Quando termina/cancela/falha, pipeline volta sozinho a full speed.
+
+  Diff vs versao anterior do que foi codado: a v6.4.3 NAO pausa o
+  dispatcher (esse approach foi substituido); throttle real de bytes
+  e a abordagem final.
+
+
 Versão: 6.4.2
 Data: 03/05/2026
 --------------------------------------------------------------------------------

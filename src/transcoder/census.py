@@ -519,7 +519,18 @@ class DeepScanWorker:
     h265 sibling, no filename hint), pulls a temporary CDN URL, and runs
     `ffprobe -probesize 5M` on it. Codec + bitrate land in probe_cache so
     the next census reflects truth.
+
+    Bandwidth priority: while deep scan runs, we activate the global
+    BandwidthGovernor in dropbox_client which caps the main pipeline's
+    download/upload chunk rate to ~1 MB/s. The pipeline keeps moving
+    (no pause), just slowly — so the deep scan probes get the lion's
+    share of the WAN.
     """
+
+    # While deep scan runs, throttle the main pipeline's download/upload
+    # chunks to this MB/s. ~1 MB/s ≈ 5% of a 200 Mbps line, leaving the
+    # rest for the deep-scan probe fetches.
+    PIPELINE_THROTTLE_MBPS = 1.0
 
     def __init__(
         self,
@@ -527,11 +538,15 @@ class DeepScanWorker:
         db: Database,
         dropbox: "DropboxClient",
         stop_event: threading.Event,
+        dispatcher=None,
     ) -> None:
         self.config = config
         self.db = db
         self.dropbox = dropbox
         self.stop_event = stop_event
+        # Dispatcher kept for symmetry with future features; deep scan
+        # no longer pauses it (we throttle instead).
+        self.dispatcher = dispatcher
         self._cancel = threading.Event()
         self._lock = threading.Lock()
         self._thread: threading.Thread | None = None
@@ -580,6 +595,16 @@ class DeepScanWorker:
     # --------------- worker body ---------------------------------------
 
     def _run(self) -> None:
+        # Claim bandwidth priority: throttle the main pipeline's chunk
+        # rate via the global BandwidthGovernor. Pipeline keeps running
+        # but its downloads/uploads now creep at ~1 MB/s, leaving the
+        # WAN free for our deep-scan probes.
+        from .dropbox_client import GOVERNOR
+        GOVERNOR.set_throttle(True, max_mbps=self.PIPELINE_THROTTLE_MBPS)
+        logger.info(
+            f"deep-scan: pipeline throttled to {self.PIPELINE_THROTTLE_MBPS} MB/s "
+            f"for bandwidth priority"
+        )
         try:
             candidates = self._collect_candidates()
             with self._lock:
@@ -615,6 +640,12 @@ class DeepScanWorker:
                 self.progress.state = "error"
                 self.progress.error = str(e)
                 self.progress.finished_at = time.time()
+        finally:
+            # Always release the throttle so the pipeline returns to
+            # full speed whether the scan succeeded, failed, or was
+            # cancelled.
+            GOVERNOR.set_throttle(False)
+            logger.info("deep-scan: pipeline throttle released")
 
     def _collect_candidates(self) -> list[tuple[str, int]]:
         """List files that pass static eligibility filters and we don't already know about."""
