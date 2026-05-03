@@ -545,29 +545,39 @@ class TranscodeWorker(BaseWorker):
         # Select encoder
         encoder = self.encoder or select_best_encoder(self.config, verify=False)
 
-        # Per-job override: route to libx265 (CPU) whenever the resolved
-        # output is something QSV/NVENC consumer hardware just can't do.
-        # Cases that hit this branch:
-        #   - 4:2:2 output (preserve_chroma_422 toggle is on AND source
-        #     is 4:2:2) — QSV/NVENC consumer have no Main 4:2:2 profile.
-        #   - 4:2:2 source with chroma downsample — QSV/NVENC decoders
-        #     refuse High 4:2:2 H.264 input on most Intel iGPUs / GeForce.
-        #   - 12-bit output — neither encoder implements Main12 (the
-        #     hevc_qsv encoder rejects "main12" as an unparsable profile
-        #     string, see v6.2.2 incident report).
-        # Detecting upfront avoids the old "let it fail twice then fall
-        # back" path which burns ~30s+ of pointless ffmpeg launches.
+        # Per-job override: route to libx265 (CPU) only when QSV/NVENC
+        # truly can't produce the required OUTPUT format. The hybrid
+        # mode (software decode + hardware encode) handles 4:2:2 INPUT
+        # fine — chroma is downsampled to 4:2:0 in software via -vf
+        # format=... and then QSV/NVENC encodes the 4:2:0 frames at
+        # full hardware speed. So we only force CPU when:
+        #   - preserve_chroma_422 is ON AND source is 4:2:2: output
+        #     needs Main 4:2:2, no consumer HW path.
+        #   - 4:4:4 source: even after downsample the source is exotic;
+        #     CPU is the safer/saner fallback.
+        #   - 12-bit output: hevc_qsv rejects "main12" profile string
+        #     (v6.2.2 incident).
+        # Plain 4:2:2 with preserve=OFF used to force CPU here too;
+        # that band-aid (v6.2.2) was over-aggressive and starved every
+        # ATEM / Sony 4:2:2 source of hardware acceleration. Removed.
         if encoder != EncoderType.CPU:
             vi = probe_result.video_info
             in_chroma = vi.chroma or "420"
             in_depth = vi.bit_depth or 8
+            preserve_422 = bool(getattr(self.config, "preserve_chroma_422", False))
             needs_cpu = False
             why = ""
-            if in_chroma in ("422", "444"):
+            if preserve_422 and in_chroma == "422":
                 needs_cpu = True
                 why = (
-                    f"source chroma is {in_chroma} which {encoder.value} "
-                    f"can't decode (consumer hardware limit)"
+                    f"preserve_chroma_422 is ON and source is 4:2:2 — "
+                    f"{encoder.value} has no Main 4:2:2 profile"
+                )
+            elif in_chroma == "444":
+                needs_cpu = True
+                why = (
+                    f"source chroma is 4:4:4 — {encoder.value} consumer "
+                    f"hardware has no path; falling to libx265"
                 )
             elif in_depth > 10:
                 needs_cpu = True
@@ -575,12 +585,6 @@ class TranscodeWorker(BaseWorker):
                     f"source bit_depth={in_depth} requires HEVC Main12 which "
                     f"{encoder.value} doesn't implement"
                 )
-            elif (
-                getattr(self.config, "preserve_chroma_422", False)
-                and in_chroma == "422"
-            ):
-                needs_cpu = True
-                why = "preserve_chroma_422 is ON and source is 4:2:2"
 
             if needs_cpu:
                 logger.warning(
@@ -589,6 +593,17 @@ class TranscodeWorker(BaseWorker):
                     f"File: {job.dropbox_path}"
                 )
                 encoder = EncoderType.CPU
+            elif in_chroma == "422":
+                # Will run via hybrid path: software decode (chroma is
+                # outside the hw decoder's reach), -vf format=yuv420p[10le]
+                # downsample, then QSV/NVENC hardware encode. Roughly 5-8x
+                # slower than full-HW for the chosen res but still 5x+
+                # faster than libx265.
+                logger.info(
+                    f"[{self.name}] {encoder.value} hybrid mode: source 4:2:2 "
+                    f"→ sw decode + 4:2:0 conversion → hw encode. "
+                    f"File: {job.dropbox_path}"
+                )
 
         # Setup output path
         job_dir = input_path.parent

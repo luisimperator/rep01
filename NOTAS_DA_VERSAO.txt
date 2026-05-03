@@ -2,6 +2,46 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.6.0
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+URGENT: 4:2:2 sources voltam pro hevc_qsv (hybrid mode), nao libx265
+
+  [BUGFIX] Worker forcava CPU pra TODA fonte 4:2:2, mesmo com
+           preserve_chroma_422=false
+  ----------------------------------------------------------------
+  ANTES: workers._transcode_job tinha um band-aid da v6.2.2 que
+         desviava pra libx265 sempre que `vi.chroma in ('422','444')`,
+         independente do preserve_chroma_422. Resultado em campo:
+         ATEM ProRes 4:2:2 e Sony A7siii XAVC-S-I 4:2:2 transcodavam
+         a 0.17-0.32x speed (CPU full libx265, ~10x mais lento).
+
+         O builder JA tinha hybrid mode (`_get_input_hwaccel` retorna
+         [] pra chroma!=420; `_get_video_filter_args` adiciona
+         `-vf format=yuv420p[10le]`; `-c:v hevc_qsv` recebe os
+         frames sw-decoded). Mas o worker bypassava tudo.
+
+  AGORA: worker so forca CPU quando o OUTPUT genuinamente requer
+         coisa que QSV/NVENC consumer nao implementa:
+
+           - preserve_chroma_422=ON + chroma=4:2:2 (Main 4:2:2)
+           - chroma=4:4:4 (sem path consumer)
+           - bit_depth > 10 (Main12 — hevc_qsv nao parseia o profile)
+
+         Plain 4:2:2 com preserve OFF agora roda hybrid: ffmpeg
+         decoda em software, downsample 4:2:2 → 4:2:0 via filter,
+         hevc_qsv encoda em hardware. Roughly 5-8x slower que
+         full-HW pela parte do decode na CPU, mas 5x+ MAIS RAPIDO
+         que libx265 puro. Log line nova:
+
+           hevc_qsv hybrid mode: source 4:2:2 → sw decode + 4:2:0
+           conversion → hw encode
+
+         Fallback automatico (QSV falha 2x → libx265) inalterado
+         como rede de seguranca.
+
+
 Versão: 6.5.2
 Data: 03/05/2026
 --------------------------------------------------------------------------------
