@@ -933,11 +933,11 @@ async function killFfmpeg() {
 }
 
 async function restartDaemon() {
-  if (!confirm('Restart the daemon? Active jobs will be paused; the dashboard will reload in ~15 seconds.')) return;
+  if (!confirm('Restart the daemon? Active jobs will be paused; the dashboard will reload in ~17 seconds.')) return;
   try {
     await fetchJSON('/api/restart', { method: 'POST' });
     toast('Restarting daemon...', 'ok');
-    setTimeout(() => location.reload(), 15000);
+    setTimeout(() => location.reload(), 17000);
   } catch (e) { toast('Restart request failed: ' + e.message, 'err'); }
 }
 

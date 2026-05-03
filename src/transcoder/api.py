@@ -58,14 +58,20 @@ PWA_APPLE_ICON = (_PKG_DIR / "apple-touch-icon.png").read_bytes()
 _SCHEDULED_TASK_NAME = "HeavyDropsDaemon"
 
 
-def _trigger_task_scheduler_restart(delay_sec: int = 10) -> None:
+def _trigger_task_scheduler_restart(gap_sec: int = 10) -> None:
     """Spawn a detached helper that re-launches the daemon via Task Scheduler.
 
-    The helper sleeps `delay_sec`, then `schtasks /End` + `/Run` on
-    HeavyDropsDaemon — the same recipe the operator uses by hand. The delay
-    gives the OS time to release the API port (9123) and let any in-flight
-    ffmpeg children unwind before the fresh instance starts; restarting
-    immediately races on the bind and the new daemon refuses to come up.
+    Sequence the helper runs:
+      1. ~2s pause: let the daemon's os._exit complete and Task Scheduler
+         mark the task as Ready.
+      2. `schtasks /End`: belt-and-braces — kills any orphan ffmpeg.exe or
+         python.exe that might have survived from this task instance.
+      3. `gap_sec` pause: this is the critical wait. The OS needs time to
+         release the API port (9123) and finalize the ffmpeg child cleanup
+         before a fresh instance binds. Without it the new daemon races
+         on bind and refuses to come up — running /Run twice manually is
+         the symptom we're fixing.
+      4. `schtasks /Run`: starts a fresh instance via Task Scheduler.
 
     Critical: the helper must escape the Job Object that Task Scheduler put
     this process into, otherwise `schtasks /End` would terminate the helper
@@ -87,9 +93,9 @@ def _trigger_task_scheduler_restart(delay_sec: int = 10) -> None:
     CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 
     cmd = (
-        f"Start-Sleep -Seconds {int(delay_sec)}; "
+        "Start-Sleep -Seconds 2; "
         f"schtasks /End /TN {_SCHEDULED_TASK_NAME} | Out-Null; "
-        "Start-Sleep -Seconds 1; "
+        f"Start-Sleep -Seconds {int(gap_sec)}; "
         f"schtasks /Run /TN {_SCHEDULED_TASK_NAME} | Out-Null"
     )
 
@@ -103,7 +109,7 @@ def _trigger_task_scheduler_restart(delay_sec: int = 10) -> None:
             stderr=subprocess.DEVNULL,
             cwd="C:\\",
         )
-        logger.info(f"restart helper spawned: end+run {_SCHEDULED_TASK_NAME} after {delay_sec}s")
+        logger.info(f"restart helper spawned: end+{gap_sec}s+run {_SCHEDULED_TASK_NAME}")
     except Exception as e:
         logger.error(f"failed to spawn restart helper: {e}")
 
@@ -346,15 +352,15 @@ def _build_handler(api: ApiServer):
                 body = self._read_json_body() or {}
                 return self._send_json(_reorganize_run(api, body))
             if route == "/api/restart":
-                # Spawn a detached helper that End+Run the scheduled task
-                # after a short delay, then exit cleanly. The 10s pause gives
-                # the OS time to release ports / flush ffmpeg children before
-                # the new instance comes up — restarting too fast race-loses
-                # the bind on 9123. Helper escapes the Task Scheduler job
-                # object so /End doesn't kill it.
-                _trigger_task_scheduler_restart(delay_sec=10)
+                # Spawn a detached helper (End + 10s gap + Run) before
+                # exiting cleanly. The gap is between End and Run because
+                # that's when the API port and ffmpeg children actually
+                # need to clear — restarting too fast races on the bind.
+                # Helper escapes the Task Scheduler job object so /End
+                # doesn't kill it.
+                _trigger_task_scheduler_restart(gap_sec=10)
                 threading.Timer(1.5, lambda: os._exit(0)).start()
-                return self._send_json({"ok": True, "restarting_in_sec": 12})
+                return self._send_json({"ok": True, "restarting_in_sec": 14})
             self.send_error(404, "not found")
 
         def _read_json_body(self) -> dict:
