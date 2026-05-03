@@ -2,6 +2,40 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.4.4
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+DEEP SCAN PARALLEL — 8 probes em paralelo, ~8x mais rapido
+
+  [PERF] DeepScanWorker usa ThreadPoolExecutor
+  ---------------------------------------------
+  Antes: probe sequencial, 1 file por vez, ~1.5s cada → 1000 files
+         em ~25 min.
+  Agora: pool de threads (default 8 workers paralelos), real I/O
+         concurrency porque ffprobe e subprocess + network. 1000
+         files em ~3 min.
+
+  Cancel propaga: cancel_futures=True no shutdown derruba probes
+  que nao comecaram, em-flight terminam sozinhos (timeout do
+  ffprobe e 60s).
+
+  [INFRA] Config nova
+  --------------------
+    census:
+      deep_scan_concurrency: 8                  # 1-32
+      deep_scan_pipeline_throttle_mbps: 1.0     # 0 desabilita
+
+  Concurrency 8 e o sweet spot pelo rate limit da Dropbox API
+  (default 600 calls/min): 8 probes × 1 API call por ciclo de
+  ~1.5s ≈ 320/min, bem abaixo do limite. Pode subir pra 16 se
+  quiser empurrar mais (mas comeca a roer backoff).
+
+  Throttle do pipeline tambem virou config — 0 desabilita o
+  bandwidth-priority claim (pipeline e deep scan competem em
+  igualdade na banda).
+
+
 Versão: 6.4.3
 Data: 03/05/2026
 --------------------------------------------------------------------------------

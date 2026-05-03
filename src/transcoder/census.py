@@ -31,6 +31,7 @@ import re
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import datetime, time as dt_time, timedelta
 from pathlib import PurePosixPath
@@ -527,11 +528,6 @@ class DeepScanWorker:
     share of the WAN.
     """
 
-    # While deep scan runs, throttle the main pipeline's download/upload
-    # chunks to this MB/s. ~1 MB/s ≈ 5% of a 200 Mbps line, leaving the
-    # rest for the deep-scan probe fetches.
-    PIPELINE_THROTTLE_MBPS = 1.0
-
     def __init__(
         self,
         config: "Config",
@@ -597,34 +593,24 @@ class DeepScanWorker:
     def _run(self) -> None:
         # Claim bandwidth priority: throttle the main pipeline's chunk
         # rate via the global BandwidthGovernor. Pipeline keeps running
-        # but its downloads/uploads now creep at ~1 MB/s, leaving the
-        # WAN free for our deep-scan probes.
+        # but its downloads/uploads now creep at the configured cap,
+        # leaving the WAN free for our deep-scan probes. throttle_mbps
+        # of 0 disables the throttle entirely (pipeline runs full speed).
         from .dropbox_client import GOVERNOR
-        GOVERNOR.set_throttle(True, max_mbps=self.PIPELINE_THROTTLE_MBPS)
-        logger.info(
-            f"deep-scan: pipeline throttled to {self.PIPELINE_THROTTLE_MBPS} MB/s "
-            f"for bandwidth priority"
-        )
+        throttle_mbps = float(getattr(self.config.census, "deep_scan_pipeline_throttle_mbps", 1.0))
+        if throttle_mbps > 0:
+            GOVERNOR.set_throttle(True, max_mbps=throttle_mbps)
+            logger.info(f"deep-scan: pipeline throttled to {throttle_mbps} MB/s for bandwidth priority")
         try:
             candidates = self._collect_candidates()
             with self._lock:
                 self.progress.total = len(candidates)
-            logger.info(f"deep-scan: probing {len(candidates)} unknown files")
-
-            for path, size in candidates:
-                if self._cancel.is_set() or self.stop_event.is_set():
-                    break
-                with self._lock:
-                    self.progress.current_path = path
-                outcome = self._probe_one(path)
-                with self._lock:
-                    self.progress.done += 1
-                    if outcome == "probed":
-                        self.progress.probed += 1
-                    elif outcome == "skipped":
-                        self.progress.skipped += 1
-                    else:
-                        self.progress.failed += 1
+            concurrency = max(1, int(self.config.census.deep_scan_concurrency))
+            logger.info(
+                f"deep-scan: probing {len(candidates)} unknown files "
+                f"with {concurrency} parallel workers"
+            )
+            self._probe_all_parallel(candidates, concurrency)
 
             with self._lock:
                 self.progress.state = "finished"
@@ -644,8 +630,63 @@ class DeepScanWorker:
             # Always release the throttle so the pipeline returns to
             # full speed whether the scan succeeded, failed, or was
             # cancelled.
-            GOVERNOR.set_throttle(False)
-            logger.info("deep-scan: pipeline throttle released")
+            if throttle_mbps > 0:
+                GOVERNOR.set_throttle(False)
+                logger.info("deep-scan: pipeline throttle released")
+
+    def _probe_all_parallel(self, candidates: list[tuple[str, int]], concurrency: int) -> None:
+        """Probe candidates in parallel via a ThreadPoolExecutor.
+
+        Each worker holds the GIL only briefly per probe — the bulk of
+        the time is in subprocess.run waiting on ffprobe (which spawns
+        its own process and does network I/O). So real parallelism is
+        achieved despite the GIL.
+
+        Cancel handling: when self._cancel fires we stop submitting new
+        work and let in-flight probes finish on their own (ffprobe
+        timeout caps them at 60s anyway). The executor is shut down
+        without wait once the loop exits, so the worker thread can
+        return promptly while leftover probes finish in the background.
+        """
+        if not candidates:
+            return
+        executor = ThreadPoolExecutor(
+            max_workers=concurrency,
+            thread_name_prefix="deep-scan-probe",
+        )
+        try:
+            futures = {}
+            for path, size in candidates:
+                if self._cancel.is_set() or self.stop_event.is_set():
+                    break
+                futures[executor.submit(self._probe_with_check, path)] = path
+            for fut in as_completed(futures):
+                path = futures[fut]
+                try:
+                    outcome = fut.result()
+                except Exception as e:
+                    logger.warning(f"deep-scan: probe error for {path}: {e}")
+                    outcome = "failed"
+                with self._lock:
+                    self.progress.done += 1
+                    self.progress.current_path = path
+                    if outcome == "probed":
+                        self.progress.probed += 1
+                    elif outcome == "skipped":
+                        self.progress.skipped += 1
+                    else:
+                        self.progress.failed += 1
+        finally:
+            # cancel_futures=True (3.9+) cancels not-yet-started work
+            # so a cancel button takes effect quickly even if hundreds
+            # of probes were queued.
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _probe_with_check(self, path: str) -> str:
+        """Probe wrapper that bails early when cancellation is requested."""
+        if self._cancel.is_set() or self.stop_event.is_set():
+            return "skipped"
+        return self._probe_one(path)
 
     def _collect_candidates(self) -> list[tuple[str, int]]:
         """List files that pass static eligibility filters and we don't already know about."""
