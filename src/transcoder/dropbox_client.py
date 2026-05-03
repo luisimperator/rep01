@@ -64,6 +64,7 @@ class BandwidthGovernor:
         """Account `n_bytes` against the bucket; sleep if we're over the cap."""
         if not self.throttled or n_bytes <= 0:
             return
+        sleep_sec = 0.0
         with self._lock:
             now = time.monotonic()
             window = now - self._bucket_sec

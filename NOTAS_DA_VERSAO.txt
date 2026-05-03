@@ -2,6 +2,33 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.4.6
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+URGENT BUGFIX: BandwidthGovernor crashava no primeiro chunk durante throttle
+
+  [BUGFIX] UnboundLocalError em consume() quando deep scan ativo
+  ---------------------------------------------------------------
+  ANTES: GOVERNOR.consume() definia `sleep_sec` so dentro do
+         `if self._bucket_bytes > allowed_bytes`. Quando o chunk
+         estava abaixo do cap (caso comum no comeco de um upload/
+         download), `sleep_sec` ficava undefined e o `if sleep_sec
+         > 0` la fora explodia com:
+           "cannot access local variable 'sleep_sec' where it is
+            not associated with a value"
+
+         Resultado em campo: enquanto o deep scan rodava (governor
+         ativo a 1 MB/s), TODA primeira tentativa de upload/download
+         falhava com esse erro. O retry pegava na segunda, mas cada
+         arquivo desperdicava 2-32s de backoff e uma chamada a Dropbox
+         API a toa.
+
+  AGORA: `sleep_sec = 0.0` inicializado fora do conditional. A
+         logica de throttle continua funcionando, mas o caso comum
+         (chunk dentro do cap) nao mais explode.
+
+
 Versão: 6.4.5
 Data: 03/05/2026
 --------------------------------------------------------------------------------
