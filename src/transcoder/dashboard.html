@@ -279,8 +279,10 @@
 <h2>Workers — live</h2>
 <div id="workers"></div>
 
-<h2>Storage <span style="color:var(--muted);font-weight:normal;font-size:.85em">(local paths the daemon writes to)</span></h2>
-<div id="storage-card" class="panel" style="margin-bottom: 1em;"></div>
+<details class="panel">
+  <summary style="cursor:pointer; color: var(--muted); margin-bottom: .8em;"><strong style="color:var(--text)">Storage</strong> — local paths the daemon writes to</summary>
+  <div id="storage-card" style="margin-top: 1em;"></div>
+</details>
 
 <h2>Scanner</h2>
 <div id="scan-card"></div>
@@ -316,6 +318,11 @@
   </table>
 </details>
 
+<details class="panel" id="lan-panel" style="display:none">
+  <summary style="cursor:pointer; color: var(--muted); margin-bottom: .8em;"><strong style="color:var(--text)">Open this dashboard from another device</strong> — Tailscale + LAN URLs with access token</summary>
+  <div id="lan-card" style="margin-top: 1em;"></div>
+</details>
+
 <div class="row" style="justify-content: space-between; align-items: baseline; margin-top: 1.4em; margin-bottom: .5em;">
   <h2 style="margin: 0;">Activity log <span style="color:var(--muted);font-weight:normal;font-size:.85em">(last 200 lines, auto-refresh)</span></h2>
   <div>
@@ -324,8 +331,6 @@
   </div>
 </div>
 <pre id="log" class="log">loading...</pre>
-
-<div id="lan-card"></div>
 
 <div id="toast-area"></div>
 
@@ -1081,20 +1086,24 @@ async function tick() {
 }
 
 function renderLanCard(s) {
+  const panel = document.getElementById('lan-panel');
   const el = document.getElementById('lan-card');
-  if (!el) return;
+  if (!el || !panel) return;
+  // Hide the whole collapsible when LAN access isn't configured —
+  // nothing useful to show in loopback-only mode.
   if (!s || s._error || !s.api || !s.api.lan_accessible) {
+    panel.style.display = 'none';
     el.innerHTML = '';
     return;
   }
+  panel.style.display = '';
   const tok = s.api.access_token || '';
   const addrs = s.api.lan_addresses || [];
   const link = (url) => {
     const sep = url.includes('?') ? '&' : '?';
     return tok ? `${url}${sep}token=${encodeURIComponent(tok)}` : url;
   };
-  let body = `<div style="background:#1c2230;border:1px solid #2c3445;border-radius:8px;padding:.9em 1.2em;margin:1em 0 1.5em 0;">
-    <div style="font-size:.85em;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin-bottom:.4em;">Open this dashboard from another device</div>`;
+  let body = '';
   if (addrs.length === 0) {
     body += `<div class="hint">No LAN address detected. Try <code>ipconfig</code> on the daemon's PC and use that IP with port ${s.api.port || 9123}.</div>`;
   } else {
@@ -1113,7 +1122,6 @@ function renderLanCard(s) {
   } else {
     body += `<div style="margin-top:.5em;font-size:.82em;color:var(--muted);">First visit logs in via <code>?token=...</code> and stamps a 30-day cookie; later visits work without the token in the URL.</div>`;
   }
-  body += `</div>`;
   el.innerHTML = body;
 }
 
