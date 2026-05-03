@@ -328,6 +328,29 @@ class CensusSettings(BaseModel):
             "the long Dropbox walk starts."
         ),
     )
+    deep_scan_concurrency: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        description=(
+            "Parallel ffprobe workers during a deep scan. The Dropbox API "
+            "rate limit (config.dropbox_api.rate_per_min, default 600/min) "
+            "caps the practical sweet spot at 8-16 — past that you start "
+            "burning backoff. Each parallel probe also pulls ~5MB from the "
+            "CDN, so a faster WAN tolerates higher concurrency."
+        ),
+    )
+    deep_scan_pipeline_throttle_mbps: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=1000.0,
+        description=(
+            "Cap (MB/s) the main pipeline's downloads/uploads while a deep "
+            "scan runs, so the deep-scan probes get bandwidth priority. "
+            "0 disables the throttle (pipeline runs at full speed alongside "
+            "deep scan, no priority claim)."
+        ),
+    )
 
 
 class IncidentsSettings(BaseModel):
