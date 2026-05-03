@@ -289,6 +289,8 @@ def _build_handler(api: ApiServer):
                 return self._send_json(_census_status_payload(api))
             if route == "/api/projection":
                 return self._send_json(_projection_payload(api))
+            if route == "/api/lighthouse":
+                return self._send_json(_lighthouse_payload(api))
             if route == "/api/deep-scan/status":
                 return self._send_json(_deep_scan_status_payload(api))
             if route == "/healthz":
@@ -1602,6 +1604,131 @@ def _new_tree_node(path: str) -> dict:
         "ineligible_count": 0,
         "ineligible_bytes": 0,
         "children": [],
+    }
+
+
+def _lighthouse_payload(api: ApiServer) -> dict:
+    """At-a-glance status: green / yellow / red.
+
+    Designed so the operator opens the dashboard once a day, looks at the
+    color, and knows whether to investigate further. State machine:
+
+      🟢 green  — pipeline is doing its thing OR caught up on the watch folder.
+      🟡 yellow — something off-nominal (warming up, slow, scanner error,
+                  long transcode with no completions in 6h).
+      🔴 red    — pending > 0 AND zero jobs in last 6h AND zero active workers.
+                  i.e. there's work to do and nobody's doing it.
+
+    Recent activity window is 6 hours. Baseline rate uses the same span
+    logic as the projection (min(7d, time-since-first-DONE-under-root))
+    so a daemon that just started doesn't get flagged as "slow" simply
+    because we don't have a 7-day history yet.
+    """
+    from datetime import datetime, timezone, timedelta
+
+    cfg = api.config
+    root = (cfg.dropbox_root or "").rstrip("/") or "/"
+    now = datetime.now(timezone.utc)
+    six_hours_ago = now - timedelta(hours=6)
+    seven_days_ago = now - timedelta(days=7)
+
+    s_6h = api.db.get_savings_stats(since=six_hours_ago, path_prefix=root)
+    s_7d = api.db.get_savings_stats(since=seven_days_ago, path_prefix=root)
+
+    cen_root = api.db.get_folder_census_totals(root)
+    pending_bytes = int(cen_root["pending_bytes"])
+
+    depths = api.dispatcher.queue_depths()
+    active = int(depths.get("active", 0))
+
+    daemon = getattr(api, "daemon", None)
+    uptime_sec = max(0.0, time.time() - api.started_at_epoch)
+    last_scan_error = getattr(daemon, "last_scan_error", None)
+
+    bytes_6h = int(s_6h.get("input_bytes") or 0)
+    jobs_6h = int(s_6h.get("jobs") or 0)
+
+    # Baseline rate: same span logic as the projection so a fresh daemon
+    # that's only run for 24h doesn't have its baseline divided by 7.
+    started_at = api.db.get_earliest_done_at(path_prefix=root)
+    if started_at and started_at > seven_days_ago:
+        span_sec = (now - started_at).total_seconds()
+    else:
+        span_sec = 7 * 86400
+    span_sec = max(43200.0, span_sec)
+    bytes_per_hour_baseline = (s_7d.get("input_bytes") or 0) / max(1.0, span_sec / 3600.0)
+    bytes_per_hour_recent = bytes_6h / 6.0
+
+    rate_recent_gb_day = bytes_per_hour_recent * 24 / 1e9
+    rate_baseline_gb_day = bytes_per_hour_baseline * 24 / 1e9
+
+    # State machine. First match wins.
+    status = "green"
+    headline = "All systems go"
+    detail = ""
+
+    if uptime_sec < 600:
+        status = "yellow"
+        mins = int(uptime_sec / 60)
+        headline = "Warming up"
+        detail = f"Daemon started {mins}m ago — workers still picking up jobs."
+    elif pending_bytes == 0 and active == 0:
+        status = "green"
+        headline = "All caught up"
+        detail = f"Nothing pending under {root}. Daemon idle, ready for new files."
+    elif jobs_6h == 0 and active == 0 and pending_bytes > 0:
+        status = "red"
+        headline = "Stuck"
+        detail = (
+            f"{pending_bytes / 1e12:.1f} TB pending but no jobs finished in "
+            f"the last 6 hours and no workers are running. Check the log."
+        )
+    elif jobs_6h == 0 and active > 0:
+        status = "yellow"
+        headline = "Long transcode in progress"
+        detail = (
+            f"{active} job(s) in flight; nothing finished in the last 6 hours. "
+            f"Likely a multi-hour 4K/4:2:2 file. Monitor the Now panel."
+        )
+    elif (
+        bytes_per_hour_baseline > 0
+        and bytes_per_hour_recent < 0.4 * bytes_per_hour_baseline
+        and span_sec > 86400  # only flag once we have >1 day of baseline
+    ):
+        status = "yellow"
+        headline = "Running slow"
+        detail = (
+            f"Last 6h pace ~{rate_recent_gb_day:.0f} GB/day vs typical "
+            f"~{rate_baseline_gb_day:.0f} GB/day. Could be a heavy file or a "
+            f"network hiccup."
+        )
+    else:
+        status = "green"
+        headline = "All systems go"
+        detail = (
+            f"{jobs_6h} jobs in last 6h · {bytes_6h / 1e9:.0f} GB processed · "
+            f"~{rate_recent_gb_day:.0f} GB/day pace · {active} active."
+        )
+
+    # Scanner error overlay — soft yellow when otherwise green.
+    if last_scan_error and status == "green":
+        status = "yellow"
+        headline = "Scanner error"
+        detail = f"Last scan failed: {last_scan_error}. Pipeline still working on existing queue."
+
+    return {
+        "ok": True,
+        "status": status,
+        "headline": headline,
+        "detail": detail,
+        "watch_folder": root,
+        "jobs_6h": jobs_6h,
+        "bytes_6h": bytes_6h,
+        "rate_recent_gb_per_day": round(rate_recent_gb_day, 1),
+        "rate_baseline_gb_per_day": round(rate_baseline_gb_day, 1),
+        "active_workers": active,
+        "pending_bytes": pending_bytes,
+        "uptime_sec": uptime_sec,
     }
 
 

@@ -60,6 +60,34 @@
                  box-shadow: 0 0 0 4px rgba(243,124,124,.15); }
   .health.ok .dot { background: var(--ok); box-shadow: 0 0 0 4px rgba(103,217,156,.15); }
   .health.warn .dot { background: var(--warn); box-shadow: 0 0 0 4px rgba(241,181,97,.18); }
+  /* Lighthouse — at-a-glance status pill at the top of the page.
+     The dot pulses softly when green so it feels alive. Yellow/red
+     fade in a slower, more "anxious" pulse to nudge attention. */
+  .lighthouse { display: flex; align-items: center; gap: 1em;
+                padding: 1em 1.2em; border-radius: 12px;
+                margin: 1em 0 .8em 0; border: 1px solid var(--border);
+                background: linear-gradient(135deg, #16181d 0%, #1c1f26 100%);
+                transition: border-color .25s; }
+  .lighthouse .lh-dot { width: 22px; height: 22px; border-radius: 50%;
+                         flex-shrink: 0; box-shadow: 0 0 0 6px rgba(255,255,255,0); }
+  .lighthouse .lh-headline { font-size: 1.15em; font-weight: 600; color: var(--text); }
+  .lighthouse .lh-detail { color: var(--muted); font-size: .9em; margin-top: .15em; }
+  .lighthouse[data-status="green"]  { border-color: rgba(103,217,156,.35); }
+  .lighthouse[data-status="yellow"] { border-color: rgba(241,181,97,.45); }
+  .lighthouse[data-status="red"]    { border-color: rgba(243,124,124,.55); }
+  .lighthouse[data-status="green"]  .lh-dot { background: var(--ok);
+    box-shadow: 0 0 0 4px rgba(103,217,156,.18); animation: lh-pulse-ok 2.5s ease-in-out infinite; }
+  .lighthouse[data-status="yellow"] .lh-dot { background: var(--warn);
+    box-shadow: 0 0 0 4px rgba(241,181,97,.22); animation: lh-pulse-warn 1.8s ease-in-out infinite; }
+  .lighthouse[data-status="red"]    .lh-dot { background: var(--err);
+    box-shadow: 0 0 0 4px rgba(243,124,124,.28); animation: lh-pulse-err 1.2s ease-in-out infinite; }
+  .lighthouse[data-status="loading"] .lh-dot { background: #555c6a; }
+  @keyframes lh-pulse-ok   { 0%,100% { box-shadow: 0 0 0 4px rgba(103,217,156,.18); }
+                              50%      { box-shadow: 0 0 0 8px rgba(103,217,156,.05); } }
+  @keyframes lh-pulse-warn { 0%,100% { box-shadow: 0 0 0 4px rgba(241,181,97,.22); }
+                              50%      { box-shadow: 0 0 0 9px rgba(241,181,97,.08); } }
+  @keyframes lh-pulse-err  { 0%,100% { box-shadow: 0 0 0 4px rgba(243,124,124,.28); }
+                              50%      { box-shadow: 0 0 0 10px rgba(243,124,124,.10); } }
   .now { background: linear-gradient(135deg, #1c2230 0%, #20283a 100%);
          border: 1px solid #2c3445; border-radius: 10px; padding: 1.1em 1.3em;
          margin: 1em 0 .8em 0; font-size: 1.05em; line-height: 1.45; }
@@ -214,6 +242,14 @@
     </div>
   </div>
   <div id="banner-area"></div>
+</div>
+
+<div id="lighthouse-card" class="lighthouse" data-status="loading">
+  <div class="lh-dot"></div>
+  <div class="lh-text">
+    <div class="lh-headline">Checking…</div>
+    <div class="lh-detail">Reading recent activity.</div>
+  </div>
 </div>
 
 <div class="now" id="now">
@@ -1020,6 +1056,10 @@ async function tick() {
 
   renderNow(s, a);
   renderLanCard(s);
+  // Lighthouse — refreshed at the same 6s cadence so a stuck pipeline
+  // turns red within seconds. Cheap endpoint (a couple of indexed
+  // SUM() queries), no need to throttle.
+  renderLighthouse();
   renderStats(st);
   // Projection first so the storage card can read window._lastProjection
   // and overlay the "after backlog" tick on its own progress bar.
@@ -1115,6 +1155,22 @@ function renderDropboxStorage(s) {
     <div style="color:var(--muted);font-size:.92em;margin-top:.2em">Total used in Dropbox${allocText}</div>
     ${afterText}
   `;
+}
+
+// ---------- lighthouse (at-a-glance status) ----------
+async function renderLighthouse() {
+  const card = document.getElementById('lighthouse-card');
+  if (!card) return;
+  const r = await safeFetch('/api/lighthouse');
+  if (r._error) {
+    card.dataset.status = 'red';
+    card.querySelector('.lh-headline').textContent = 'API unreachable';
+    card.querySelector('.lh-detail').textContent = r._error;
+    return;
+  }
+  card.dataset.status = r.status || 'green';
+  card.querySelector('.lh-headline').textContent = r.headline || '—';
+  card.querySelector('.lh-detail').textContent = r.detail || '';
 }
 
 // ---------- reduction projection ----------
