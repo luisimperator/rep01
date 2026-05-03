@@ -2,6 +2,35 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.7.2
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+iOS PWA: "Copy log" agora funciona, com fallback robusto
+
+  [BUGFIX] copyText falhava no iPhone PWA via Tailscale HTTP
+  ----------------------------------------------------------
+  ANTES: copyText() pulava direto pro fallback execCommand quando
+         !window.isSecureContext. O fallback usava textarea com
+         readonly + opacity:0 + 1×1px que iOS Safari rejeita
+         heuristicamente ("element not visible enough to copy from").
+         Resultado: toast vermelho "Copy failed: execCommand("copy")
+         returned false".
+
+  AGORA: estrategia em 3 camadas:
+    1. Tenta navigator.clipboard.writeText() sem checar
+       isSecureContext — PWA standalone às vezes aceita.
+    2. Fallback DOM: contentEditable span + Range/Selection API
+       em vez de textarea readonly. Receita iOS-friendly.
+    3. Se ambos falharem: abre modal com o log num textarea
+       visivel pro operador fazer long-press → Select All → Copy
+       manualmente. Funciona sem clipboard API porque e selecao
+       DOM pura.
+
+  Mesma logica vale pro botao Copy do "Open this dashboard from
+  another device" — agora tem o mesmo fallback modal.
+
+
 Versão: 6.7.1
 Data: 03/05/2026
 --------------------------------------------------------------------------------
