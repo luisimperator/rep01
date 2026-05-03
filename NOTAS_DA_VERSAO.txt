@@ -2,6 +2,45 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.7.0
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+LIGHTHOUSE: farol verde/amarelo/vermelho no topo do dashboard
+
+  [FEAT] Painel "lighthouse" no topo da pagina
+  ----------------------------------------------
+  Bate o olho, sabe se ta tudo rodando. Bolinha colorida pulsa
+  suavemente — verde calminho, amarelo um pouco mais ansioso,
+  vermelho rapido. Headline + detail explicam em uma linha.
+
+  Estado computado em /api/lighthouse a partir de:
+    - jobs DONE nas ultimas 6h (filtrado por watch folder)
+    - workers ativos no dispatcher
+    - pending_bytes da census sob root atual
+    - daemon uptime
+    - last_scan_error
+
+  Maquina de estados (primeiro match vence):
+
+    🟡 uptime < 10min                       → "Warming up"
+    🟢 pending == 0 AND active == 0         → "All caught up"
+    🔴 pending > 0 AND 0 jobs/6h AND 0 ativos → "Stuck"
+    🟡 0 jobs/6h MAS workers ativos          → "Long transcode in progress"
+    🟡 rate ultimas 6h < 40% do baseline 7d  → "Running slow"
+    🟢 caso geral                            → "All systems go"
+    🟡 + scanner error sobreposto sobre green→ "Scanner error"
+
+  "Running slow" so dispara quando ha mais de 1 dia de baseline,
+  evitando falso positivo no daemon recem-instalado. Baseline 7d
+  usa o mesmo span dinamico do projection (min(7d, time-since-
+  first-DONE)) pra nao dividir por 7 quando voce so tem 24h de
+  historico.
+
+  Refresh a cada 6s (mesmo tick do dashboard) — endpoint e
+  barato (poucas SUM() em indices).
+
+
 Versão: 6.6.0
 Data: 03/05/2026
 --------------------------------------------------------------------------------
