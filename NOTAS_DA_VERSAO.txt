@@ -2,6 +2,29 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.4.2
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+REDUCTION MAP MOBILE FIX — nomes de pasta nao mais quebram letra-por-letra
+
+  [BUGFIX] Long folder names eram quebrados char-by-char no iPhone
+  -----------------------------------------------------------------
+  ANTES: .rmap-row .name tinha word-break: break-all + nenhum
+         min-width: 0 no flex parent. Resultado: em telas estreitas
+         (iPhone PWA) nomes tipo "O Jogo Viroupodcast" viravam uma
+         coluna vertical de letras de altura quase tela inteira.
+         Pasta com sub-arvore ficava ilegivel.
+
+  AGORA: name vira flex: 1 1 60% + min-width: 0 + white-space:
+         nowrap + text-overflow: ellipsis. Trunca single-line com
+         "..." quando nao cabe (full path acessivel via tooltip
+         no title). flex-wrap: wrap no row deixa o bar+meta
+         caírem na proxima linha em telas muito apertadas em vez
+         de comprimir o nome. Media query @640px reduz a largura
+         do bar e a indentacao das sub-pastas.
+
+
 Versão: 6.4.1
 Data: 03/05/2026
 --------------------------------------------------------------------------------

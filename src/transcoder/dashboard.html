@@ -127,13 +127,28 @@
   .reorg-table th { font-size: 11px; }
   .reorg-table .ready { color: var(--ok); } .reorg-table .defer { color: var(--warn); }
   /* Reduction map tree */
-  .rmap-row { display: flex; align-items: center; gap: .6em; padding: .35em 0; }
+  .rmap-row { display: flex; align-items: center; gap: .6em; padding: .35em 0;
+              flex-wrap: wrap; min-width: 0; }
   .rmap-row .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
-  .rmap-row .name { font-weight: 500; color: var(--text); word-break: break-all; }
+  /* Name truncates single-line with ellipsis. min-width:0 is the magic that
+     lets a flex child shrink below its intrinsic content width — without it,
+     long folder names wrap character-by-character on narrow screens. */
+  .rmap-row .name { font-weight: 500; color: var(--text);
+                    flex: 1 1 60%; min-width: 0;
+                    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .rmap-row .name .full { color: var(--muted); font-size: .85em; }
-  .rmap-row .meta { color: var(--muted); font-size: .82em; flex-shrink: 0; margin-left: auto; }
+  .rmap-row .meta { color: var(--muted); font-size: .82em; flex-shrink: 0;
+                    margin-left: auto; white-space: nowrap; }
   .rmap-bar { height: 5px; border-radius: 3px; overflow: hidden; display: flex;
-              background: #232730; min-width: 80px; flex: 0 0 120px; }
+              background: #232730; min-width: 60px; flex: 0 0 100px; }
+  @media (max-width: 640px) {
+    /* Mobile: bar shrinks, meta wraps to its own line if needed.
+       The flex-wrap on .rmap-row already lets meta drop to row 2 when
+       there's no horizontal room. */
+    .rmap-bar { flex: 0 0 60px; min-width: 50px; }
+    .rmap-row .meta { font-size: .78em; }
+    .rmap-children { margin-left: .8em; padding-left: .5em; }
+  }
   .rmap-bar > .b-pending { background: var(--err); }
   .rmap-bar > .b-done    { background: var(--ok); }
   .rmap-bar > .b-inel    { background: #555c6a; }
@@ -1305,7 +1320,8 @@ function rmapDotHtml(node) {
 }
 
 function renderTreeNode(node, isRoot) {
-  const rowInner = `${rmapDotHtml(node)}<span class="name">${escapeHtml(node.name || node.path)}</span>${rmapBarHtml(node)}${rmapMetaHtml(node)}`;
+  const fullPath = node.path || '';
+  const rowInner = `${rmapDotHtml(node)}<span class="name" title="${escapeHtml(fullPath)}">${escapeHtml(node.name || node.path)}</span>${rmapBarHtml(node)}${rmapMetaHtml(node)}`;
   if (node.children.length === 0) {
     return `<div class="rmap-leaf"><span class="rmap-row">${rowInner}</span></div>`;
   }
