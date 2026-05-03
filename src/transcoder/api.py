@@ -52,6 +52,62 @@ PWA_ICON_SVG = (_PKG_DIR / "icon.svg").read_bytes()
 PWA_APPLE_ICON = (_PKG_DIR / "apple-touch-icon.png").read_bytes()
 
 
+# Task Scheduler task name registered by installer/tasks/HeavyDropsDaemon.xml.
+# `/api/restart` shells out to schtasks against this name; matches the manual
+# update one-liner the operator uses (`schtasks /End` then `/Run`).
+_SCHEDULED_TASK_NAME = "HeavyDropsDaemon"
+
+
+def _trigger_task_scheduler_restart(delay_sec: int = 10) -> None:
+    """Spawn a detached helper that re-launches the daemon via Task Scheduler.
+
+    The helper sleeps `delay_sec`, then `schtasks /End` + `/Run` on
+    HeavyDropsDaemon — the same recipe the operator uses by hand. The delay
+    gives the OS time to release the API port (9123) and let any in-flight
+    ffmpeg children unwind before the fresh instance starts; restarting
+    immediately races on the bind and the new daemon refuses to come up.
+
+    Critical: the helper must escape the Job Object that Task Scheduler put
+    this process into, otherwise `schtasks /End` would terminate the helper
+    too. CREATE_BREAKAWAY_FROM_JOB + DETACHED_PROCESS does that on Windows.
+
+    No-op on non-Windows (development). If the scheduled task isn't
+    registered (e.g. operator runs the daemon by hand), `/End` and `/Run`
+    will fail silently and the daemon just exits — same UX as before.
+    """
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        logger.info("restart trigger skipped (not Windows)")
+        return
+
+    DETACHED_PROCESS = 0x00000008
+    CREATE_NEW_PROCESS_GROUP = 0x00000200
+    CREATE_BREAKAWAY_FROM_JOB = 0x01000000
+
+    cmd = (
+        f"Start-Sleep -Seconds {int(delay_sec)}; "
+        f"schtasks /End /TN {_SCHEDULED_TASK_NAME} | Out-Null; "
+        "Start-Sleep -Seconds 1; "
+        f"schtasks /Run /TN {_SCHEDULED_TASK_NAME} | Out-Null"
+    )
+
+    try:
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", cmd],
+            creationflags=DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB,
+            close_fds=True,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            cwd="C:\\",
+        )
+        logger.info(f"restart helper spawned: end+run {_SCHEDULED_TASK_NAME} after {delay_sec}s")
+    except Exception as e:
+        logger.error(f"failed to spawn restart helper: {e}")
+
+
 class ApiServer:
     """Runs a ThreadingHTTPServer in a background thread until shutdown()."""
 
@@ -290,9 +346,15 @@ def _build_handler(api: ApiServer):
                 body = self._read_json_body() or {}
                 return self._send_json(_reorganize_run(api, body))
             if route == "/api/restart":
-                # Schedule a graceful exit; the Task Scheduler will restart us.
-                threading.Timer(1.0, lambda: os._exit(0)).start()
-                return self._send_json({"ok": True, "restarting_in_sec": 1})
+                # Spawn a detached helper that End+Run the scheduled task
+                # after a short delay, then exit cleanly. The 10s pause gives
+                # the OS time to release ports / flush ffmpeg children before
+                # the new instance comes up — restarting too fast race-loses
+                # the bind on 9123. Helper escapes the Task Scheduler job
+                # object so /End doesn't kill it.
+                _trigger_task_scheduler_restart(delay_sec=10)
+                threading.Timer(1.5, lambda: os._exit(0)).start()
+                return self._send_json({"ok": True, "restarting_in_sec": 12})
             self.send_error(404, "not found")
 
         def _read_json_body(self) -> dict:
