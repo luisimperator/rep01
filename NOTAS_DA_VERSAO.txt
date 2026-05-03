@@ -2,6 +2,42 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.3.5
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+RESTART BUTTON FIX + Settings collapsed by default
+
+  [BUGFIX] "Restart Daemon" matava o daemon e nao reiniciava
+  ----------------------------------------------------------
+  ANTES: /api/restart chamava os._exit(0). O Task Scheduler do
+         Windows so reinicia em FAILURE (RestartOnFailure na XML),
+         entao saida limpa = task arquivada = daemon morto. Quem
+         clicava no botao perdia tudo ate relogar / reabrir manual.
+
+  AGORA: api._trigger_task_scheduler_restart() spawna um PowerShell
+         destacado (DETACHED_PROCESS + CREATE_BREAKAWAY_FROM_JOB pra
+         escapar do Job Object do Task Scheduler) que aguarda 10s,
+         executa `schtasks /End /TN HeavyDropsDaemon` e depois
+         `schtasks /Run /TN HeavyDropsDaemon`. Mesma receita do
+         comando que o operador roda na mao. Os 10s de delay dao
+         tempo do socket 9123 ser liberado e dos ffmpeg children
+         encerrarem antes da nova instancia subir — sem isso o bind
+         da pau no segundo restart.
+
+         Em ambiente nao-Windows (dev) o helper e no-op. Se a tarefa
+         agendada nao existir, schtasks falha silencioso e o daemon
+         so sai (mesma UX da v6.3.4).
+
+  [UX] Painel Settings agora comeca colapsado
+  --------------------------------------------
+  ANTES: <details class="panel" open> — settings ficava sempre aberto,
+         dropdowns expostos a click acidental.
+  AGORA: <details class="panel"> — usuario tem que clicar no header
+         "Settings" pra expandir. Reduz risco de mudar
+         transcode_workers / cq_value sem querer no mobile.
+
+
 Versão: 6.3.4
 Data: 02/05/2026
 --------------------------------------------------------------------------------
