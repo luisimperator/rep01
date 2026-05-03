@@ -2,6 +2,33 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.5.2
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+iPhone PWA polish + LAN card no rodape
+
+  [UX] LAN card movido pro fim da pagina
+  ---------------------------------------
+  O card "Open this dashboard from another device" (com URLs Tailscale/
+  LAN + token) ficava logo abaixo do header, ocupando lugar nobre que
+  o operador raramente precisa ver depois da configuracao inicial.
+  Agora ele vive depois do log de atividade, no rodape — visivel
+  quando precisar, fora do caminho no dia-a-dia.
+
+  [UX] iOS status bar nao sobrepoe mais o titulo
+  -----------------------------------------------
+  ANTES: PWA em standalone mode + viewport-fit=cover empurra o
+         conteudo pra debaixo da status bar do iOS. Resultado: o
+         relogio/icones do iPhone ficavam em cima do "HeavyDrops
+         Transcoder".
+
+  AGORA: body usa padding-top: max(1.5em, env(safe-area-inset-top))
+         (e equivalentes pros 4 lados) — cresce dinamicamente pra
+         acomodar status bar / notch / home indicator. Falls back
+         pro padding fixo em browsers sem suporte a env().
+
+
 Versão: 6.5.1
 Data: 03/05/2026
 --------------------------------------------------------------------------------

@@ -39,8 +39,18 @@
     --audio: #f59e0b;
   }
   * { box-sizing: border-box; }
+  /* iOS PWA in standalone mode + viewport-fit=cover puts content under
+     the status bar. env(safe-area-inset-*) tells us how much room the
+     status bar / home indicator / notch are eating. We pad accordingly
+     so the title doesn't get covered by the clock and the home
+     indicator doesn't sit on top of the bottom toast. Falls back to
+     the prior fixed padding on browsers that don't support env(). */
   body { font: 14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
-         margin: 0; padding: 1.5em 2em 4em; background: var(--bg); color: var(--text); }
+         margin: 0; background: var(--bg); color: var(--text);
+         padding-top: max(1.5em, env(safe-area-inset-top));
+         padding-right: max(2em, env(safe-area-inset-right));
+         padding-bottom: max(4em, env(safe-area-inset-bottom));
+         padding-left: max(2em, env(safe-area-inset-left)); }
   h1 { margin: 0 0 .15em 0; font-size: 1.6em; font-weight: 600; }
   h2 { margin: 1.4em 0 .5em 0; color: var(--muted); font-weight: 500; font-size: .95em;
        text-transform: uppercase; letter-spacing: .05em; }
@@ -220,8 +230,6 @@
   <button class="danger" onclick="restartDaemon()">Restart daemon</button>
 </div>
 
-<div id="lan-card"></div>
-
 <h2>Today / All time</h2>
 <div class="grid" id="stats-grid"></div>
 
@@ -280,6 +288,8 @@
   </div>
 </div>
 <pre id="log" class="log">loading...</pre>
+
+<div id="lan-card"></div>
 
 <div id="toast-area"></div>
 
