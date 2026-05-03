@@ -2,6 +2,78 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.5.0
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+REDUCTION PROJECTION com barra + ETA + watch-folder-aware
+
+  [FEAT] Progress bar gigante: done vs total da WATCH FOLDER atual
+  ----------------------------------------------------------------
+  Antes era so um numero "X TB pending → Y TB freeable". Agora o card
+  mostra barra horizontal preenchendo de done → total, percentual em
+  destaque, e cada metrica filtrada pelo dropbox_root atual:
+
+    - done_bytes: SUM(input_bytes) de jobs DONE com dropbox_path
+      LIKE current_root + '/%'. Jobs de outros roots nao poluem.
+    - pending_bytes: SUM(folder_census.pending_bytes) com path
+      filtrado pelo current root (nova db.get_folder_census_totals).
+    - total_bytes = done + pending.
+    - progress_pct = done / total.
+
+  Quando o operador troca o dropbox_root, todas essas metricas
+  reiniciam naturalmente porque o filtro de path muda. Eventualmente
+  vai apontar pra raiz do Dropbox e ver o progresso global.
+
+  [FEAT] ETA real, dia e data
+  ---------------------------
+  Calculado da janela movel de 7 dias de jobs DONE no root atual:
+
+    bytes_per_day = SUM(input_bytes em DONE last 7d, root) / 7
+    eta_days = pending_bytes / bytes_per_day
+    eta_at = now + eta_days
+
+  Linha "ETA: Mar 15, 2026 · ~12 days at 800 GB/day (last 7 days, 38
+  jobs)" abaixo da barra. Quando nao tem atividade recente, mostra
+  "need more recent activity" em cinza em vez de chutar.
+
+  [FEAT] Started anchor: data do primeiro job DONE no root
+  --------------------------------------------------------
+  db.get_earliest_done_at(path_prefix=root) → ISO timestamp da
+  primeira conversao bem-sucedida no root atual. Mostra "Started Apr
+  23, 2026 (10 days ago) · N jobs completed" no rodape do card.
+  Vira um marco de "quando comecamos esse projeto".
+
+  [FEAT] Stale census detection apos troca de root
+  -------------------------------------------------
+  Quando o operador troca dropbox_root mas a census ainda nao re-
+  rodou (folder_census ainda tem rows do root antigo), o backend
+  detecta — pending_bytes_per_root == 0 mas last_run.pending > 0 —
+  e o card surge um aviso amarelo:
+
+    "Watch folder changed to /NewPath. Census still reflects an
+     older root. Open Reduction map and click 'Run census now'..."
+
+  Em vez de mostrar zeros silenciosos ou numeros do root antigo.
+
+  [UX] Dropbox storage card simplificado
+  ---------------------------------------
+  Removida a progress bar do card (espaco liberado pra projection).
+  Agora so mostra o numero grande "X.XX TB" + badge TEAM/PERSONAL
+  + linha pequena "X TB quota · YY% used" + (se houver projection)
+  "After current backlog: Z.ZZ TB" em azul. Mais limpo, menos
+  redundante com a barra de target que tava la antes.
+
+  [INFRA] DB: get_savings_stats agora aceita path_prefix
+  -------------------------------------------------------
+  Antes filtrava apenas por `since`. Agora aceita tambem path_prefix
+  pra escopo per-root. Backwards-compatible (callers existentes nao
+  usam o param).
+
+  + Nova db.get_earliest_done_at(path_prefix)
+  + Nova db.get_folder_census_totals(root)
+
+
 Versão: 6.4.6
 Data: 03/05/2026
 --------------------------------------------------------------------------------

@@ -1075,17 +1075,12 @@ function renderDropboxStorage(s) {
     el.innerHTML = `<div class="empty" style="color:var(--muted)">Dropbox usage unavailable (no daemon-side dropbox client or API call failed).</div>`;
     return;
   }
-  // Prefer team-wide used for Business accounts, individual otherwise.
   const used = ds.team_used_bytes || ds.used_bytes || 0;
-  const target = ds.target_bytes || 0;
   const allocated = ds.allocated_bytes || 0;
-  const pctTarget = target > 0 ? Math.min(100, (used / target) * 100) : 0;
   const pctAllocated = allocated > 0 ? (used / allocated) * 100 : 0;
-  const targetTb = ds.target_tb || 0;
   const usedTb = used / (1024 ** 4);
-  const targetColor = pctTarget >= 90 ? 'var(--err)' : pctTarget >= 75 ? '#f59e0b' : '#4dd2a7';
   const allocText = allocated > 0
-    ? `<div style="color:var(--muted);font-size:.85em;margin-top:.4em">Account quota: ${fmtBytes(allocated)} (${pctAllocated.toFixed(1)}% used)</div>`
+    ? `<span style="color:var(--muted);font-size:.85em;margin-left:.6em">${fmtBytes(allocated)} quota · ${pctAllocated.toFixed(1)}% used</span>`
     : '';
   const cachedAt = ds.cached_at ? new Date(ds.cached_at * 1000) : null;
   const cachedAge = cachedAt ? Math.round((Date.now() - cachedAt.getTime()) / 1000) : 0;
@@ -1094,36 +1089,39 @@ function renderDropboxStorage(s) {
     ? `<span style="background:rgba(77,138,255,.18);color:var(--download);padding:1px 7px;border-radius:8px;font-size:.7em;margin-left:.5em;font-weight:600">TEAM</span>`
     : `<span style="background:rgba(77,210,167,.18);color:var(--upload);padding:1px 7px;border-radius:8px;font-size:.7em;margin-left:.5em;font-weight:600">PERSONAL</span>`;
 
-  // "After backlog" marker — uses the latest projection if the projection
-  // card already fetched it. Renders a thin vertical tick on the bar so
-  // the operator sees where usage will land once the pending backlog is
-  // processed. Falls back to nothing when projection isn't available yet.
-  let afterMarker = '';
+  // "After backlog" hint — when the projection card has fetched data,
+  // surface the projected post-backlog number inline as supporting text.
   let afterText = '';
   const proj = window._lastProjection;
-  if (proj && proj.have_data && proj.estimated_freed_bytes > 0 && target > 0) {
+  if (proj && proj.have_data && proj.estimated_freed_bytes > 0) {
     const projectedUsed = Math.max(0, used - proj.estimated_freed_bytes);
-    const pctProjected = Math.min(100, (projectedUsed / target) * 100);
-    afterMarker = `<div style="position:absolute;top:-3px;bottom:-3px;left:${pctProjected}%;width:2px;background:#6cb6ff;box-shadow:0 0 4px #6cb6ff" title="After backlog: ${(projectedUsed / 1024**4).toFixed(2)} TB"></div>`;
-    afterText = ` · <span style="color:#6cb6ff">after backlog: ${(projectedUsed / 1024**4).toFixed(2)} TB</span>`;
+    afterText = `<div style="color:var(--muted);font-size:.88em;margin-top:.3em">After current backlog: <span style="color:#6cb6ff">${(projectedUsed / 1024**4).toFixed(2)} TB</span></div>`;
   }
 
   el.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5em;margin-bottom:.5em">
-      <div style="font-size:1.4em;font-weight:600;color:var(--text)">
-        ${usedTb.toFixed(2)} TB <span style="color:var(--muted);font-weight:normal;font-size:.7em">/ ${targetTb.toFixed(0)} TB target</span>${typeBadge}${stale}
-      </div>
-      <div style="color:var(--muted);font-size:.95em">${pctTarget.toFixed(1)}% to target${afterText}</div>
+    <div style="font-size:1.6em;font-weight:600;color:var(--text);line-height:1.2">
+      ${usedTb.toFixed(2)} TB${typeBadge}${stale}
     </div>
-    <div class="bar" style="height:14px;border-radius:7px;position:relative;overflow:visible">
-      <span style="width:${pctTarget}%;background:${targetColor} !important;transition:width .25s"></span>
-      ${afterMarker}
-    </div>
-    ${allocText}
+    <div style="color:var(--muted);font-size:.92em;margin-top:.2em">Total used in Dropbox${allocText}</div>
+    ${afterText}
   `;
 }
 
 // ---------- reduction projection ----------
+
+function fmtDateShort(iso) {
+  if (!iso) return '—';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  } catch { return iso; }
+}
+
+function daysBetween(aIso, bIso) {
+  if (!aIso || !bIso) return null;
+  return Math.round((new Date(bIso).getTime() - new Date(aIso).getTime()) / 86400000);
+}
+
 async function renderProjection() {
   const el = document.getElementById('projection-card');
   const p = await safeFetch('/api/projection');
@@ -1131,35 +1129,69 @@ async function renderProjection() {
     el.innerHTML = `<div class="empty err">Projection unavailable: ${escapeHtml(p._error)}</div>`;
     return;
   }
-  // Stash for the storage card to overlay the "after backlog" marker.
+  // Stash for the storage card to read "after backlog" inline.
   window._lastProjection = p;
 
-  if (!p.have_data) {
-    el.innerHTML = `<div style="color:var(--muted);font-size:.92em">
-      Reduction projection: <b>not enough data yet</b>.
-      ${p.global_sample_jobs === 0 ? 'No completed transcodes to learn from.' : ''}
-      ${(p.pending_count || 0) === 0 ? 'No census run yet — open the Reduction map panel and click "Run census now".' : ''}
-    </div>`;
+  // Empty / not-enough-data states.
+  if (p.census_stale_for_root) {
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5em;margin-bottom:.4em">
+        <div style="font-size:1.05em;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.04em">Reduction projection</div>
+      </div>
+      <div style="color:var(--warn);font-size:.95em">
+        Watch folder changed to <code>${escapeHtml(p.watch_folder)}</code>. Census still reflects an older root.
+        Open <b>Reduction map</b> below and click <b>Run census now</b> to refresh — projection will populate after that.
+      </div>
+    `;
+    return;
+  }
+  if (!p.have_data || p.total_bytes === 0) {
+    el.innerHTML = `
+      <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5em;margin-bottom:.4em">
+        <div style="font-size:1.05em;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.04em">Reduction projection</div>
+        <div style="color:var(--muted);font-size:.85em">watch folder: <code>${escapeHtml(p.watch_folder || '/')}</code></div>
+      </div>
+      <div style="color:var(--muted);font-size:.92em">
+        Not enough data yet.
+        ${p.global_sample_jobs === 0 ? 'No completed transcodes under this watch folder.' : ''}
+        ${(p.pending_count || 0) === 0 && p.total_bytes === 0 ? ' No census run yet — open the Reduction map panel and click "Run census now".' : ''}
+      </div>
+    `;
     return;
   }
 
+  const doneTb = p.done_bytes / (1024 ** 4);
   const pendingTb = p.pending_bytes / (1024 ** 4);
+  const totalTb = p.total_bytes / (1024 ** 4);
   const freedTb = p.estimated_freed_bytes / (1024 ** 4);
-  const outputTb = p.estimated_output_bytes / (1024 ** 4);
-  const projectedTb = (p.projected_used_after_bytes || 0) / (1024 ** 4);
-  const targetTb = (p.target_bytes || 0) / (1024 ** 4);
-  const distTb = (p.projected_distance_to_target_bytes || 0) / (1024 ** 4);
+  const pct = Math.max(0, Math.min(100, p.progress_pct || 0));
 
-  const distLabel = targetTb > 0 ? (
-    distTb <= 0
-      ? `<span style="color:var(--ok)">✓ would reach the ${targetTb.toFixed(0)} TB target with ${Math.abs(distTb).toFixed(1)} TB to spare</span>`
-      : `<span style="color:#f59e0b">still ${distTb.toFixed(1)} TB above the ${targetTb.toFixed(0)} TB target — keep filming, you're closing in</span>`
-  ) : '';
+  // ETA components
+  const etaDays = p.eta_days;
+  const etaIso = p.eta_at;
+  const ratePerDayTb = (p.bytes_per_day_recent || 0) / (1024 ** 4);
+  const startedAt = p.started_at;
+  const startedAgoDays = startedAt ? daysBetween(startedAt, new Date().toISOString()) : null;
 
-  // Build the per-bucket breakdown row when we have at least 2 buckets
-  // with meaningful data. Otherwise the global ratio carries enough.
+  let etaLine;
+  if (etaDays != null && etaIso) {
+    const etaDaysInt = Math.round(etaDays);
+    const dayWord = etaDaysInt === 1 ? 'day' : 'days';
+    etaLine = `
+      <div style="margin-top:.5em;font-size:.95em">
+        ETA: <b>${fmtDateShort(etaIso)}</b>
+        <span style="color:var(--muted)"> · ~${etaDaysInt} ${dayWord} at ${ratePerDayTb >= 1 ? ratePerDayTb.toFixed(2) + ' TB' : (ratePerDayTb * 1024).toFixed(0) + ' GB'}/day (last 7 days, ${p.recent_jobs} jobs)</span>
+      </div>`;
+  } else {
+    etaLine = `
+      <div style="margin-top:.5em;font-size:.92em;color:var(--muted)">
+        ETA: <b>need more recent activity</b> — no completed jobs in the last 7 days under this watch folder.
+      </div>`;
+  }
+
+  // Bucket breakdown (diagnostic, only when ≥1 bucket has data)
   const buckets = p.buckets || {};
-  const bucketLabels = { low: '<8 Mbps', mid: '8–25 Mbps', high: '25–60 Mbps', veryhigh: '≥60 Mbps', unknown: 'unknown' };
+  const bucketLabels = { low: '<8 Mbps', mid: '8–25 Mbps', high: '25–60 Mbps', veryhigh: '≥60 Mbps' };
   const bucketEntries = ['low', 'mid', 'high', 'veryhigh']
     .filter(k => buckets[k] && buckets[k].jobs >= 1)
     .map(k => {
@@ -1171,25 +1203,37 @@ async function renderProjection() {
       </span>`;
     })
     .join('');
-
   const bucketRow = bucketEntries
     ? `<div style="margin-top:.6em;font-size:.85em;color:var(--text)">
          <span style="color:var(--muted)">Reduction by source bitrate:</span> ${bucketEntries}
        </div>`
     : '';
 
+  // Started anchor — small line at the bottom for context.
+  const startedLine = startedAt
+    ? `<div style="margin-top:.4em;font-size:.82em;color:var(--muted)">Started ${fmtDateShort(startedAt)}${startedAgoDays != null ? ` (${startedAgoDays} day${startedAgoDays === 1 ? '' : 's'} ago)` : ''} · ${p.done_jobs_root} jobs completed under <code>${escapeHtml(p.watch_folder || '/')}</code></div>`
+    : '';
+
   el.innerHTML = `
-    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5em;margin-bottom:.4em">
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5em;margin-bottom:.5em">
       <div style="font-size:1.05em;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.04em">Reduction projection</div>
-      <div style="color:var(--muted);font-size:.85em">based on ${p.global_sample_jobs} completed jobs · ${p.global_ratio_pct.toFixed(1)}% avg reduction</div>
+      <div style="color:var(--muted);font-size:.85em">watch folder: <code>${escapeHtml(p.watch_folder || '/')}</code></div>
     </div>
-    <div style="font-size:1.3em;color:var(--text);font-weight:600">
-      ${pendingTb.toFixed(2)} TB pending → ~<span style="color:var(--ok)">${freedTb.toFixed(2)} TB</span> freeable
-      <span style="color:var(--muted);font-weight:normal;font-size:.7em"> · ${outputTb.toFixed(2)} TB H.265 output</span>
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5em;margin-bottom:.3em">
+      <div style="font-size:1.3em;color:var(--text);font-weight:600">
+        ${doneTb.toFixed(2)} TB done <span style="color:var(--muted);font-weight:normal;font-size:.75em">/ ${totalTb.toFixed(2)} TB total</span>
+      </div>
+      <div style="color:var(--ok);font-size:1.05em;font-weight:600">${pct.toFixed(1)}%</div>
     </div>
-    ${targetTb > 0 ? `<div style="margin-top:.4em;font-size:.92em">
-      Projected after backlog: <b>${projectedTb.toFixed(2)} TB</b>${distLabel ? ' — ' + distLabel : ''}
-    </div>` : ''}
+    <div class="bar" style="height:18px;border-radius:9px">
+      <span style="width:${pct}%;background:var(--ok) !important;transition:width .25s"></span>
+    </div>
+    <div style="display:flex;justify-content:space-between;font-size:.85em;color:var(--muted);margin-top:.3em">
+      <span>${pendingTb.toFixed(2)} TB pending → ~<span style="color:var(--ok)">${freedTb.toFixed(2)} TB</span> freeable</span>
+      <span>${p.global_ratio_pct.toFixed(1)}% avg reduction · ${p.global_sample_jobs} jobs</span>
+    </div>
+    ${etaLine}
+    ${startedLine}
     ${bucketRow}
   `;
 }
