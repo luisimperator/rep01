@@ -175,9 +175,17 @@ class FFmpegCommandBuilder:
             "-map", "0:s?",            # subtitle tracks (none ok)
             "-map_metadata", "0",      # copy container-level metadata
             "-map_metadata:s:v", "0:s:v",   # copy video stream metadata
-            "-map_metadata:s:a", "0:s:a",   # copy audio stream metadata
             "-dn",                     # drop data streams (tmcd, etc)
         ])
+        # Only copy audio-stream metadata when the source actually has an
+        # audio stream. The "?" suffix on -map makes the mapping itself
+        # optional, but -map_metadata:s:a has no equivalent — ffmpeg sees
+        # the specifier `s:a` matching zero streams in the output and bails
+        # with "Stream specifier a does not match any streams. Error opening
+        # output files: Invalid argument" before the first frame is encoded.
+        # Hits on render exports without audio (no sound bed in the NLE).
+        if video_info.has_audio:
+            args.extend(["-map_metadata:s:a", "0:s:a"])
         if video_info.timecode:
             # ffmpeg's -timecode writes a tmcd track in MP4 output without
             # the "codec none" muxer issue, AND records it on the video
