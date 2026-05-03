@@ -2,6 +2,37 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.4.5
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+URGENT BUGFIX: arquivos sem audio stream travam em loop infinito de FAIL
+
+  [BUGFIX] -map_metadata:s:a falhava em files sem audio
+  ------------------------------------------------------
+  ANTES: ffmpeg_builder.build_transcode_command sempre emitia
+         `-map_metadata:s:a 0:s:a`. O `?` na flag -map torna
+         o mapeamento opcional, mas -map_metadata:s:a NAO tem
+         equivalente. Em sources sem audio (renders editados,
+         bumpers, plates), ffmpeg cuspia
+         "Stream specifier a does not match any streams.
+          Error opening output files: Invalid argument"
+         antes do primeiro frame ser codificado.
+
+         Sequencia de fail antes do fix: hevc_qsv → fail → audio
+         re-encode → fail → libx265 (CPU) → fail → CPU audio
+         re-encode → fail → JOB FAILED. 4 tentativas seguidas
+         no mesmo erro estrutural.
+
+         Pego em campo nos files do episodio 15 - jade soller
+         (renders OJV - Jade v3 4K.mp4 e v2 1080.mp4).
+
+  AGORA: -map_metadata:s:a so e emitido quando video_info.has_audio
+         e True. build_audio_fallback_command apenas substitui
+         -c:a copy → -c:a aac, entao herda o fix automaticamente.
+         Files sem audio agora encodam normal (so video).
+
+
 Versão: 6.4.4
 Data: 03/05/2026
 --------------------------------------------------------------------------------
