@@ -2,6 +2,30 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.5.1
+Data: 03/05/2026
+--------------------------------------------------------------------------------
+
+BUGFIX: ETA inflada por 7x quando o daemon roda ha menos de uma semana
+
+  [BUGFIX] bytes_per_day = recent_bytes / 7 (errado quando span < 7d)
+  -------------------------------------------------------------------
+  ANTES: a janela de 7 dias era hardcoded como denominador.
+         Operador comeca o daemon, processa 1 TB em 24h → o calculo
+         era 1 TB / 7 = 143 GB/day, e a ETA inflava na mesma
+         proporcao (8 dias virava 56 dias).
+
+  AGORA: span_sec = min(7d, agora - earliest_done_under_root), com
+         floor de 12h pra evitar divisao por quase-zero. Daemon
+         que comecou ontem: span = 1 dia, rate = 1 TB/day,
+         ETA = pending / rate. Daemon rodando ha mais de 7 dias:
+         comportamento original (7-day rolling).
+
+         Card mostra a janela real ("last 24 hours" ou "last 3.2
+         days" etc) em vez de sempre dizer "last 7 days". Mais
+         honesto.
+
+
 Versão: 6.5.0
 Data: 03/05/2026
 --------------------------------------------------------------------------------
