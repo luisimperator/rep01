@@ -212,6 +212,7 @@
 
 <h2>Dropbox storage <span style="color:var(--muted);font-weight:normal;font-size:.85em">(team-wide)</span></h2>
 <div id="dropbox-storage-card" class="panel" style="margin-bottom: 1em; padding: 1em 1.2em;"></div>
+<div id="projection-card" class="panel" style="margin-bottom: 1em; padding: 1em 1.2em;"></div>
 
 <h2>Status</h2>
 <div class="grid" id="status-grid"></div>
@@ -995,7 +996,16 @@ async function tick() {
   renderNow(s, a);
   renderLanCard(s);
   renderStats(st);
-  renderDropboxStorage(s);
+  // Projection first so the storage card can read window._lastProjection
+  // and overlay the "after backlog" tick on its own progress bar.
+  // Throttled to one fetch every 30s — the underlying data only changes
+  // when census or jobs complete, both rare events.
+  if (!window._lastProjectionAt || (Date.now() - window._lastProjectionAt) > 30000) {
+    window._lastProjectionAt = Date.now();
+    renderProjection().finally(() => renderDropboxStorage(s));
+  } else {
+    renderDropboxStorage(s);
+  }
   renderStatus(s);
   renderStorage(s);
   renderScan(a && !a._error ? a.scanner : null);
@@ -1068,15 +1078,104 @@ function renderDropboxStorage(s) {
   const typeBadge = ds.allocation_type === 'team'
     ? `<span style="background:rgba(77,138,255,.18);color:var(--download);padding:1px 7px;border-radius:8px;font-size:.7em;margin-left:.5em;font-weight:600">TEAM</span>`
     : `<span style="background:rgba(77,210,167,.18);color:var(--upload);padding:1px 7px;border-radius:8px;font-size:.7em;margin-left:.5em;font-weight:600">PERSONAL</span>`;
+
+  // "After backlog" marker — uses the latest projection if the projection
+  // card already fetched it. Renders a thin vertical tick on the bar so
+  // the operator sees where usage will land once the pending backlog is
+  // processed. Falls back to nothing when projection isn't available yet.
+  let afterMarker = '';
+  let afterText = '';
+  const proj = window._lastProjection;
+  if (proj && proj.have_data && proj.estimated_freed_bytes > 0 && target > 0) {
+    const projectedUsed = Math.max(0, used - proj.estimated_freed_bytes);
+    const pctProjected = Math.min(100, (projectedUsed / target) * 100);
+    afterMarker = `<div style="position:absolute;top:-3px;bottom:-3px;left:${pctProjected}%;width:2px;background:#6cb6ff;box-shadow:0 0 4px #6cb6ff" title="After backlog: ${(projectedUsed / 1024**4).toFixed(2)} TB"></div>`;
+    afterText = ` · <span style="color:#6cb6ff">after backlog: ${(projectedUsed / 1024**4).toFixed(2)} TB</span>`;
+  }
+
   el.innerHTML = `
     <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5em;margin-bottom:.5em">
       <div style="font-size:1.4em;font-weight:600;color:var(--text)">
         ${usedTb.toFixed(2)} TB <span style="color:var(--muted);font-weight:normal;font-size:.7em">/ ${targetTb.toFixed(0)} TB target</span>${typeBadge}${stale}
       </div>
-      <div style="color:var(--muted);font-size:.95em">${pctTarget.toFixed(1)}% to target</div>
+      <div style="color:var(--muted);font-size:.95em">${pctTarget.toFixed(1)}% to target${afterText}</div>
     </div>
-    <div class="bar" style="height:14px;border-radius:7px"><span style="width:${pctTarget}%;background:${targetColor} !important;transition:width .25s"></span></div>
+    <div class="bar" style="height:14px;border-radius:7px;position:relative;overflow:visible">
+      <span style="width:${pctTarget}%;background:${targetColor} !important;transition:width .25s"></span>
+      ${afterMarker}
+    </div>
     ${allocText}
+  `;
+}
+
+// ---------- reduction projection ----------
+async function renderProjection() {
+  const el = document.getElementById('projection-card');
+  const p = await safeFetch('/api/projection');
+  if (p._error) {
+    el.innerHTML = `<div class="empty err">Projection unavailable: ${escapeHtml(p._error)}</div>`;
+    return;
+  }
+  // Stash for the storage card to overlay the "after backlog" marker.
+  window._lastProjection = p;
+
+  if (!p.have_data) {
+    el.innerHTML = `<div style="color:var(--muted);font-size:.92em">
+      Reduction projection: <b>not enough data yet</b>.
+      ${p.global_sample_jobs === 0 ? 'No completed transcodes to learn from.' : ''}
+      ${(p.pending_count || 0) === 0 ? 'No census run yet — open the Reduction map panel and click "Run census now".' : ''}
+    </div>`;
+    return;
+  }
+
+  const pendingTb = p.pending_bytes / (1024 ** 4);
+  const freedTb = p.estimated_freed_bytes / (1024 ** 4);
+  const outputTb = p.estimated_output_bytes / (1024 ** 4);
+  const projectedTb = (p.projected_used_after_bytes || 0) / (1024 ** 4);
+  const targetTb = (p.target_bytes || 0) / (1024 ** 4);
+  const distTb = (p.projected_distance_to_target_bytes || 0) / (1024 ** 4);
+
+  const distLabel = targetTb > 0 ? (
+    distTb <= 0
+      ? `<span style="color:var(--ok)">✓ would reach the ${targetTb.toFixed(0)} TB target with ${Math.abs(distTb).toFixed(1)} TB to spare</span>`
+      : `<span style="color:#f59e0b">still ${distTb.toFixed(1)} TB above the ${targetTb.toFixed(0)} TB target — keep filming, you're closing in</span>`
+  ) : '';
+
+  // Build the per-bucket breakdown row when we have at least 2 buckets
+  // with meaningful data. Otherwise the global ratio carries enough.
+  const buckets = p.buckets || {};
+  const bucketLabels = { low: '<8 Mbps', mid: '8–25 Mbps', high: '25–60 Mbps', veryhigh: '≥60 Mbps', unknown: 'unknown' };
+  const bucketEntries = ['low', 'mid', 'high', 'veryhigh']
+    .filter(k => buckets[k] && buckets[k].jobs >= 1)
+    .map(k => {
+      const b = buckets[k];
+      const conf = b.jobs >= 5 ? '' : ` <span style="color:var(--muted)" title="low confidence — only ${b.jobs} jobs in this bucket">·low conf</span>`;
+      return `<span style="margin-right:1em">
+        <span style="color:var(--muted)">${bucketLabels[k]}:</span>
+        <b>${b.avg_reduction_pct.toFixed(0)}%</b>${conf}
+      </span>`;
+    })
+    .join('');
+
+  const bucketRow = bucketEntries
+    ? `<div style="margin-top:.6em;font-size:.85em;color:var(--text)">
+         <span style="color:var(--muted)">Reduction by source bitrate:</span> ${bucketEntries}
+       </div>`
+    : '';
+
+  el.innerHTML = `
+    <div style="display:flex;justify-content:space-between;align-items:baseline;flex-wrap:wrap;gap:.5em;margin-bottom:.4em">
+      <div style="font-size:1.05em;color:var(--muted);font-weight:500;text-transform:uppercase;letter-spacing:.04em">Reduction projection</div>
+      <div style="color:var(--muted);font-size:.85em">based on ${p.global_sample_jobs} completed jobs · ${p.global_ratio_pct.toFixed(1)}% avg reduction</div>
+    </div>
+    <div style="font-size:1.3em;color:var(--text);font-weight:600">
+      ${pendingTb.toFixed(2)} TB pending → ~<span style="color:var(--ok)">${freedTb.toFixed(2)} TB</span> freeable
+      <span style="color:var(--muted);font-weight:normal;font-size:.7em"> · ${outputTb.toFixed(2)} TB H.265 output</span>
+    </div>
+    ${targetTb > 0 ? `<div style="margin-top:.4em;font-size:.92em">
+      Projected after backlog: <b>${projectedTb.toFixed(2)} TB</b>${distLabel ? ' — ' + distLabel : ''}
+    </div>` : ''}
+    ${bucketRow}
   `;
 }
 
@@ -1179,7 +1278,16 @@ function rmapBarHtml(node) {
 function rmapMetaHtml(node) {
   const color = rmapColorClass(node);
   if (node.pending_count > 0) {
-    return `<span class="meta rmap-color-${color}">${node.pending_count} pending · ${fmtBytes(node.pending_bytes)}</span>`;
+    // Show per-folder savings estimate when we have a global ratio.
+    // The ratio comes from the projection card's last fetch — no extra
+    // request needed here.
+    let est = '';
+    const proj = window._lastProjection;
+    if (proj && proj.have_data && proj.global_ratio_pct > 0) {
+      const freeable = node.pending_bytes * (proj.global_ratio_pct / 100);
+      est = ` <span style="color:var(--ok);font-size:.85em" title="estimated freeable when this folder is processed (global ratio ${proj.global_ratio_pct.toFixed(1)}%)">~${fmtBytes(freeable)} freeable</span>`;
+    }
+    return `<span class="meta rmap-color-${color}">${node.pending_count} pending · ${fmtBytes(node.pending_bytes)}${est}</span>`;
   }
   if (node.done_count > 0) {
     return `<span class="meta rmap-color-${color}">${fmtBytes(node.done_bytes)} done</span>`;

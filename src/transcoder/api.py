@@ -287,6 +287,8 @@ def _build_handler(api: ApiServer):
                 return self._send_json(_census_tree_payload(api))
             if route == "/api/census-status":
                 return self._send_json(_census_status_payload(api))
+            if route == "/api/projection":
+                return self._send_json(_projection_payload(api))
             if route == "/api/deep-scan/status":
                 return self._send_json(_deep_scan_status_payload(api))
             if route == "/healthz":
@@ -1608,3 +1610,61 @@ def _deep_scan_status_payload(api: ApiServer) -> dict:
     if ds is None:
         return {"ok": True, "status": None}
     return {"ok": True, "status": ds.status()}
+
+
+def _projection_payload(api: ApiServer) -> dict:
+    """Project where storage usage lands once the current backlog is processed.
+
+    Pulls the historical reduction ratio from completed jobs and applies
+    it to the pending bytes from the latest census. Surfaces both the
+    global ratio (uses ALL completed jobs) and a per-bucket breakdown
+    (segmented by input bitrate, used as a resolution proxy) so the
+    operator can sanity-check whether the projection is representative.
+    """
+    savings = api.db.get_savings_stats()
+    buckets = api.db.get_savings_stats_buckets()
+    last_run = api.db.get_last_census_run()
+    storage = _dropbox_storage_snapshot(api)
+
+    pending_bytes = int((last_run or {}).get("pending_total_bytes") or 0)
+    pending_count = int((last_run or {}).get("pending_total_count") or 0)
+    done_count = int((last_run or {}).get("done_total_count") or 0)
+
+    ratio_pct = float(savings.get("avg_reduction_pct") or 0.0)
+    sample_jobs = int(savings.get("jobs") or 0)
+
+    # Estimate output bytes for the pending pile = pending * (1 - ratio).
+    # Negative ratios (output > input — happens with low-bitrate sources
+    # that grow when re-encoded) clamp to 0 so we don't claim "you'll
+    # GAIN storage by transcoding".
+    safe_ratio = max(0.0, min(99.0, ratio_pct))
+    estimated_freed_bytes = int(pending_bytes * (safe_ratio / 100.0))
+    estimated_output_bytes = pending_bytes - estimated_freed_bytes
+
+    projection: dict = {
+        "ok": True,
+        "have_data": last_run is not None and sample_jobs > 0,
+        "pending_bytes": pending_bytes,
+        "pending_count": pending_count,
+        "done_count": done_count,
+        "global_ratio_pct": round(ratio_pct, 1),
+        "global_sample_jobs": sample_jobs,
+        "global_input_bytes": int(savings.get("input_bytes") or 0),
+        "global_output_bytes": int(savings.get("output_bytes") or 0),
+        "estimated_freed_bytes": estimated_freed_bytes,
+        "estimated_output_bytes": estimated_output_bytes,
+        "buckets": buckets,
+    }
+
+    if storage is not None:
+        used = int(storage.get("used_bytes") or 0)
+        target = int(storage.get("target_bytes") or 0)
+        projected_after_used = max(0, used - estimated_freed_bytes)
+        projection.update({
+            "current_used_bytes": used,
+            "target_bytes": target,
+            "projected_used_after_bytes": projected_after_used,
+            "projected_distance_to_target_bytes": projected_after_used - target,
+        })
+
+    return projection
