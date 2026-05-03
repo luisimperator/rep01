@@ -838,13 +838,20 @@ class Database:
             'total_jobs': sum(state_counts.values()),
         }
 
-    def get_savings_stats(self, since: datetime | None = None) -> dict:
+    def get_savings_stats(
+        self,
+        since: datetime | None = None,
+        path_prefix: str | None = None,
+    ) -> dict:
         """Aggregate input/output bytes and reduction over completed jobs.
 
         Pass ``since`` (UTC) to scope to recent activity (e.g. today). When
-        ``since`` is None, returns all-time totals. Only DONE jobs with a
-        non-null output_size contribute (older v6.0.x rows lacking the
-        column are excluded automatically).
+        ``since`` is None, returns all-time totals. ``path_prefix`` filters
+        to jobs under that Dropbox folder — used by the reduction
+        projection so switching the watch folder naturally restarts the
+        progress baseline (jobs from other roots don't pollute the math).
+        Only DONE jobs with a non-null output_size contribute (older v6.0.x
+        rows lacking the column are excluded automatically).
         """
         conn = self._get_connection()
         where = "state = ? AND output_size IS NOT NULL"
@@ -852,6 +859,9 @@ class Database:
         if since is not None:
             where += " AND updated_at >= ?"
             params.append(since.strftime('%Y-%m-%d %H:%M:%S'))
+        if path_prefix:
+            where += " AND dropbox_path LIKE ?"
+            params.append(path_prefix.rstrip('/') + '/%')
 
         cursor = conn.execute(
             f"""
@@ -883,6 +893,22 @@ class Database:
             'video_seconds': row['video_seconds'] or 0,
             'transcode_seconds': row['transcode_seconds'] or 0,
         }
+
+    def get_earliest_done_at(self, path_prefix: str | None = None) -> datetime | None:
+        """Return the timestamp of the earliest DONE job (under `path_prefix`).
+
+        Used by the reduction projection as the "started" anchor of the
+        progress timeline. None when no jobs have completed yet under the
+        current watch folder — projection then falls back to "started today".
+        """
+        conn = self._get_connection()
+        sql = "SELECT MIN(updated_at) AS earliest FROM jobs WHERE state = ?"
+        params: list = [JobState.DONE.value]
+        if path_prefix:
+            sql += " AND dropbox_path LIKE ?"
+            params.append(path_prefix.rstrip('/') + '/%')
+        row = conn.execute(sql, params).fetchone()
+        return _parse_datetime(row['earliest']) if row and row['earliest'] else None
 
     # =========================================================================
     # Settings Operations
@@ -1266,6 +1292,51 @@ class Database:
             """
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    def get_folder_census_totals(self, root: str | None = None) -> dict:
+        """Sum folder_census rows under `root` (or whole table when None / '/').
+
+        Used by the reduction projection so totals reflect the CURRENT
+        watch folder. When the operator switches dropbox_root mid-stream
+        and the next census hasn't run yet, the rows in folder_census
+        still start with the old root — filtering by current root then
+        returns zeros, which is the honest answer ("we don't know yet").
+        """
+        conn = self._get_connection()
+        root = (root or "").rstrip("/")
+        if not root or root == "/":
+            cursor = conn.execute(
+                "SELECT COALESCE(SUM(pending_count),0) AS pc, "
+                "COALESCE(SUM(pending_bytes),0) AS pb, "
+                "COALESCE(SUM(done_count),0) AS dc, "
+                "COALESCE(SUM(done_bytes),0) AS db, "
+                "COALESCE(SUM(ineligible_count),0) AS ic, "
+                "COALESCE(SUM(ineligible_bytes),0) AS ib, "
+                "COUNT(*) AS rows "
+                "FROM folder_census"
+            )
+        else:
+            cursor = conn.execute(
+                "SELECT COALESCE(SUM(pending_count),0) AS pc, "
+                "COALESCE(SUM(pending_bytes),0) AS pb, "
+                "COALESCE(SUM(done_count),0) AS dc, "
+                "COALESCE(SUM(done_bytes),0) AS db, "
+                "COALESCE(SUM(ineligible_count),0) AS ic, "
+                "COALESCE(SUM(ineligible_bytes),0) AS ib, "
+                "COUNT(*) AS rows "
+                "FROM folder_census WHERE path = ? OR path LIKE ? || '/%'",
+                (root, root),
+            )
+        row = cursor.fetchone()
+        return {
+            "pending_count": int(row["pc"]),
+            "pending_bytes": int(row["pb"]),
+            "done_count": int(row["dc"]),
+            "done_bytes": int(row["db"]),
+            "ineligible_count": int(row["ic"]),
+            "ineligible_bytes": int(row["ib"]),
+            "matching_rows": int(row["rows"]),
+        }
 
     def get_folder_pending_bytes_map(self) -> dict[str, int]:
         """Return {folder_path: pending_bytes} for fast in-memory priority sort.

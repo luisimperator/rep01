@@ -1613,44 +1613,116 @@ def _deep_scan_status_payload(api: ApiServer) -> dict:
 
 
 def _projection_payload(api: ApiServer) -> dict:
-    """Project where storage usage lands once the current backlog is processed.
+    """Project the path from current pending → "watch folder fully converted".
 
-    Pulls the historical reduction ratio from completed jobs and applies
-    it to the pending bytes from the latest census. Surfaces both the
-    global ratio (uses ALL completed jobs) and a per-bucket breakdown
-    (segmented by input bitrate, used as a resolution proxy) so the
-    operator can sanity-check whether the projection is representative.
+    Surfaces:
+
+      - Per-root progress bar fuel: done bytes vs total (under the current
+        `dropbox_root` only — switching the watch folder naturally
+        restarts the timeline because `path_prefix` filters out jobs from
+        other roots).
+      - ETA in days + calendar date, computed from a 7-day rolling window
+        of completed jobs (recent throughput is more representative than
+        all-time average — the daemon may have been idle for weeks before
+        the operator turned it back on).
+      - Reduction ratio + bucket breakdown (resolution proxy) so the
+        operator can sanity-check the freed-bytes estimate.
     """
-    savings = api.db.get_savings_stats()
+    from datetime import datetime, timedelta, timezone
+
+    cfg = api.config
+    root = (cfg.dropbox_root or "").rstrip("/") or "/"
+
+    # All-time DONE jobs scoped to current watch folder. Keeps history
+    # clean when the operator switches projects mid-stream.
+    savings_root = api.db.get_savings_stats(path_prefix=root)
+    # Last 7 days of activity → recent rate. Wall-clock days, not
+    # transcode_seconds, because the operator wants real-time ETA
+    # ("when will my Dropbox folder be done?") not "active CPU hours".
+    seven_days_ago = datetime.now(timezone.utc) - timedelta(days=7)
+    savings_recent = api.db.get_savings_stats(since=seven_days_ago, path_prefix=root)
+
+    # Buckets unchanged — diagnostic only, doesn't filter by root.
     buckets = api.db.get_savings_stats_buckets()
     last_run = api.db.get_last_census_run()
     storage = _dropbox_storage_snapshot(api)
 
-    pending_bytes = int((last_run or {}).get("pending_total_bytes") or 0)
-    pending_count = int((last_run or {}).get("pending_total_count") or 0)
-    done_count = int((last_run or {}).get("done_total_count") or 0)
+    # Pending bytes scoped to current watch folder. Census wipes
+    # folder_census on every run, so when the operator just switched
+    # dropbox_root and census hasn't run yet, this returns 0 and the UI
+    # surfaces a "census stale for current root" hint instead of showing
+    # ghost totals from the previous root.
+    census_under_root = api.db.get_folder_census_totals(root)
+    pending_bytes = int(census_under_root["pending_bytes"])
+    pending_count = int(census_under_root["pending_count"])
+    census_done_count = int(census_under_root["done_count"])
 
-    ratio_pct = float(savings.get("avg_reduction_pct") or 0.0)
-    sample_jobs = int(savings.get("jobs") or 0)
+    # Detect "last census ran on a different root" — when the global last
+    # run shows pending data but the per-root sum is zero. Lets the UI
+    # prompt the operator to "Run census now" after a root switch.
+    last_run_pending_global = int((last_run or {}).get("pending_total_bytes") or 0)
+    census_stale_for_root = (
+        last_run_pending_global > 0
+        and pending_bytes == 0
+        and census_under_root["matching_rows"] == 0
+    )
 
-    # Estimate output bytes for the pending pile = pending * (1 - ratio).
-    # Negative ratios (output > input — happens with low-bitrate sources
-    # that grow when re-encoded) clamp to 0 so we don't claim "you'll
-    # GAIN storage by transcoding".
+    # All-time ratio for "freed bytes" estimate (uses every completed job
+    # under the current root, not just recent ones — more samples = more
+    # stable estimate for a one-shot projection).
+    ratio_pct = float(savings_root.get("avg_reduction_pct") or 0.0)
+    sample_jobs = int(savings_root.get("jobs") or 0)
+
     safe_ratio = max(0.0, min(99.0, ratio_pct))
     estimated_freed_bytes = int(pending_bytes * (safe_ratio / 100.0))
     estimated_output_bytes = pending_bytes - estimated_freed_bytes
 
+    # ETA from recent throughput. Use INPUT bytes consumed (= bytes the
+    # daemon processed off the pending pile) per real day. 7-day window
+    # smooths over weekends / off-days but still tracks current pace.
+    bytes_per_day = (savings_recent.get("input_bytes") or 0) / 7.0
+    eta_days = None
+    eta_at_iso = None
+    if bytes_per_day > 0 and pending_bytes > 0:
+        eta_days = pending_bytes / bytes_per_day
+        eta_at = datetime.now(timezone.utc) + timedelta(days=eta_days)
+        eta_at_iso = eta_at.isoformat()
+
+    # Started timeline anchor — earliest DONE job under root.
+    started_at = api.db.get_earliest_done_at(path_prefix=root)
+    started_at_iso = started_at.isoformat() if started_at else None
+
+    # Progress numbers for the bar.
+    done_bytes_root = int(savings_root.get("input_bytes") or 0)
+    total_bytes = done_bytes_root + pending_bytes
+    progress_pct = (100.0 * done_bytes_root / total_bytes) if total_bytes > 0 else 0.0
+
     projection: dict = {
         "ok": True,
         "have_data": last_run is not None and sample_jobs > 0,
+        "watch_folder": root,
+        "census_stale_for_root": census_stale_for_root,
+        "last_census_at": (last_run or {}).get("finished_at"),
+        # Progress bar fuel
+        "done_bytes": done_bytes_root,
         "pending_bytes": pending_bytes,
+        "total_bytes": total_bytes,
+        "progress_pct": round(progress_pct, 2),
+        "done_jobs_root": int(savings_root.get("jobs") or 0),
         "pending_count": pending_count,
-        "done_count": done_count,
+        "census_done_count": census_done_count,
+        # ETA
+        "started_at": started_at_iso,
+        "eta_days": eta_days,
+        "eta_at": eta_at_iso,
+        "bytes_per_day_recent": int(bytes_per_day),
+        "recent_jobs": int(savings_recent.get("jobs") or 0),
+        "recent_input_bytes": int(savings_recent.get("input_bytes") or 0),
+        # Reduction ratio (per-root)
         "global_ratio_pct": round(ratio_pct, 1),
         "global_sample_jobs": sample_jobs,
-        "global_input_bytes": int(savings.get("input_bytes") or 0),
-        "global_output_bytes": int(savings.get("output_bytes") or 0),
+        "global_input_bytes": done_bytes_root,
+        "global_output_bytes": int(savings_root.get("output_bytes") or 0),
         "estimated_freed_bytes": estimated_freed_bytes,
         "estimated_output_bytes": estimated_output_bytes,
         "buckets": buckets,
