@@ -2,6 +2,33 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.7.5
+Data: 05/05/2026
+--------------------------------------------------------------------------------
+
+Disk budget: agora editável pelo dashboard (sem mexer em yaml)
+
+  [FEATURE] Settings → "Disk budget" + "Min free disk space (GB)"
+  ----------------------------------------------------------------
+  ANTES: para mudar disk_budget.enabled ou min_free_bytes era preciso
+         abrir config.yaml na máquina, editar à mão (em bytes!),
+         salvar, reiniciar o daemon. Inacessível pelo dashboard.
+
+  AGORA: dois campos novos no painel Settings:
+         • toggle on/off do disk budget
+         • input numérico em GB (não bytes — usuário não precisa
+           contar zeros)
+         Save grava em config.yaml E aplica live no DiskBudget em
+         memória (mexe em budget.enabled e budget.min_free_bytes
+         direto no objeto). Próxima admissão de download já usa o
+         novo valor — sem restart.
+
+  TIPO NOVO: "gb_to_bytes" no _SETTINGS_KNOBS — usuário digita 1200,
+  daemon armazena 1_200_000_000_000 (decimal GB, batendo specs de
+  fabricante de disco). Validação 10–100000 GB.
+
+================================================================================
+
 Versão: 6.7.4
 Data: 05/05/2026
 --------------------------------------------------------------------------------

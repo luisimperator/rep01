@@ -830,6 +830,18 @@ _SETTINGS_KNOBS: dict[str, dict] = {
         "yaml_key": "concurrency.download_workers",
         "label": "Parallel downloads from Dropbox",
     },
+    "disk_budget_enabled": {
+        "type": "bool",
+        "yaml_key": "disk_budget.enabled",
+        "label": "Disk budget: pause downloads when staging fills up",
+    },
+    "disk_budget_min_free_gb": {
+        "type": "gb_to_bytes",
+        "min": 10,
+        "max": 100_000,
+        "yaml_key": "disk_budget.min_free_bytes",
+        "label": "Min free disk space (GB) — daemon waits when below",
+    },
 }
 
 
@@ -856,6 +868,8 @@ def _settings_payload(api: ApiServer) -> dict:
             "download_workers": cfg.concurrency.download_workers,
             "cq_value": cfg.cq_value,
             "min_size_gb": cfg.min_size_gb,
+            "disk_budget_enabled": cfg.disk_budget.enabled,
+            "disk_budget_min_free_gb": round(cfg.disk_budget.min_free_bytes / 1_000_000_000, 1),
         },
         "knobs": {k: {kk: vv for kk, vv in v.items() if kk != "yaml_key"} for k, v in _SETTINGS_KNOBS.items()},
         "context": {
@@ -923,6 +937,15 @@ def _apply_settings(api: ApiServer, body: dict) -> dict:
                 raise ValueError(f"{key} must be a number")
             if value < knob["min"] or value > knob["max"]:
                 raise ValueError(f"{key} must be between {knob['min']} and {knob['max']}")
+        elif knob["type"] == "gb_to_bytes":
+            # User types GB; we store bytes (decimal GB, matching disk specs).
+            try:
+                gb = float(raw)
+            except (TypeError, ValueError):
+                raise ValueError(f"{key} must be a number")
+            if gb < knob["min"] or gb > knob["max"]:
+                raise ValueError(f"{key} must be between {knob['min']} and {knob['max']} GB")
+            value = int(gb * 1_000_000_000)
         elif knob["type"] == "path":
             value = str(raw or "").strip()
             if not value:
@@ -1015,6 +1038,17 @@ def _apply_settings(api: ApiServer, body: dict) -> dict:
         if agent is not None:
             agent.interval_sec = max(60, int(cfg.incidents.health_check_interval_minutes) * 60)
             logger.info(f"self-health interval updated live to {agent.interval_sec}s")
+
+    if "disk_budget_enabled" in updated or "disk_budget_min_free_gb" in updated:
+        budget = getattr(getattr(api, "daemon", None), "disk_budget", None)
+        if budget is not None:
+            budget.enabled = bool(cfg.disk_budget.enabled)
+            budget.min_free_bytes = int(cfg.disk_budget.min_free_bytes)
+            logger.info(
+                "disk_budget updated live: enabled=%s, min_free_bytes=%d (%.1f GB)",
+                budget.enabled, budget.min_free_bytes,
+                budget.min_free_bytes / 1_000_000_000,
+            )
 
     logger.info("settings updated via API: %s", updated)
     return {"updated": updated, "config_path": cfg_path}

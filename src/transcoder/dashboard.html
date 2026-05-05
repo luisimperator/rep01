@@ -710,6 +710,18 @@ async function renderSettings() {
       <span class="hint">Daemon restart needed after change.</span>
     </div>
     <div class="field">
+      <label>${lbl('disk_budget_enabled', 'Disk budget')}</label>
+      <label class="switch" style="display:inline-flex; align-items:center; gap:.5em;">
+        <input id="set-budget-enabled" type="checkbox" ${s.disk_budget_enabled ? 'checked' : ''}>
+        <span style="color: var(--muted); font-size: .9em">${s.disk_budget_enabled ? 'on — workers wait when disk is tight' : 'off — workers ignore free space'}</span>
+      </label>
+    </div>
+    <div class="field">
+      <label for="set-budget-min-free">${lbl('disk_budget_min_free_gb', 'Min free disk space (GB)')}</label>
+      <input id="set-budget-min-free" type="number" min="${kmin('disk_budget_min_free_gb', 10)}" max="${kmax('disk_budget_min_free_gb', 100000)}" step="10" value="${s.disk_budget_min_free_gb ?? 1200}">
+      <span class="hint">Daemon refuses to start a download if it would leave less than this much free. Live-applied; no restart.</span>
+    </div>
+    <div class="field">
       <label>Encoder · Profile</label>
       <span class="hint">${escapeHtml(ctx.encoder_preference || '')} · ${escapeHtml(ctx.profile || '')} (edit in config.yaml + restart)</span>
     </div>
@@ -760,6 +772,8 @@ async function saveSettings() {
     api_bind: document.getElementById('set-bind').value,
     transcode_workers: parseInt(document.getElementById('set-tw').value),
     download_workers: parseInt(document.getElementById('set-dw').value),
+    disk_budget_enabled: document.getElementById('set-budget-enabled').checked,
+    disk_budget_min_free_gb: parseFloat(document.getElementById('set-budget-min-free').value),
   };
   try {
     const r = await fetchJSON('/api/settings', {
