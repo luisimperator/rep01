@@ -160,7 +160,9 @@ class DiskBudgetSettings(BaseModel):
         description="Soft cap on total bytes reserved by in-flight downloads"
     )
     min_free_bytes: int = Field(
-        default=500_000_000_000,    # 500 GB
+        default=1_200_000_000_000,  # 1.2 TB — conservative for 2 TB staging disks;
+                                    # leaves room for transcoded outputs, OS overhead,
+                                    # page file, and recycle bin without ENOSPC.
         ge=1_073_741_824,
         description="Keep at least this many bytes free on the staging filesystem"
     )

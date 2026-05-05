@@ -146,6 +146,35 @@ class DownloadWorker(BaseWorker):
             bytes_total=int(job.dropbox_size or 0),
         )
 
+        # Fast-path: input.MP4 already on disk with the expected size (e.g.
+        # daemon was restarted mid-pipeline and the file survived the crash).
+        # Skip BOTH the disk-budget reservation AND the download itself —
+        # those bytes are already on disk, asking the budget to reserve fresh
+        # space for them would falsely deny admission when the staging dir
+        # is recovered post-crash and free disk has dropped below the
+        # reservation threshold (the deadlock seen in v6.7.3 and earlier).
+        original_name = Path(job.dropbox_path).name
+        _job_dir, input_path, _ = get_staging_paths(
+            self.config.local_staging_dir, job.id, original_name,
+        )
+        expected = int(job.dropbox_size or 0)
+        if expected and input_path.exists():
+            try:
+                actual_size = input_path.stat().st_size
+            except OSError:
+                actual_size = -1
+            if actual_size == expected:
+                logger.info(
+                    f"[{self.name}] Reusing previously downloaded "
+                    f"{input_path} ({format_bytes(actual_size)}) — skipping "
+                    f"download and disk-budget reservation"
+                )
+                self.db.update_job_state(
+                    job.id, JobState.DOWNLOADED,
+                    local_input_path=str(input_path),
+                )
+                return
+
         # Block until staging has room. On stop_event, bail cleanly and let the
         # dispatcher re-enqueue the job on next refill (state is still NEW).
         if self.disk_budget is not None and self.disk_budget.enabled:
