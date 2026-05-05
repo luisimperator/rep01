@@ -2,6 +2,33 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.7.3
+Data: 04/05/2026
+--------------------------------------------------------------------------------
+
+Stats "Today": rollover agora respeita fuso horário local
+
+  [BUGFIX] Contador "Today — done / saved" zerava às 21:00 BRT
+  -----------------------------------------------------------
+  ANTES: _stats_payload em api.py calculava o início do dia em UTC
+         (datetime.now(timezone.utc).replace(hour=0,...)). Para o
+         usuário em BRT (UTC-3), 00:00 UTC = 21:00 BRT, então o
+         contador "Today" zerava às 21h da noite e jobs feitos
+         entre 21:00 e 00:00 viravam "ontem" do nada.
+
+  AGORA: usa datetime.now().astimezone() pra pegar o fuso local do
+         daemon, calcula meia-noite local, e converte de volta pra
+         UTC só pra rodar a query no DB (que armazena tudo em UTC).
+         Reset do counter agora bate com a virada do dia no relógio
+         de parede do usuário, em qualquer timezone.
+
+  IMPACTO: só afeta a card "Today / All time" da dashboard. Stats
+           all-time, week e timestamps internos (incidents, scans,
+           manifests) continuam em UTC como antes — só o "início do
+           dia" virou local.
+
+================================================================================
+
 Versão: 6.7.2
 Data: 03/05/2026
 --------------------------------------------------------------------------------

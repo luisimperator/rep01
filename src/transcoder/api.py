@@ -701,9 +701,14 @@ def _log_payload(api: ApiServer, qs: dict[str, list[str]]) -> dict:
 def _stats_payload(api: ApiServer) -> dict:
     """Today vs. all-time conversion savings, used by the dashboard's stats card."""
     from datetime import datetime, timezone, timedelta
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    # "Today" starts at local midnight (daemon's timezone), not UTC midnight,
+    # so the dashboard counter rolls over when the user's wall clock hits 00:00 —
+    # not at 00:00 UTC (which would be 21:00 in BRT, 19:00 in PST, etc.).
+    local_now = datetime.now().astimezone()
+    local_today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start = local_today_start.astimezone(timezone.utc).replace(tzinfo=None)
     week_start = today_start - timedelta(days=7)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     return {
         "ok": True,
         "today": api.db.get_savings_stats(since=today_start),
