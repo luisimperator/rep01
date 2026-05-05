@@ -76,7 +76,7 @@ scanner:
 disk_budget:
   enabled: false
   max_staging_bytes: 2000000000000
-  min_free_bytes: 500000000000
+  min_free_bytes: 1200000000000
   poll_interval_sec: 30
 api:
   enabled: true

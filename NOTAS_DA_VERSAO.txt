@@ -2,6 +2,58 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.7.4
+Data: 05/05/2026
+--------------------------------------------------------------------------------
+
+Disk budget: deadlock pós-restart corrigido + default mais conservador
+
+  [BUGFIX] DownloadWorker travava em "0%" depois de restart com staging cheio
+  ----------------------------------------------------------------------------
+  ANTES: Quando o daemon reiniciava com inputs já no disco staging (via
+         "Reusing previously downloaded"), o DownloadWorker ainda chamava
+         disk_budget.wait_for_slot() ANTES de checar a existência do
+         arquivo. O budget pruna todas as reservas no startup, então cada
+         job tentava reservar bytes do zero — mesmo o arquivo já estando
+         no disco. Resultado: can_admit() calculava
+         free_after = (current_free) - dropbox_size mesmo com o arquivo
+         já contabilizado no current_free, e refusava admissão. Os 30
+         jobs ativos ficavam todos em 0% indefinidamente, com ENOSPC
+         em cascata.
+
+  AGORA: process_job() faz fast-path ANTES do wait_for_slot — se
+         input.MP4 já existe com o tamanho esperado, marca DOWNLOADED
+         e retorna sem reservar nada. Bytes já estão no disco, não
+         precisam de reserva nova. Reservas só acontecem quando
+         realmente vamos baixar (arquivo ausente ou parcial).
+
+  EFEITO COLATERAL POSITIVO: arquivos parciais ainda passam pelo
+  caminho normal (wait_for_slot → _download_job que limpa parcial
+  e re-baixa), preservando a admission control onde de fato precisa.
+
+  [CONFIG] Default min_free_bytes: 500 GB → 1.2 TB
+  ------------------------------------------------
+  ANTES: Default deixava staging encher até sobrar só 500 GB de free.
+         Em discos de ~2 TB com 4 downloaders concorrentes baixando
+         arquivos de 50-80 GB cada, a margem era apertada demais para
+         segurar outputs transcodados + page file + lixeira + overhead
+         do Windows.
+
+  AGORA: 1.2 TB de free space mínimo. Em disco de 2 TB, isso permite
+         no máximo ~800 GB de staging em uso por vez — folga suficiente
+         pra outputs, sistema operacional, e ainda fica longe do
+         ENOSPC.
+
+  ATENÇÃO: usuários com config.yaml existente continuam com o valor
+  antigo. Para aplicar o novo default, edite manualmente:
+
+    disk_budget:
+      min_free_bytes: 1200000000000
+
+  e reinicie o daemon.
+
+================================================================================
+
 Versão: 6.7.3
 Data: 04/05/2026
 --------------------------------------------------------------------------------
