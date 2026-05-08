@@ -2,6 +2,40 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.7.6
+Data: 08/05/2026
+--------------------------------------------------------------------------------
+
+Dispatcher: anti-starvation pro transcoder quando todos os downloads são monstros
+
+  [FEATURE] Promover arquivo pequeno na fila quando transcoder tá ocioso
+  ----------------------------------------------------------------------
+  ANTES: a folder-priority do dispatcher (dispatcher.py:198) ordenava a
+         fila de download só pelo backlog de bytes da pasta. Quando a
+         pasta com mais bytes pendentes tinha vários arquivos de 60–100 GB,
+         os 4 downloaders pegavam todos arquivos gigantes ao mesmo tempo.
+         Resultado: ~2-3h de transcoder ocioso esperando ALGUM dos 4
+         downloads gigantes terminar pra ter o que transcodar.
+
+  AGORA: novo método _anti_starvation_reorder em dispatcher.py. Quando
+         transcode_q.qsize() == 0 (transcoder com fome), o dispatcher
+         varre os candidatos de download e promove o primeiro arquivo
+         <20 GB pra posição 0. Folder priority continua válido pros
+         outros 3 slots — só o primeiro vira "fast lane" pra alimentar
+         o transcoder em ~5–10 min em vez de horas.
+
+  TRIGGER: só ativa quando transcode queue está vazia E o head da lista
+           já não é pequeno. Se transcoder tem trabalho ou se já vai
+           pegar pequeno mesmo, não mexe.
+
+  THRESHOLD: 20 GB hardcoded (constante _ANTI_STARVATION_SMALL_BYTES no
+             dispatcher). Cobre arquivos 4K 4:2:0 típicos de podcast (5–15 GB).
+
+  LOG: emite 'dispatcher: transcode queue empty — promoting small job N
+       (X.XX GB) ahead of folder priority' quando dispara.
+
+================================================================================
+
 Versão: 6.7.5
 Data: 05/05/2026
 --------------------------------------------------------------------------------

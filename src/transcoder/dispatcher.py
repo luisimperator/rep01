@@ -179,6 +179,13 @@ class JobDispatcher(threading.Thread):
 
         if prioritize_folder:
             candidates = self._sort_by_folder_priority(candidates)
+            # Anti-starvation: when the transcode queue is empty, push the
+            # first reasonably-small job to the front so the transcoder
+            # gets fed quickly instead of waiting hours for one of N huge
+            # downloads to finish. Folder priority still applies — we only
+            # reorder within the already-prioritised list.
+            if self.transcode_q.qsize() == 0:
+                candidates = self._anti_starvation_reorder(candidates)
 
         with self._active_lock:
             for job in candidates:
@@ -194,6 +201,46 @@ class JobDispatcher(threading.Thread):
                     break
                 self._active_set.add(job.id)
                 free -= 1
+
+    # Threshold below which a job counts as "small enough to feed the
+    # transcoder fast". 20 GB is roughly a 4K 4:2:0 source — downloads
+    # in ~5–10 min on a decent uplink, so the transcoder gets work soon.
+    _ANTI_STARVATION_SMALL_BYTES = 20 * 1024 ** 3
+
+    def _anti_starvation_reorder(self, jobs: list[Job]) -> list[Job]:
+        """Move the first sub-threshold job to the head of the list.
+
+        Called only when the transcode queue is empty. Picks the first
+        "small" job in the (already folder-prioritised) candidate list
+        and lifts it to position 0, leaving the rest of the order
+        intact. This guarantees that the next download admission picks
+        something the transcoder can chew on within minutes, even when
+        all four download workers would otherwise grab 70+ GB monsters
+        from the priority folder.
+
+        If no small job exists in the candidate window, returns the
+        list unchanged (folder priority wins by default).
+        """
+        if not jobs:
+            return jobs
+        # If the head of the list is already small, no reorder needed.
+        first_size = int(jobs[0].dropbox_size or 0)
+        if 0 < first_size < self._ANTI_STARVATION_SMALL_BYTES:
+            return jobs
+        # Otherwise, scan for the first small job further down and lift
+        # it to position 0.
+        for i in range(1, len(jobs)):
+            size = int(jobs[i].dropbox_size or 0)
+            if 0 < size < self._ANTI_STARVATION_SMALL_BYTES:
+                logger.info(
+                    "dispatcher: transcode queue empty — promoting small job "
+                    "%s (%.2f GB) ahead of folder priority to feed transcoder",
+                    jobs[i].id, size / (1024 ** 3),
+                )
+                small = jobs.pop(i)
+                jobs.insert(0, small)
+                return jobs
+        return jobs
 
     def _sort_by_folder_priority(self, jobs: list[Job]) -> list[Job]:
         """Stable sort: largest folder backlog first, then FIFO by created_at.
