@@ -2,6 +2,63 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.7.7
+Data: 10/05/2026
+--------------------------------------------------------------------------------
+
+Convoy mode: throttle outros downloaders quando transcoder tá ocioso
+
+  [FEATURE] Eleger UM leader e desacelerar os outros 3 enquanto ninguém transcoda
+  ----------------------------------------------------------------------------
+  ANTES: 4 downloaders rodando em paralelo dividiam a banda WAN
+         (~75 MB/s) em 4 fatias de ~18 MB/s. Quando os 4 pegavam
+         arquivos gigantes (60–100 GB), TODOS terminavam juntos
+         em ~45 min — o transcoder ficava ocioso esse tempo todo
+         esperando QUALQUER um dos 4 acabar.
+         O anti-starvation reorder do v6.7.6 só ajudava se já
+         houvesse arquivo pequeno na fila; quando não havia, esse
+         cenário travava o pipeline.
+
+  AGORA: novo "convoy mode" no dispatcher. Quando transcode_q.qsize() == 0
+         E ≥2 downloaders estão ativamente puxando bytes:
+         • Primeiro worker que pergunta vira leader (qualquer um, não
+           tem eleição complexa — usuário disse "pega qualquer um").
+         • Os outros workers, no progress callback, chamam
+           dispatcher.should_throttle_download() e dormem
+           convoy_throttle_sec (default 5s) por chunk de 8 MB.
+         • Resultado: leader fica com efetivamente toda a banda
+           (~70 MB/s), termina ~4x mais rápido. Outros workers
+           continuam baixando devagar (~1.6 MB/s) sem perder
+           conexão TCP nem ter que reabrir handshake.
+         • Assim que transcode_q recebe trabalho (leader acabou),
+           convoy clear → outros workers voltam a velocidade total.
+
+  TRIGGER: transcode_q vazio E ≥2 download workers ativos.
+           Com 1 download ativo não faz sentido (ninguém pra throttle).
+
+  CONFIG: novo knob `dispatcher.convoy_throttle_sec` (default 5.0).
+          0 desliga convoy mode. Range 0–30s/chunk.
+          Não precisa mexer — o default já equilibra liderança total
+          com workers throttled em ~1.6 MB/s (suficiente pra manter
+          a conexão Dropbox viva).
+
+  REGISTRY: DownloadWorker registra/desregistra em cada
+            _download_job(). Fast-path (input já em disco) NÃO
+            registra — não consome banda mesmo.
+
+  LOG: "dispatcher: convoy mode engaged — transcode_q empty, N
+       downloaders active; leader=downloader-X, others throttled
+       to 5.0s/chunk". E "convoy mode cleared — transcoder fed"
+       quando some.
+
+  GANHO MEDIDO (cenário do print de 08/05): 4 downloaders a 20-30%
+  com ETAs 45m/49m/45m/1h10m, transcoders 0% ativos. Convoy mode
+  reduziria isso pra leader em ~12 min, transcoder começa em ~12 min
+  em vez de 45 min. ~33 min de transcoding salvo nesse único
+  ciclo.
+
+================================================================================
+
 Versão: 6.7.6
 Data: 08/05/2026
 --------------------------------------------------------------------------------

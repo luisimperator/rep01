@@ -71,6 +71,20 @@ class JobDispatcher(threading.Thread):
         # queues. Workers drain whatever is already in flight and then idle.
         self._paused = threading.Event()
 
+        # Convoy mode: when transcode_q is empty AND ≥2 download workers are
+        # actively pulling bytes, all 4 workers split the WAN four ways and
+        # the transcoder waits ~45 min for any of them to finish. Convoy mode
+        # picks one worker as "leader" (first one to ask) and tells the
+        # others to sleep N seconds per chunk in the progress callback. Leader
+        # gets effectively all the bandwidth and finishes ~4x faster — the
+        # transcoder gets fed in ~10 min instead of 45.
+        self._convoy_lock = threading.Lock()
+        self._download_active: dict[str, int] = {}   # worker_name -> job_id
+        self._convoy_leader: str | None = None
+        self.convoy_throttle_sec: float = float(
+            getattr(config.dispatcher, "convoy_throttle_sec", 5.0)
+        )
+
         # Per-folder pending bytes, refreshed periodically from folder_census.
         # Used to bias the download queue toward whichever folder still has
         # the largest backlog of H.264 to chew through (folder-drain priority).
@@ -96,6 +110,82 @@ class JobDispatcher(threading.Thread):
 
     def is_paused(self) -> bool:
         return self._paused.is_set()
+
+    # -- convoy mode -----------------------------------------------------
+
+    def register_download_active(self, worker_name: str, job_id: int) -> None:
+        """A DownloadWorker is now actively pulling bytes from Dropbox."""
+        with self._convoy_lock:
+            self._download_active[worker_name] = job_id
+
+    def unregister_download_active(self, worker_name: str) -> None:
+        """A DownloadWorker is done (success, failure, or aborted)."""
+        with self._convoy_lock:
+            self._download_active.pop(worker_name, None)
+            if self._convoy_leader == worker_name:
+                self._convoy_leader = None
+
+    def should_throttle_download(self, worker_name: str) -> bool:
+        """True if this worker is a non-leader during active convoy mode.
+
+        Called from the DownloadWorker progress callback after each chunk.
+        Convoy mode activates when ALL of:
+          - convoy_throttle_sec > 0
+          - transcode_q is empty (no work waiting for transcoder)
+          - ≥2 download workers are actively pulling bytes
+
+        First worker to ask becomes leader and runs at full speed; the rest
+        sleep `convoy_throttle_sec` per chunk so the leader's file finishes
+        first and feeds the transcoder. As soon as transcode_q has work,
+        convoy clears and everyone runs full-speed.
+        """
+        if self.convoy_throttle_sec <= 0:
+            return False
+
+        # Once the transcoder has work, drop convoy state and let everyone
+        # rip — leaders included. Cheap fast path that runs every chunk.
+        if self.transcode_q.qsize() > 0:
+            if self._convoy_leader is not None:
+                with self._convoy_lock:
+                    if self._convoy_leader is not None:
+                        logger.info(
+                            "dispatcher: convoy mode cleared — transcoder fed"
+                        )
+                        self._convoy_leader = None
+            return False
+
+        with self._convoy_lock:
+            # Leader must still be a registered active worker; if it
+            # finished/failed without unregistering for any reason, drop it
+            # so a fresh leader can be elected on the next callback.
+            if (
+                self._convoy_leader is not None
+                and self._convoy_leader not in self._download_active
+            ):
+                self._convoy_leader = None
+
+            # Need at least two active downloaders for convoy to make sense.
+            # With one downloader there's nothing to throttle.
+            if len(self._download_active) < 2:
+                self._convoy_leader = None
+                return False
+
+            # Elect: first asker wins. The user explicitly said "doesn't
+            # matter who, just pick any one."
+            if self._convoy_leader is None:
+                self._convoy_leader = worker_name
+                logger.info(
+                    "dispatcher: convoy mode engaged — transcode_q empty, %d "
+                    "downloaders active; leader=%s, others throttled to "
+                    "%.1fs/chunk to free WAN for the leader",
+                    len(self._download_active),
+                    worker_name,
+                    self.convoy_throttle_sec,
+                )
+
+            return self._convoy_leader != worker_name
+
+    # ---------------------------------------------------------------- queues
 
     def queue_for_stage(self, stage: str) -> Queue[Job]:
         """Look up a worker queue by stage name."""
