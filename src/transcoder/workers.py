@@ -204,6 +204,19 @@ class DownloadWorker(BaseWorker):
 
     def _download_job(self, job: Job) -> None:
         """Download file for job."""
+        # Convoy mode: register so the dispatcher can elect a leader and
+        # throttle the rest when transcode_q is empty (see should_throttle_download).
+        # Wrapped around the entire download body — preflight, partial, and
+        # full transfers all consume bandwidth.
+        self.dispatcher.register_download_active(self.name, job.id)
+        try:
+            self._download_job_inner(job)
+        finally:
+            self.dispatcher.unregister_download_active(self.name)
+
+    def _download_job_inner(self, job: Job) -> None:
+        """Actual download body — split out so convoy register/unregister
+        can wrap it with a clean try/finally."""
         # Update state
         self.db.update_job_state(job.id, JobState.DOWNLOADING)
 
@@ -413,6 +426,7 @@ class DownloadWorker(BaseWorker):
     ) -> Callable[[int, int], None]:
         """Create progress callback for download."""
         last_log = [0.0]
+        last_throttle_log = [0.0]
 
         def callback(downloaded: int, total: int) -> None:
             if self.should_stop():
@@ -428,6 +442,18 @@ class DownloadWorker(BaseWorker):
                     f"({format_bytes(downloaded)}/{format_bytes(total)})"
                 )
                 last_log[0] = now
+
+            # Convoy throttle: when transcode_q is empty AND another
+            # downloader has been elected leader, sleep here so the leader
+            # gets effectively all the WAN bandwidth and finishes first.
+            if self.dispatcher.should_throttle_download(self.name):
+                if now - last_throttle_log[0] > 60:
+                    logger.info(
+                        f"[{self.name}] Convoy throttle active — yielding "
+                        f"bandwidth to convoy leader (transcoder is starving)"
+                    )
+                    last_throttle_log[0] = now
+                time.sleep(self.dispatcher.convoy_throttle_sec)
 
         return callback
 

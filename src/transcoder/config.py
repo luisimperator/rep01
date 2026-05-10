@@ -246,6 +246,17 @@ class DispatcherSettings(BaseModel):
         le=32,
         description="Queue size = workers * this; controls pipelining slack"
     )
+    convoy_throttle_sec: float = Field(
+        default=5.0,
+        ge=0.0,
+        le=30.0,
+        description=(
+            "Convoy mode: sleep N seconds per download chunk on non-leader "
+            "workers when the transcoder queue is empty and ≥2 downloaders "
+            "are in flight. Frees bandwidth so the leader finishes faster "
+            "and feeds the transcoder. 0 disables convoy mode."
+        ),
+    )
 
 
 class DropboxApiSettings(BaseModel):
