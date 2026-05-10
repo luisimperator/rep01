@@ -50,6 +50,14 @@ class Watchdog(threading.Thread):
         self.db = db
         self.stop_event = stop_event
         self.check_interval = check_interval
+        # Failed-revive cooldown: when the download pipeline goes idle we
+        # promote every FAILED job back to RETRY_WAIT to give it another
+        # shot. Cooldown prevents thrashing if the same jobs immediately
+        # re-fail on a flaky network minute.
+        self._last_failed_revive_at: float = 0.0
+        self._failed_revive_cooldown_sec: float = float(
+            getattr(config.watchdog, "failed_revive_cooldown_sec", 600.0)
+        )
 
     def run(self) -> None:
         """Main watchdog loop."""
@@ -59,6 +67,7 @@ class Watchdog(threading.Thread):
             try:
                 self._check_timeouts()
                 self._check_retry_ready()
+                self._check_failed_revive()
             except Exception as e:
                 logger.error(f"Watchdog error: {e}")
 
@@ -140,6 +149,43 @@ class Watchdog(threading.Thread):
                 if elapsed >= delay:
                     logger.info(f"Job {job.id} ready for retry after {elapsed:.0f}s backoff")
                     self.db.update_job_state(job.id, JobState.NEW)
+
+    def _check_failed_revive(self) -> None:
+        """When the download pipeline is idle, give every FAILED job another
+        shot. Idle = no jobs in NEW, RETRY_WAIT, or DOWNLOADING state.
+        Otherwise the downloaders are either busy or about to be busy and
+        we don't want to pile FAILED retries on top of pending work.
+
+        Cooldown (default 10 min) prevents thrashing on a flaky network
+        where the same jobs would re-fail immediately after each revive.
+        """
+        if self._failed_revive_cooldown_sec <= 0:
+            return
+
+        now_mono = time.monotonic()
+        if (now_mono - self._last_failed_revive_at) < self._failed_revive_cooldown_sec:
+            return
+
+        # Pipeline-busy guards (cheap COUNT(*) queries).
+        if self.db.count_jobs(JobState.DOWNLOADING) > 0:
+            return
+        if self.db.count_jobs(JobState.NEW) > 0:
+            return
+        if self.db.count_jobs(JobState.RETRY_WAIT) > 0:
+            return
+
+        failed_count = self.db.count_jobs(JobState.FAILED)
+        if failed_count == 0:
+            return
+
+        reset = self.db.reset_failed_jobs()
+        self._last_failed_revive_at = now_mono
+        logger.info(
+            "watchdog: download pipeline idle — revived %d FAILED job(s) "
+            "back to RETRY_WAIT for another attempt (next cooldown %.0fs)",
+            reset,
+            self._failed_revive_cooldown_sec,
+        )
 
 
 class HealthChecker:
