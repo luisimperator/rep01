@@ -296,6 +296,17 @@ class WatchdogSettings(BaseModel):
         le=50,
         description="Maximum retry attempts with exponential backoff"
     )
+    failed_revive_cooldown_sec: float = Field(
+        default=600.0,
+        ge=0.0,
+        le=86400.0,
+        description=(
+            "When the download pipeline is idle (0 NEW/RETRY_WAIT/DOWNLOADING), "
+            "the watchdog revives every FAILED job back to RETRY_WAIT for "
+            "another attempt. This is the minimum gap between revivals so a "
+            "flaky-network minute can't churn the same jobs forever. 0 disables."
+        ),
+    )
 
 
 class CensusSettings(BaseModel):

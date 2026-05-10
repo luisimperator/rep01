@@ -2,6 +2,51 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.7.8
+Data: 10/05/2026
+--------------------------------------------------------------------------------
+
+Watchdog: revive FAILED jobs quando o pipeline de download tá ocioso
+
+  [FEATURE] Auto-retry de FAILED quando ninguém tá baixando
+  --------------------------------------------------------
+  ANTES: jobs que atingiam max_retries (default 10) iam pra estado
+         FAILED e ficavam parados pra sempre. Quando o pipeline ficava
+         ocioso (sem download algum acontecendo), os FAILED continuavam
+         na geladeira esperando intervenção manual via `hd reconvert`
+         ou reset_failed_jobs() na mão. Resultado: arquivos que
+         falharam por causa de IncompleteRead numa janela de rede
+         ruim ficavam pra trás mesmo depois da rede voltar.
+
+  AGORA: novo `_check_failed_revive` no watchdog. A cada ciclo (60s):
+         • Verifica se o pipeline de download tá realmente ocioso:
+           0 jobs em DOWNLOADING, 0 em NEW, 0 em RETRY_WAIT.
+         • Se sim E tem FAILED na DB E o cooldown expirou →
+           chama db.reset_failed_jobs() que move TODOS os FAILED
+           pra RETRY_WAIT com retry_count=0.
+         • O `_check_retry_ready` existente pega eles na próxima
+           rodada e empurra pra NEW → dispatcher → download.
+
+  TRIGGER: pipeline ocioso (0 jobs ativos em download) E ≥1 FAILED na DB.
+
+  COOLDOWN: 10 min (default) entre revivals. Configurável via
+            `watchdog.failed_revive_cooldown_sec` (0 desliga,
+            até 86400s = 24h).
+            O cooldown evita que numa janela de rede ruim os mesmos
+            jobs falhem → revivam → falhem → revivam num loop apertado.
+            10 min dá tempo da rede estabilizar.
+
+  LOG: 'watchdog: download pipeline idle — revived N FAILED job(s)
+       back to RETRY_WAIT for another attempt (next cooldown 600s)'
+
+  CENÁRIO COBERTO: durante uma noite de upload, alguns jobs falham
+  por IncompleteRead persistente, atingem max_retries e morrem em
+  FAILED. De manhã, pipeline tá vazio mas tem FAILED parados.
+  Watchdog detecta idle → revive todos → eles re-tentam com rede
+  fresca. Sem precisar tocar no terminal.
+
+================================================================================
+
 Versão: 6.7.7
 Data: 10/05/2026
 --------------------------------------------------------------------------------
