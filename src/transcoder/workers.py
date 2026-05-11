@@ -976,6 +976,33 @@ class TranscodeWorker(BaseWorker):
 
     def _handle_failure(self, job: Job, error: str) -> None:
         """Handle job failure with retry logic."""
+        # ffprobe couldn't read the local file. The downloader already
+        # verified that local_size == dropbox_size before handing it off,
+        # so the bytes on Dropbox are themselves unreadable — re-downloading
+        # would copy the same broken bytes again. Send straight to
+        # SKIPPED_CORRUPT (terminal) so the auto-revive (v6.7.8) doesn't
+        # keep churning it every 10 minutes.
+        if error.startswith("Probe failed:"):
+            logger.warning(
+                f"[{self.name}] Marking job {job.id} as SKIPPED_CORRUPT "
+                f"(ffprobe can't read source, re-download won't help): {error}"
+            )
+            self.db.update_job_state(
+                job.id,
+                JobState.SKIPPED_CORRUPT,
+                error_message=error,
+            )
+            if self.disk_budget is not None:
+                self.disk_budget.release(job.id)
+            try:
+                self._cleanup_staging(job)
+            except Exception as cleanup_err:
+                logger.debug(
+                    f"[{self.name}] staging cleanup after SKIPPED_CORRUPT "
+                    f"failed (non-fatal): {cleanup_err}"
+                )
+            return
+
         retry_count, should_fail = self.db.increment_retry(
             job.id,
             self.config.watchdog.max_retries,

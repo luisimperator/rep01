@@ -31,6 +31,7 @@ class JobState(str, Enum):
     SKIPPED_TOO_SMALL = "SKIPPED_TOO_SMALL"
     SKIPPED_LOW_BITRATE = "SKIPPED_LOW_BITRATE"
     SKIPPED_EXCLUDED = "SKIPPED_EXCLUDED"
+    SKIPPED_CORRUPT = "SKIPPED_CORRUPT"
     FAILED = "FAILED"
     RETRY_WAIT = "RETRY_WAIT"
 
@@ -52,6 +53,7 @@ TERMINAL_STATES = {
     JobState.SKIPPED_TOO_SMALL,
     JobState.SKIPPED_LOW_BITRATE,
     JobState.SKIPPED_EXCLUDED,
+    JobState.SKIPPED_CORRUPT,
 }
 
 # States that can be retried
@@ -211,7 +213,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at);
 -- when the same file is rediscovered between scans.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_active_path
     ON jobs(dropbox_path)
-    WHERE state NOT IN ('DONE','FAILED','SKIPPED_HEVC','SKIPPED_ALREADY_EXISTS','SKIPPED_TOO_SMALL','SKIPPED_LOW_BITRATE','SKIPPED_EXCLUDED');
+    WHERE state NOT IN ('DONE','FAILED','SKIPPED_HEVC','SKIPPED_ALREADY_EXISTS','SKIPPED_TOO_SMALL','SKIPPED_LOW_BITRATE','SKIPPED_EXCLUDED','SKIPPED_CORRUPT');
 
 -- Stability checks table: tracks file stability over time (R2)
 CREATE TABLE IF NOT EXISTS stability_checks (
@@ -395,7 +397,8 @@ class Database:
             "ON jobs(dropbox_path) "
             "WHERE state NOT IN "
             "('DONE','FAILED','SKIPPED_HEVC','SKIPPED_ALREADY_EXISTS',"
-            "'SKIPPED_TOO_SMALL','SKIPPED_LOW_BITRATE','SKIPPED_EXCLUDED')"
+            "'SKIPPED_TOO_SMALL','SKIPPED_LOW_BITRATE','SKIPPED_EXCLUDED',"
+            "'SKIPPED_CORRUPT')"
         )
 
     @contextmanager

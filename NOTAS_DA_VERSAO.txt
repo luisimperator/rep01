@@ -2,6 +2,53 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.7.9
+Data: 10/05/2026
+--------------------------------------------------------------------------------
+
+SKIPPED_CORRUPT: tira arquivos corrompidos do loop de auto-revive
+
+  [FEATURE] Novo estado terminal pra ffprobe failures
+  ---------------------------------------------------
+  ANTES: o v6.7.8 (auto-revive de FAILED quando pipeline ocioso) tava
+         pegando jobs cujo arquivo local é corrompido (ex.: pastas
+         "Video Repair Tool/recover_mp4_192/bad.MP4" ou versões
+         "recover/" de tentativas anteriores). Esses jobs:
+         • Eram fast-pathados pelo downloader (input já em disco,
+           tamanho bate com Dropbox).
+         • Caiam pro transcoder, que rodava ffprobe.
+         • ffprobe falhava com "Probe failed: ffprobe failed:" porque
+           o arquivo é genuinamente ilegível.
+         • Job ia pra RETRY_WAIT, depois FAILED.
+         • A cada 10 min (cooldown do auto-revive), revivia → fast-path
+           → ffprobe fail → FAILED. Loop infinito gentil mas inútil.
+
+  AGORA: novo `JobState.SKIPPED_CORRUPT` (terminal). No
+         TranscodeWorker._handle_failure, se o erro começa com
+         "Probe failed:", o job vai direto pra SKIPPED_CORRUPT em vez
+         do ciclo de retry. Razão: o downloader já verificou que o
+         tamanho local bate com o tamanho no Dropbox, então re-baixar
+         vai trazer os mesmos bytes quebrados. Não tem o que recuperar.
+
+  EFEITO COLATERAL POSITIVO: limpa o staging do job (libera disk_budget
+         + remove input.MP4 corrompido), evita encher o log com erros
+         repetidos e o painel finalmente para de mostrar esses zumbis
+         renascendo de 10 em 10 min.
+
+  COMPATIBILIDADE: o índice único `idx_jobs_active_path` é dropado e
+         recriado a cada startup pra incluir SKIPPED_CORRUPT na lista
+         de estados terminais. DBs antigos pegam o estado novo sem
+         migration manual.
+
+  LOG: '[transcoder-N] Marking job X as SKIPPED_CORRUPT (ffprobe can't
+        read source, re-download won't help): Probe failed: ...'
+
+  ESCOPO: SÓ afeta `Probe failed:` errors. ffmpeg failures, network
+          errors, todos os outros continuam pelo ciclo normal de
+          RETRY_WAIT → FAILED → revive.
+
+================================================================================
+
 Versão: 6.7.8
 Data: 10/05/2026
 --------------------------------------------------------------------------------
