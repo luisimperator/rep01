@@ -2,6 +2,67 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.7.10
+Data: 10/05/2026
+--------------------------------------------------------------------------------
+
+Scanner: pula (e opcionalmente deleta) Premiere previews + camera proxies
+
+  [FEATURE] Duas novas exclusões hardcoded no scanner
+  ---------------------------------------------------
+  ANTES: o scanner pegava QUALQUER arquivo de vídeo dentro do
+         watch_folder, incluindo:
+         • Cache de preview do Adobe Premiere — pasta
+           "Adobe Premiere Pro Video Previews/*.PRV/Rendered -
+           <UUID>.mov". Esses arquivos são EFÊMEROS — Premiere
+           regera toda vez que o usuário re-renderiza a timeline.
+         • Proxies de câmera Sony — arquivos *_Proxy.mov dentro
+           de pastas "Proxies/". São versões low-res pra edição
+           offline; redundantes se o original também tá lá.
+
+         No último scan: 1019 H.265 já existentes + 765 novos jobs,
+         mas dezenas a centenas desses novos eram preview/proxy.
+         Transcodar tudo isso = banda + CPU jogados fora.
+
+  AGORA: dois novos guards no scanner, similares ao já-existente
+         `path_has_assets_segment`:
+         • `path_is_premiere_preview(path)`: detecta qualquer arquivo
+           sob um segmento "Adobe Premiere Pro Video Previews"
+           (case-insensitive).
+         • `path_is_camera_proxy(path)`: detecta arquivos com sufixo
+           `_Proxy.<ext>` dentro de pasta "Proxies/" (case-insensitive
+           no sufixo, exact-case da Sony no nome da pasta).
+
+         Sempre pulam — `return 'skipped_excluded'`. Independente
+         do config.exclude_patterns para que um override do usuário
+         não reabra esses paths por acidente.
+
+  [FEATURE] Toggle pra DELETAR throwaway files do Dropbox
+  --------------------------------------------------------
+  Novo knob `scanner.delete_throwaway_files` (default False).
+  Quando ON:
+  • Ao detectar um preview ou proxy, scanner chama
+    `dropbox.delete_file(path)` ANTES de retornar.
+  • Log loud: "Deleted throwaway Premiere preview from Dropbox:
+    <path> (recoverable via version history for ~30 days)".
+  • Falha de delete (rede/auth) cai pro fallback: skip + warning.
+
+  POR QUE OPT-IN: ação destrutiva. Default OFF protege quem só
+  queria a feature de skip. Mesmo com o toggle on, a Dropbox
+  preserva versão deletada por ~30 dias então é recuperável.
+
+  PRA LIGAR: edita config.yaml e mete na seção scanner:
+    scanner:
+      delete_throwaway_files: true
+    Restart do daemon.
+
+  LOG (quando OFF): "Skipping (throwaway Premiere preview): <path>"
+  LOG (quando ON):  "Deleted throwaway Premiere preview from
+                     Dropbox: <path> (recoverable via version
+                     history for ~30 days)"
+
+================================================================================
+
 Versão: 6.7.9
 Data: 10/05/2026
 --------------------------------------------------------------------------------

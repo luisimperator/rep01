@@ -185,6 +185,16 @@ class ScannerSettings(BaseModel):
         ge=60,
         description="Max age of a cached feito.txt read before it is refetched"
     )
+    delete_throwaway_files: bool = Field(
+        default=False,
+        description=(
+            "When True, scanner DELETES files it identifies as throwaway "
+            "(Adobe Premiere preview cache and Sony-style camera proxies) "
+            "from Dropbox during scan instead of just skipping them. "
+            "Dropbox version history preserves the deletes for ~30 days. "
+            "Default False — opt-in because destructive."
+        ),
+    )
 
 
 class ApiSettings(BaseModel):
