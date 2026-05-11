@@ -142,6 +142,56 @@ def path_has_assets_segment(path: str) -> bool:
     return False
 
 
+# Adobe Premiere Pro writes timeline render previews into a folder named
+# "Adobe Premiere Pro Video Previews" alongside the .prproj. Inside it,
+# every render produces a UUID-named .mov in a `<sequence>.PRV/` subdir.
+# These are EPHEMERAL — Premiere regenerates them whenever the timeline
+# changes — so transcoding them is pure waste of bandwidth and CPU.
+_PREMIERE_PREVIEW_FOLDER = "Adobe Premiere Pro Video Previews"
+
+
+def path_is_premiere_preview(path: str) -> bool:
+    """True when the path lives under an Adobe Premiere Pro preview cache.
+
+    Matches the literal folder name Premiere uses; case-insensitive. Walks
+    all path segments so deep nesting (`*.PRV/Rendered - <uuid>.mov`) is
+    still caught.
+    """
+    if not path:
+        return False
+    from pathlib import PurePosixPath
+    target = _PREMIERE_PREVIEW_FOLDER.lower()
+    for seg in PurePosixPath(path).parts:
+        if seg.lower() == target:
+            return True
+    return False
+
+
+# Sony cameras (FX3, A7S III, etc.) write low-bitrate proxy copies of every
+# clip into a `Proxies/` subfolder, named `<original>_Proxy.<ext>`. They're
+# only useful for offline edit on slower machines — if the user has the
+# originals (we already scan those), transcoding the proxies is pure waste.
+_PROXIES_SEGMENT_NAMES = {"Proxies", "proxies", "PROXIES"}
+
+
+def path_is_camera_proxy(path: str) -> bool:
+    """True when the path is a Sony-style camera proxy file.
+
+    Pattern: any path segment named `Proxies/` AND the file basename ends
+    with `_Proxy.<ext>` (Sony convention). The basename check is the
+    safety net so unrelated files in a folder coincidentally called
+    "Proxies/" don't get nuked.
+    """
+    if not path:
+        return False
+    from pathlib import PurePosixPath
+    p = PurePosixPath(path)
+    if not any(seg in _PROXIES_SEGMENT_NAMES for seg in p.parts):
+        return False
+    stem = p.stem
+    return stem.lower().endswith("_proxy")
+
+
 # Codecs that ffprobe reports for files that are technically images
 # wrapped in a movie container (After Effects exports, motion graphics
 # templates, etc). They're not real video and trying to transcode them

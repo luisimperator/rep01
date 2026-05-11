@@ -298,6 +298,39 @@ class Scanner:
             logger.debug(f"Skipping (under /assets/): {path}")
             return 'skipped_excluded'
 
+        # Throwaway files: Adobe Premiere preview cache and Sony-style
+        # camera proxies. Both are regenerable/redundant — transcoding
+        # them wastes bandwidth + CPU. Always skip; optionally delete
+        # from Dropbox when scanner.delete_throwaway_files is on
+        # (Dropbox version history covers the delete for ~30 days).
+        is_preview = _path_is_premiere_preview(path)
+        is_proxy = _path_is_camera_proxy(path)
+        if is_preview or is_proxy:
+            kind = "Premiere preview" if is_preview else "camera proxy"
+            if (
+                getattr(self.config.scanner, "delete_throwaway_files", False)
+                and not dry_run
+            ):
+                try:
+                    deleted = self.dropbox.delete_file(path)
+                except Exception as e:
+                    logger.warning(
+                        f"Skipping (throwaway {kind}, delete failed): {path}: {e}"
+                    )
+                else:
+                    if deleted:
+                        logger.info(
+                            f"Deleted throwaway {kind} from Dropbox: {path} "
+                            f"(recoverable via version history for ~30 days)"
+                        )
+                    else:
+                        logger.debug(
+                            f"Throwaway {kind} already gone from Dropbox: {path}"
+                        )
+            else:
+                logger.debug(f"Skipping (throwaway {kind}): {path}")
+            return 'skipped_excluded'
+
         # Audio path takes priority: extension matches AND the file lives
         # directly inside a folder whose name matches the configured audio
         # source folder name. WAVs anywhere else are intentionally ignored.
@@ -637,3 +670,5 @@ def _cursor_preview(cursor: str | None) -> str:
 # Re-export the canonical helper from utils so existing call sites in
 # scanner keep working without churn.
 from .utils import path_has_assets_segment as _path_has_assets_segment  # noqa: E402
+from .utils import path_is_premiere_preview as _path_is_premiere_preview  # noqa: E402
+from .utils import path_is_camera_proxy as _path_is_camera_proxy  # noqa: E402
