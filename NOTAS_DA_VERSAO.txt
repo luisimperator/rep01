@@ -2,6 +2,52 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.0
+Data: 10/05/2026
+--------------------------------------------------------------------------------
+
+Throwaway delete agora respeita folder-age safety (mesmo gate do reorganize)
+
+  [FIX] Delete de previews/proxies só roda se a pasta tá "settled"
+  ---------------------------------------------------------------
+  ANTES (v6.7.10): com `scanner.delete_throwaway_files: true`, o scanner
+         deletava QUALQUER Premiere preview ou camera proxy que encontrasse
+         no Dropbox, mesmo numa pasta que tinha sido editada minutos atrás.
+         Risco real: se o editor tava ativo no projeto, o Premiere geraria
+         os previews → o scanner deletaria → Premiere regeneraria → loop
+         de retrabalho. Pra proxies pior: se editor tá usando proxies
+         pra edição offline, deletar quebra o workflow no meio.
+
+         Era inconsistente com o reorganize do h264→h265 que já usa
+         `legacy_reorganize_min_age_days` (default geralmente 30 dias)
+         pra garantir que não toca em pasta de projeto em andamento.
+
+  AGORA: antes de chamar `dropbox.delete_file()`, o scanner consulta o
+         mesmo `is_folder_settled(parent, legacy_reorganize_min_age_days)`
+         que o reorganize usa. Se a pasta ainda tá quente (arquivo
+         mais recente é < N dias velho), só pula e adia o delete pro
+         próximo ciclo.
+
+  LOG quando defere:
+    "Skipping (throwaway Premiere preview, folder still hot — newest
+     activity 3.2d ago, threshold 30d): <path> — deferring delete"
+
+  COMPORTAMENTO PRESERVADO: o SKIP em si (não criar job) continua
+         sempre ativo independente da idade da pasta — não tem risco
+         em ignorar um preview/proxy mesmo em pasta nova; o que era
+         arriscado era o DELETE imediato.
+
+  CONFIG: nenhum knob novo. Reusa `legacy_reorganize_min_age_days`
+          (já existente, default 30 dias) para manter "uma fonte de
+          verdade" sobre quando é seguro mexer numa pasta.
+
+  COMPATIBILIDADE: usuários com `delete_throwaway_files: false`
+          (default desde v6.7.10) não veem mudança nenhuma. Quem
+          ligou o toggle agora tá protegido contra autodelete em
+          pasta de projeto recente.
+
+================================================================================
+
 Versão: 6.7.10
 Data: 10/05/2026
 --------------------------------------------------------------------------------
