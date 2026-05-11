@@ -303,6 +303,14 @@ class Scanner:
         # them wastes bandwidth + CPU. Always skip; optionally delete
         # from Dropbox when scanner.delete_throwaway_files is on
         # (Dropbox version history covers the delete for ~30 days).
+        #
+        # SAFETY: when deleting, gate behind the same folder-age check
+        # that reorganize uses (is_folder_settled / legacy_reorganize_min_age_days).
+        # If the editor was active in the folder recently, deleting the
+        # Premiere previews would interrupt an in-flight render and force
+        # Premiere to regenerate them — disruptive. Same for proxies during
+        # an active offline edit. The skip itself is always safe and runs
+        # regardless of folder age.
         is_preview = _path_is_premiere_preview(path)
         is_proxy = _path_is_camera_proxy(path)
         if is_preview or is_proxy:
@@ -311,6 +319,32 @@ class Scanner:
                 getattr(self.config.scanner, "delete_throwaway_files", False)
                 and not dry_run
             ):
+                parent = str(PurePosixPath(path).parent)
+                min_age = int(getattr(
+                    self.config, "legacy_reorganize_min_age_days", 0
+                ) or 0)
+                try:
+                    settled = _is_folder_settled(self.dropbox, parent, min_age)
+                except Exception as e:
+                    logger.warning(
+                        f"Skipping (throwaway {kind}, folder-age check failed): "
+                        f"{path}: {e}"
+                    )
+                    return 'skipped_excluded'
+
+                if not settled.settled:
+                    days_str = (
+                        f"{settled.days_since_newest:.1f}d"
+                        if settled.days_since_newest is not None
+                        else "?d"
+                    )
+                    logger.info(
+                        f"Skipping (throwaway {kind}, folder still hot — "
+                        f"newest activity {days_str} ago, threshold "
+                        f"{settled.threshold_days}d): {path} — deferring delete"
+                    )
+                    return 'skipped_excluded'
+
                 try:
                     deleted = self.dropbox.delete_file(path)
                 except Exception as e:
@@ -672,3 +706,4 @@ def _cursor_preview(cursor: str | None) -> str:
 from .utils import path_has_assets_segment as _path_has_assets_segment  # noqa: E402
 from .utils import path_is_premiere_preview as _path_is_premiere_preview  # noqa: E402
 from .utils import path_is_camera_proxy as _path_is_camera_proxy  # noqa: E402
+from .reorganize import is_folder_settled as _is_folder_settled  # noqa: E402
