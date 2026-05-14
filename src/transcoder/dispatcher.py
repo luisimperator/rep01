@@ -263,7 +263,13 @@ class JobDispatcher(threading.Thread):
             fetch_limit = max(free * 8, 500)
         else:
             fetch_limit = free * (4 if kind else 2)
-        candidates = self.db.get_dispatchable_jobs(states, limit=fetch_limit)
+        # Restrict to the current watch_folder so stale jobs queued under a
+        # previous dropbox_root don't tie up worker slots after the user
+        # switches folders.
+        watch_root = getattr(self.config, "dropbox_root", None) or None
+        candidates = self.db.get_dispatchable_jobs(
+            states, limit=fetch_limit, path_prefix=watch_root,
+        )
         if not candidates:
             return
 

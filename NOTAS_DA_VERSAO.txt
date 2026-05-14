@@ -2,6 +2,56 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.1
+Data: 11/05/2026
+--------------------------------------------------------------------------------
+
+Dispatcher + auto-revive: ignoram jobs fora da watch_folder atual
+
+  [FIX] Jobs órfãos de watch_folder antiga não tomam mais slot
+  ------------------------------------------------------------
+  ANTES: quando o usuário trocava `dropbox_root` (a "Dropbox folder to
+         monitor" do dashboard) de uma pasta pra outra, todos os jobs
+         antigos da pasta anterior ficavam no DB em FAILED/RETRY_WAIT.
+         Dois caminhos os ressuscitavam:
+         • Dispatcher pegava qualquer job em NEW/RETRY_WAIT sem checar
+           watch_folder. Stale jobs tomavam slot de downloader.
+         • Auto-revive v6.7.8 promovia FAILED → RETRY_WAIT a cada 10
+           min sem filtro de pasta. Jobs zumbis voltavam pra fila.
+
+         Cenário real: usuário trocou de "O Jogo Virou podcast" pra
+         "VenusTalks", mas o auto-revive continuou puxando renders de
+         OJV de 22–52 GB pros slots. Todos os 4 downloaders dedicados
+         à pasta errada, transcoders ociosos esperando.
+
+  AGORA: `database.get_dispatchable_jobs()` e `database.reset_failed_jobs()`
+         aceitam um `path_prefix` opcional. SQL filtra com:
+            (dropbox_path = ? OR dropbox_path LIKE ?)
+         pra pegar exata + qualquer descendente. Prefix com trailing
+         slash é normalizado, e a comparação evita falso-match tipo
+         "/A" pegar "/Alpha".
+
+         • dispatcher._refill agora passa `self.config.dropbox_root`.
+         • watchdog._check_failed_revive idem — e o log fica
+           "revived N FAILED job(s) under /HeavyDrops/VenusTalks back
+           to RETRY_WAIT".
+
+         Jobs fora da watch_folder atual ficam intocados na DB. Se o
+         usuário trocar de volta pra pasta antiga, retomam de onde
+         pararam (FAILED → revive normal).
+
+  TROCA DE PASTA: rotina vira "muda no dashboard ou yaml + restart
+         do daemon". Daemon nunca mais toca os jobs órfãos. Pra limpar
+         de vez (caso queira economizar espaço no SQLite), dá pra
+         marcar manualmente como SKIPPED_EXCLUDED via SQL — comando
+         oferecido na sessão de suporte.
+
+  COMPATIBILIDADE: assinaturas dos métodos com `path_prefix=None`
+         como default. Quem chamava sem o kwarg continua funcionando
+         (tests existentes não quebram). Sem migração de schema.
+
+================================================================================
+
 Versão: 6.8.0
 Data: 10/05/2026
 --------------------------------------------------------------------------------

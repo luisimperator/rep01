@@ -532,22 +532,36 @@ class Database:
         self,
         states: set[JobState],
         limit: int,
+        path_prefix: str | None = None,
     ) -> list[Job]:
         """
         Get jobs eligible for dispatch into a worker queue.
 
         Ordered FIFO by created_at to ensure first-discovered files are processed
         first across long-running scans.
+
+        When `path_prefix` is set (e.g. the current `config.dropbox_root`),
+        only jobs whose dropbox_path is inside that prefix are returned.
+        Lets the dispatcher ignore stale jobs queued under a previous
+        watch_folder without touching the DB rows themselves — they stay
+        in their state and resume processing if the user ever switches
+        back to that watch_folder.
         """
         if not states or limit <= 0:
             return []
         conn = self._get_connection()
         placeholders = ','.join('?' * len(states))
-        cursor = conn.execute(
-            f"SELECT * FROM jobs WHERE state IN ({placeholders}) "
-            f"ORDER BY created_at ASC LIMIT ?",
-            [s.value for s in states] + [limit],
-        )
+        params: list = [s.value for s in states]
+        sql = f"SELECT * FROM jobs WHERE state IN ({placeholders})"
+        if path_prefix:
+            # Match "<prefix>" exactly or anything under "<prefix>/" so a
+            # prefix of "/A" doesn't match "/Alpha". Normalise: trim trailing "/".
+            prefix = path_prefix.rstrip('/')
+            sql += " AND (dropbox_path = ? OR dropbox_path LIKE ?)"
+            params.extend([prefix, prefix + "/%"])
+        sql += " ORDER BY created_at ASC LIMIT ?"
+        params.append(limit)
+        cursor = conn.execute(sql, params)
         return [Job.from_row(row) for row in cursor.fetchall()]
 
     def update_job_state(
@@ -634,18 +648,26 @@ class Database:
             )
             return cursor.rowcount
 
-    def reset_failed_jobs(self) -> int:
+    def reset_failed_jobs(self, path_prefix: str | None = None) -> int:
         """
-        Reset all FAILED jobs to RETRY_WAIT.
+        Reset FAILED jobs to RETRY_WAIT.
+
+        When `path_prefix` is set (e.g. the current `config.dropbox_root`),
+        only jobs whose dropbox_path is inside that prefix are revived.
+        Stale FAILED jobs queued under a previous watch_folder stay FAILED
+        so the auto-revive feature (v6.7.8) doesn't keep churning them.
 
         Returns:
             Number of jobs reset.
         """
         with self.transaction() as conn:
-            cursor = conn.execute(
-                "UPDATE jobs SET state = ?, retry_count = 0 WHERE state = ?",
-                (JobState.RETRY_WAIT.value, JobState.FAILED.value),
-            )
+            params: list = [JobState.RETRY_WAIT.value, JobState.FAILED.value]
+            sql = "UPDATE jobs SET state = ?, retry_count = 0 WHERE state = ?"
+            if path_prefix:
+                prefix = path_prefix.rstrip('/')
+                sql += " AND (dropbox_path = ? OR dropbox_path LIKE ?)"
+                params.extend([prefix, prefix + "/%"])
+            cursor = conn.execute(sql, params)
             return cursor.rowcount
 
     def list_jobs_by_state_since(
@@ -1230,16 +1252,26 @@ class Database:
             }
         return out
 
-    def count_jobs(self, state: JobState | None = None) -> int:
-        """Count jobs, optionally filtered by state."""
+    def count_jobs(
+        self,
+        state: JobState | None = None,
+        path_prefix: str | None = None,
+    ) -> int:
+        """Count jobs, optionally filtered by state and/or watch_folder prefix."""
         conn = self._get_connection()
+        clauses: list[str] = []
+        params: list = []
         if state:
-            cursor = conn.execute(
-                "SELECT COUNT(*) as count FROM jobs WHERE state = ?",
-                (state.value,),
-            )
-        else:
-            cursor = conn.execute("SELECT COUNT(*) as count FROM jobs")
+            clauses.append("state = ?")
+            params.append(state.value)
+        if path_prefix:
+            prefix = path_prefix.rstrip('/')
+            clauses.append("(dropbox_path = ? OR dropbox_path LIKE ?)")
+            params.extend([prefix, prefix + "/%"])
+        sql = "SELECT COUNT(*) as count FROM jobs"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
+        cursor = conn.execute(sql, params)
         row = cursor.fetchone()
         return row['count'] if row else 0
 
