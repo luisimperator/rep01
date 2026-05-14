@@ -166,24 +166,30 @@ class Watchdog(threading.Thread):
         if (now_mono - self._last_failed_revive_at) < self._failed_revive_cooldown_sec:
             return
 
-        # Pipeline-busy guards (cheap COUNT(*) queries).
-        if self.db.count_jobs(JobState.DOWNLOADING) > 0:
+        # Pipeline-busy guards — scoped to current watch_folder so stale
+        # NEW/RETRY_WAIT jobs from an old dropbox_root (which the
+        # dispatcher already ignores, v6.8.1) don't permanently block
+        # the revive of in-scope FAILED jobs.
+        watch_root = getattr(self.config, "dropbox_root", None) or None
+        if self.db.count_jobs(JobState.DOWNLOADING, path_prefix=watch_root) > 0:
             return
-        if self.db.count_jobs(JobState.NEW) > 0:
+        if self.db.count_jobs(JobState.NEW, path_prefix=watch_root) > 0:
             return
-        if self.db.count_jobs(JobState.RETRY_WAIT) > 0:
+        if self.db.count_jobs(JobState.RETRY_WAIT, path_prefix=watch_root) > 0:
             return
 
-        failed_count = self.db.count_jobs(JobState.FAILED)
+        failed_count = self.db.count_jobs(JobState.FAILED, path_prefix=watch_root)
         if failed_count == 0:
             return
 
-        reset = self.db.reset_failed_jobs()
+        reset = self.db.reset_failed_jobs(path_prefix=watch_root)
         self._last_failed_revive_at = now_mono
+        scope = f" under {watch_root}" if watch_root else ""
         logger.info(
-            "watchdog: download pipeline idle — revived %d FAILED job(s) "
+            "watchdog: download pipeline idle — revived %d FAILED job(s)%s "
             "back to RETRY_WAIT for another attempt (next cooldown %.0fs)",
             reset,
+            scope,
             self._failed_revive_cooldown_sec,
         )
 
