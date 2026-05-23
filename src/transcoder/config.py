@@ -267,6 +267,19 @@ class DispatcherSettings(BaseModel):
             "and feeds the transcoder. 0 disables convoy mode."
         ),
     )
+    sticky_folder_enabled: bool = Field(
+        default=True,
+        description=(
+            "When True, the dispatcher commits to draining one folder at a "
+            "time: as long as any job from the 'sticky' folder is still in "
+            "flight or dispatchable, no jobs from other folders are pulled "
+            "into the download queue. Closes folders faster so the reorganize "
+            "cleanup batches fire and free up Dropbox quota sooner. Folder "
+            "priority (largest pending bytes first) still picks the next "
+            "sticky folder once the current one drains. Disable to fall back "
+            "to plain folder-priority interleaving."
+        ),
+    )
 
 
 class DropboxApiSettings(BaseModel):

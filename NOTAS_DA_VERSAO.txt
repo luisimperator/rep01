@@ -2,6 +2,67 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.2
+Data: 23/05/2026
+--------------------------------------------------------------------------------
+
+Sticky folder priority: termina cada pasta antes de começar a próxima
+
+  [FEAT] Dispatcher se compromete com uma pasta por vez
+  ------------------------------------------------------
+  ANTES: o dispatcher usava folder priority (pasta com mais bytes
+         pendentes ia primeiro) mas dentro do ciclo de poll todos
+         os 4 downloaders podiam acabar pegando jobs de pastas
+         diferentes — se a janela de candidatos (500 jobs por poll)
+         intercalava várias pastas por ordem de created_at, os
+         workers acabavam dividindo atenção. Resultado: nenhuma
+         pasta fechava rápido, então os batches do reorganize
+         (que disparam o cleanup do h264/ após 1800s) atrasavam,
+         e a quota do Dropbox demorava a cair.
+
+  AGORA: dispatcher rastreia uma "sticky folder" — a pasta
+         atualmente em foco. Lógica:
+         • Primeiro job admitido vira a sticky folder.
+         • Enquanto a sticky tem jobs dispatchables OU jobs em
+           voo (download/transcode/upload), nenhum job de outra
+           pasta entra na fila de download. Downloaders ociosos
+           ESPERAM em vez de começar outra pasta.
+         • Quando a sticky drena completamente (zero candidatos
+           + zero em voo), libera. Próximo job admitido (cabeça
+           da folder-priority) vira a nova sticky.
+
+         Cenário real (King Barbecue, 1399 jobs / 13.46 TB):
+         transcoder mastiga ~1.31 TB/dia, downloaders chegam
+         a saturar o disk_budget. Com sticky, cada subpasta
+         (gravacao 030, 031, ...) fecha antes da próxima começar
+         → reorganize batch dispara antes → cleanup do h264/
+         deleta antes → quota cai mais rápido (a alegria do cap).
+
+  ESCAPE HATCHES preservadas:
+         • Anti-starvation reorder: continua funcionando dentro
+           da sticky folder (promove o menor job da sticky pro
+           topo quando transcode_q tá vazio).
+         • SKIPPED_CORRUPT (v6.7.9): jobs corrompidos saem do
+           ciclo sozinhos, não travam a sticky.
+         • Watchdog timeouts: download/transcode/upload travados
+           são requeueados em RETRY_WAIT.
+         • Auto-revive (v6.7.8): FAILED da sticky volta sozinho.
+         • Toggle de config: `dispatcher.sticky_folder_enabled`
+           (default True) — pra desligar e voltar ao folder
+           priority interleaving anterior, basta setar False.
+
+  SEGURANÇA DO DELETE: nada muda, a chain segue intocada —
+         transcoder produz h265 → swap atômico backup→spot →
+         feito.txt log → 1800s delay → successor check (aborta
+         se sumiu algum) → audit log → delete um a um →
+         Dropbox history como backstop final.
+
+  COMPATIBILIDADE: novo campo `sticky_folder_enabled` em
+         `DispatcherSettings`, default True. Sem migração. Sem
+         mudança de schema.
+
+================================================================================
+
 Versão: 6.8.1
 Data: 11/05/2026
 --------------------------------------------------------------------------------
