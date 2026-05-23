@@ -64,6 +64,19 @@ class JobDispatcher(threading.Thread):
 
         self._active_lock = threading.Lock()
         self._active_set: set[int] = set()
+        # Folder of each in-flight job, so we can tell when the sticky folder
+        # has fully drained even after the candidate window stops returning
+        # dispatchable jobs from it (e.g. last job is mid-download).
+        self._active_folders: dict[int, str] = {}
+
+        # Sticky folder (v6.8.2): when set, the dispatcher only pulls jobs
+        # from this folder into the download queue. Releases automatically
+        # when the folder has zero dispatchable candidates AND zero in-flight
+        # jobs — at which point the head of the folder-priority sort becomes
+        # the new sticky. The goal is to close each folder fully before
+        # starting another so the reorganize cleanup batches dispatch
+        # sooner and the Dropbox quota drops faster.
+        self._sticky_folder: str | None = None
 
         self.poll_interval = config.dispatcher.poll_interval_sec
 
@@ -99,6 +112,7 @@ class JobDispatcher(threading.Thread):
         """Worker calls this in its `finally:` block to release the slot."""
         with self._active_lock:
             self._active_set.discard(job_id)
+            self._active_folders.pop(job_id, None)
 
     def pause(self) -> None:
         """Stop enqueuing new jobs. Workers drain what's already in queues."""
@@ -209,6 +223,11 @@ class JobDispatcher(threading.Thread):
             "active": len(self._active_set),
         }
 
+    def sticky_folder(self) -> str | None:
+        """Currently sticky folder (the one being drained), or None."""
+        with self._active_lock:
+            return self._sticky_folder
+
     # ------------------------------------------------------------------ thread
 
     def run(self) -> None:
@@ -275,14 +294,23 @@ class JobDispatcher(threading.Thread):
 
         if prioritize_folder:
             candidates = self._sort_by_folder_priority(candidates)
+            # Sticky folder (v6.8.2): finish draining one folder before
+            # starting another. Filter the (already folder-prioritised)
+            # candidate list down to the sticky folder; release the sticky
+            # when the folder has no candidates AND no jobs in flight.
+            candidates = self._apply_sticky_folder(candidates)
             # Anti-starvation: when the transcode queue is empty, push the
             # first reasonably-small job to the front so the transcoder
             # gets fed quickly instead of waiting hours for one of N huge
             # downloads to finish. Folder priority still applies — we only
-            # reorder within the already-prioritised list.
+            # reorder within the already-prioritised list (which, post-
+            # sticky-filter, is the current sticky folder's slice).
             if self.transcode_q.qsize() == 0:
                 candidates = self._anti_starvation_reorder(candidates)
 
+        sticky_enabled = prioritize_folder and getattr(
+            self.config.dispatcher, "sticky_folder_enabled", True
+        )
         with self._active_lock:
             for job in candidates:
                 if free <= 0:
@@ -291,12 +319,84 @@ class JobDispatcher(threading.Thread):
                     continue
                 if job.id in self._active_set:
                     continue
+                folder = (
+                    str(PurePosixPath(job.dropbox_path).parent)
+                    if prioritize_folder else None
+                )
+                # If sticky is set, never admit a job from another folder.
+                # _apply_sticky_folder already pre-filters, but the sticky
+                # can also be set MID-LOOP (first admit becomes sticky), so
+                # later jobs from other folders in the same batch must be
+                # rejected here.
+                if sticky_enabled and self._sticky_folder is not None \
+                        and folder != self._sticky_folder:
+                    continue
                 try:
                     q.put_nowait(job)
                 except Full:
                     break
                 self._active_set.add(job.id)
+                if prioritize_folder and folder is not None:
+                    self._active_folders[job.id] = folder
+                    # First job admitted after a sticky release becomes the
+                    # new sticky (head of folder-priority sort wins).
+                    if sticky_enabled and self._sticky_folder is None:
+                        self._sticky_folder = folder
+                        logger.info(
+                            "dispatcher: sticky folder set to '%s' "
+                            "(draining before switching to next folder)",
+                            folder,
+                        )
                 free -= 1
+
+    def _apply_sticky_folder(self, sorted_candidates: list[Job]) -> list[Job]:
+        """Filter candidates down to the current sticky folder.
+
+        Behavior:
+          - Sticky off via config → no-op, return list unchanged.
+          - No sticky set → return list unchanged; the dispatch loop will
+            adopt the first admitted job's folder as the new sticky.
+          - Sticky set and has candidates in this batch → return only those.
+          - Sticky set, no candidates, but still in flight → return [] so
+            downloaders wait for the current folder to finish before any
+            cross-folder work starts.
+          - Sticky set, no candidates, nothing in flight → release sticky
+            and return the original list so the next folder takes over.
+        """
+        if not getattr(self.config.dispatcher, "sticky_folder_enabled", True):
+            return sorted_candidates
+
+        with self._active_lock:
+            sticky = self._sticky_folder
+            sticky_in_flight = (
+                sticky is not None
+                and any(f == sticky for f in self._active_folders.values())
+            )
+
+        if sticky is None:
+            return sorted_candidates
+
+        from_sticky = [
+            j for j in sorted_candidates
+            if str(PurePosixPath(j.dropbox_path).parent) == sticky
+        ]
+        if from_sticky:
+            return from_sticky
+
+        if sticky_in_flight:
+            # Sticky folder still draining — make the downloaders wait
+            # instead of starting work on another folder.
+            return []
+
+        # Sticky folder fully drained — release and let the head of the
+        # folder-priority list become the next sticky.
+        logger.info(
+            "dispatcher: sticky folder '%s' drained — releasing for next folder",
+            sticky,
+        )
+        with self._active_lock:
+            self._sticky_folder = None
+        return sorted_candidates
 
     # Threshold below which a job counts as "small enough to feed the
     # transcoder fast". 20 GB is roughly a 4K 4:2:0 source — downloads
