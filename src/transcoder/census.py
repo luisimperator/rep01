@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Iterable
 
 from .database import Database
 from .utils import (
+    SUBPROCESS_FLAGS,
     is_image_codec,
     is_in_h265_folder,
     is_partial_file,
@@ -757,6 +758,7 @@ class DeepScanWorker:
         try:
             r = subprocess.run(
                 cmd, capture_output=True, text=True, timeout=60,
+                **SUBPROCESS_FLAGS,
             )
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as e:
             logger.debug(f"deep-scan: ffprobe failed for {path}: {e}")

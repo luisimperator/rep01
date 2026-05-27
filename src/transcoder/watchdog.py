@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 from .database import ACTIVE_STATES, Database, Job, JobState
+from .utils import SUBPROCESS_FLAGS
 
 if TYPE_CHECKING:
     from .config import Config
@@ -237,6 +238,7 @@ class HealthChecker:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                **SUBPROCESS_FLAGS,
             )
             if result.returncode == 0:
                 # Extract version
@@ -257,6 +259,7 @@ class HealthChecker:
                 capture_output=True,
                 text=True,
                 timeout=10,
+                **SUBPROCESS_FLAGS,
             )
             if result.returncode == 0:
                 version_line = result.stdout.split('\n')[0]

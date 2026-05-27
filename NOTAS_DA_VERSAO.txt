@@ -2,6 +2,42 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.3
+Data: 27/05/2026
+--------------------------------------------------------------------------------
+
+ffmpeg/ffprobe deixam de piscar janela de console no Windows
+
+  [FIX] Subprocess de ffmpeg/ffprobe roda silencioso (CREATE_NO_WINDOW)
+  ---------------------------------------------------------------------
+  ANTES: cada invocação de `ffmpeg` ou `ffprobe` (transcode em si, probe
+         de input, detect de encoder disponível, deep-scan do census,
+         doctor checks) abria uma janela preta de cmd.exe por cima de
+         qualquer coisa que estivesse em foco. Com 2 transcoders + 4
+         downloaders + scanner periódico, o capitão via flashes
+         constantes durante o trabalho normal no navegador / calendário.
+
+  AGORA: novo helper `transcoder.utils.SUBPROCESS_FLAGS`, splatado em
+         todos os subprocess.Popen/run que spawnam ffmpeg ou ffprobe:
+            • workers.py — Popen do transcode de vídeo + áudio
+            • prober.py — probe_video + check de codec
+            • encoder_detect.py — detect + verify encoders
+            • census.py — deep-scan de containers
+            • watchdog.py — doctor (ffmpeg/ffprobe -version)
+
+         Em Windows o flag vira `creationflags=subprocess.CREATE_NO_WINDOW`,
+         em POSIX é dict vazio (no-op). API de restart em api.py já tinha
+         tratamento próprio (DETACHED_PROCESS + WindowStyle Hidden) e
+         segue intocada.
+
+  COMPATIBILIDADE: zero impacto fora do Windows. Sem mudança de schema,
+         sem mudança de config. Pode reverter setando a versão pra
+         6.8.2 se algum problema aparecer (improvável — CREATE_NO_WINDOW
+         só suprime alocação de console, não afeta stdout/stderr
+         redirecionados para o ffmpeg.log de cada job).
+
+================================================================================
+
 Versão: 6.8.2
 Data: 23/05/2026
 --------------------------------------------------------------------------------

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from .ffmpeg_builder import VideoInfo
+from .utils import SUBPROCESS_FLAGS
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ def probe_video(
             capture_output=True,
             text=True,
             timeout=timeout,
+            **SUBPROCESS_FLAGS,
         )
 
         if result.returncode != 0:
@@ -333,7 +335,10 @@ def probe_codec_from_file(
         str(input_path),
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=timeout,
+            **SUBPROCESS_FLAGS,
+        )
         if result.returncode != 0 or not result.stdout.strip():
             return None
         data = json.loads(result.stdout)

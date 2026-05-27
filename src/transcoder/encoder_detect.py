@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING
 
+from .utils import SUBPROCESS_FLAGS
+
 if TYPE_CHECKING:
     from .config import Config
 
@@ -120,6 +122,7 @@ def detect_available_encoders(ffmpeg_path: str = "ffmpeg") -> dict[EncoderType, 
             capture_output=True,
             text=True,
             timeout=30,
+            **SUBPROCESS_FLAGS,
         )
 
         output = result.stdout + result.stderr
@@ -187,6 +190,7 @@ def verify_encoder_works(
             capture_output=True,
             text=True,
             timeout=60,
+            **SUBPROCESS_FLAGS,
         )
 
         if result.returncode == 0:
