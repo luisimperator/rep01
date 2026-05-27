@@ -28,7 +28,13 @@ from .ffmpeg_builder import FFmpegCommand, FFmpegCommandBuilder
 from .prober import ProbeError, ProbeResult, probe_video, validate_output
 from .scanner import Scanner
 from .progress import REGISTRY
-from .utils import format_bytes, format_duration, get_staging_paths, parse_ffmpeg_progress
+from .utils import (
+    SUBPROCESS_FLAGS,
+    format_bytes,
+    format_duration,
+    get_staging_paths,
+    parse_ffmpeg_progress,
+)
 
 if TYPE_CHECKING:
     from .config import Config
@@ -840,6 +846,7 @@ class TranscodeWorker(BaseWorker):
                     cmd.args,
                     stdout=log_f,
                     stderr=subprocess.STDOUT,
+                    **SUBPROCESS_FLAGS,
                 )
 
             # Spawn a tail thread that reads the log file as it grows and
@@ -1095,7 +1102,9 @@ class AudioTranscoder(BaseWorker):
         with open(log_file, "w", encoding="utf-8", errors="replace") as log_f:
             log_f.write("# command: " + " ".join(repr(a) for a in cmd) + "\n\n")
             log_f.flush()
-            self._ffmpeg_process = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT)
+            self._ffmpeg_process = subprocess.Popen(
+                cmd, stdout=log_f, stderr=subprocess.STDOUT, **SUBPROCESS_FLAGS,
+            )
             try:
                 while True:
                     if self.should_stop():

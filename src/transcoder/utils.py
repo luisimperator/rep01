@@ -8,7 +8,19 @@ from __future__ import annotations
 
 import fnmatch
 import re
+import subprocess
+import sys
 from pathlib import Path, PurePosixPath
+
+
+# On Windows, subprocess.Popen/run for console programs (ffmpeg, ffprobe,
+# etc.) flashes a black cmd window per invocation, which is jarring when
+# the daemon runs as a foreground Scheduled Task. CREATE_NO_WINDOW
+# suppresses the console allocation entirely. No-op on POSIX.
+if sys.platform == "win32":
+    SUBPROCESS_FLAGS: dict = {"creationflags": subprocess.CREATE_NO_WINDOW}
+else:
+    SUBPROCESS_FLAGS: dict = {}
 
 
 def normalize_dropbox_path(path: str) -> str:
