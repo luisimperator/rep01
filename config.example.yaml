@@ -70,6 +70,13 @@ watchdog:
 dispatcher:
   poll_interval_sec: 2.0
   queue_multiplier: 4
+  # Convoy mode: when the transcoder queue is empty and >=2 downloaders are in
+  # flight, non-leaders pause so the leader gets the whole pipe. 0 disables it.
+  convoy_throttle_sec: 5.0
+  # While paused, let one chunk through every N seconds as a keepalive so the
+  # Dropbox download stream doesn't idle-timeout. Lower = safer, higher = leader
+  # gets more bandwidth.
+  convoy_keepalive_sec: 20.0
 scanner:
   cursor_checkpoint_entries: 500
   feito_cache_ttl_sec: 3600

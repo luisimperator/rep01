@@ -261,10 +261,22 @@ class DispatcherSettings(BaseModel):
         ge=0.0,
         le=30.0,
         description=(
-            "Convoy mode: sleep N seconds per download chunk on non-leader "
-            "workers when the transcoder queue is empty and ≥2 downloaders "
-            "are in flight. Frees bandwidth so the leader finishes faster "
-            "and feeds the transcoder. 0 disables convoy mode."
+            "Convoy mode enable + poll cadence: when the transcoder queue is "
+            "empty and ≥2 downloaders are in flight, non-leader workers PAUSE "
+            "(re-checking every ~0.5s) so the leader gets effectively all the "
+            "WAN and finishes first. 0 disables convoy mode."
+        ),
+    )
+    convoy_keepalive_sec: float = Field(
+        default=20.0,
+        ge=1.0,
+        le=90.0,
+        description=(
+            "While paused under convoy mode, a non-leader lets exactly one "
+            "download chunk through every N seconds as a keepalive so the open "
+            "Dropbox HTTP stream doesn't idle-timeout and drop. Lower = safer "
+            "against timeouts but leaks a bit more bandwidth to non-leaders; "
+            "higher = the leader gets more of the pipe."
         ),
     )
     sticky_folder_enabled: bool = Field(

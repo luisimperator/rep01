@@ -88,14 +88,18 @@ class JobDispatcher(threading.Thread):
         # actively pulling bytes, all 4 workers split the WAN four ways and
         # the transcoder waits ~45 min for any of them to finish. Convoy mode
         # picks one worker as "leader" (first one to ask) and tells the
-        # others to sleep N seconds per chunk in the progress callback. Leader
-        # gets effectively all the bandwidth and finishes ~4x faster — the
-        # transcoder gets fed in ~10 min instead of 45.
+        # others to PAUSE in the progress callback (letting one chunk through
+        # every convoy_keepalive_sec just to keep the HTTP stream alive). The
+        # leader gets effectively all the bandwidth and finishes ~4x faster —
+        # the transcoder gets fed in ~10 min instead of 45.
         self._convoy_lock = threading.Lock()
         self._download_active: dict[str, int] = {}   # worker_name -> job_id
         self._convoy_leader: str | None = None
         self.convoy_throttle_sec: float = float(
             getattr(config.dispatcher, "convoy_throttle_sec", 5.0)
+        )
+        self.convoy_keepalive_sec: float = float(
+            getattr(config.dispatcher, "convoy_keepalive_sec", 20.0)
         )
 
         # Per-folder pending bytes, refreshed periodically from folder_census.
@@ -149,9 +153,9 @@ class JobDispatcher(threading.Thread):
           - ≥2 download workers are actively pulling bytes
 
         First worker to ask becomes leader and runs at full speed; the rest
-        sleep `convoy_throttle_sec` per chunk so the leader's file finishes
-        first and feeds the transcoder. As soon as transcode_q has work,
-        convoy clears and everyone runs full-speed.
+        pause in the progress callback (see DownloadWorker) so the leader's
+        file finishes first and feeds the transcoder. As soon as transcode_q
+        has work, convoy clears and everyone runs full-speed.
         """
         if self.convoy_throttle_sec <= 0:
             return False

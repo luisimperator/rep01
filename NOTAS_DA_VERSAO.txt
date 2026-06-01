@@ -2,6 +2,38 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.5
+Data: 01/06/2026
+--------------------------------------------------------------------------------
+
+Convoy/starvation mode agora PAUSA de verdade os downloads não-líderes
+
+  [FIX] o throttle do convoy era mole e vazava banda demais
+
+  ANTES: quando a fila do transcoder esvaziava e >=2 downloaders estavam
+         baixando, o dispatcher elegia um "líder" e mandava os outros
+         dormirem 5s por chunk (de 8 MB). Num link gordo isso ainda deixava
+         cada não-líder vazar ~1,5 MB/s. Com 3 não-líderes, ~4,6 MB/s eram
+         consumidos por eles — MAIS do que o líder conseguia pegar. O líder
+         nunca acelerava, e a starvation não "starvava".
+
+  AGORA: o não-líder PAUSA de fato — fica re-checando a cada 0,5s e resume
+         no instante em que o convoy limpa (transcoder alimentado, líder
+         terminou, ou <2 downloaders ativos). Para o stream HTTP do Dropbox
+         não dar idle-timeout enquanto pausado, ele deixa passar 1 chunk a
+         cada `convoy_keepalive_sec` (padrão 20s) como keepalive — ~0,4 MB/s
+         por worker em vez de 1,5. O líder herda o cano inteiro e termina
+         ~2-3x mais rápido, alimentando o transcoder muito antes.
+
+  CONFIG: novo `dispatcher.convoy_keepalive_sec` (padrão 20s, faixa 1-90).
+          Menor = mais seguro contra timeout; maior = líder pega mais banda.
+
+  TESTES: tests/test_convoy_throttle.py (7) cobrindo eleição de líder,
+          liberação ao alimentar o transcoder, re-eleição quando o líder
+          some, e os limites do novo knob.
+
+--------------------------------------------------------------------------------
+
 Versão: 6.8.4
 Data: 01/06/2026
 --------------------------------------------------------------------------------

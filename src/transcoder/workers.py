@@ -450,16 +450,31 @@ class DownloadWorker(BaseWorker):
                 last_log[0] = now
 
             # Convoy throttle: when transcode_q is empty AND another
-            # downloader has been elected leader, sleep here so the leader
-            # gets effectively all the WAN bandwidth and finishes first.
+            # downloader has been elected leader, PAUSE here (not just slow
+            # down) so the leader gets effectively all the WAN and finishes
+            # first. We poll every ~0.5s and resume the instant convoy clears
+            # (transcoder fed, leader done, or <2 active downloaders). To keep
+            # the open Dropbox HTTP stream from idle-timing-out while paused,
+            # we cap the wait at convoy_keepalive_sec and then let exactly one
+            # chunk through as a keepalive — still effectively ~0 bandwidth.
             if self.dispatcher.should_throttle_download(self.name):
                 if now - last_throttle_log[0] > 60:
                     logger.info(
-                        f"[{self.name}] Convoy throttle active — yielding "
-                        f"bandwidth to convoy leader (transcoder is starving)"
+                        f"[{self.name}] Convoy throttle active — pausing to "
+                        f"yield bandwidth to convoy leader (transcoder is "
+                        f"starving)"
                     )
                     last_throttle_log[0] = now
-                time.sleep(self.dispatcher.convoy_throttle_sec)
+                waited = 0.0
+                keepalive = self.dispatcher.convoy_keepalive_sec
+                while (
+                    waited < keepalive
+                    and self.dispatcher.should_throttle_download(self.name)
+                ):
+                    if self.should_stop():
+                        raise WorkerStop("Worker stopping")
+                    time.sleep(0.5)
+                    waited += 0.5
 
         return callback
 
