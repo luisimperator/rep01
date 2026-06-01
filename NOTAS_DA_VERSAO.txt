@@ -2,6 +2,47 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.4
+Data: 01/06/2026
+--------------------------------------------------------------------------------
+
+Fim da tempestade de retries no cleanup de arquivos "._" (ponto tracinho)
+
+  [FIX] move de ._ com origem já sumida não tenta de novo 5x
+
+  ANTES: quando o cleanup_dot_underscore varria um folder e tentava mover
+         um arquivo `._XXX` (resource fork do macOS / AppleDouble que o
+         ATEM espalha) para a subpasta `ponto tracinho/`, se a origem já
+         tivesse sumido — outro worker varreu a mesma pasta primeiro, ou o
+         Dropbox limpou o fork entre o nosso list e o move — a API
+         retornava `RelocationError('from_lookup', LookupError('not_found'))`.
+
+         O retry do DropboxClient não reconhecia esse formato (só conhecia
+         o union `path`, via _is_path_not_found), então tratava como erro
+         transitório e tentava 5 vezes com backoff exponencial
+         (2+4+8+16s = ~30s) antes de desistir — para CADA fork morto. Com
+         centenas deles, isso era ~30s desperdiçados por arquivo, uma
+         enxurrada de WARNINGs no log e marteladas desnecessárias na API
+         (contribuindo para os "Connection pool is full").
+
+  AGORA: novo detector `_is_relocation_source_missing` reconhece o
+         RelocationError cujo `from_lookup` é `not_found`. O
+         `_retry_operation` faz short-circuit imediato nesse caso (zero
+         backoff) e levanta DropboxNotFoundError, do mesmo jeito que já
+         fazia com path-not-found.
+
+         O `cleanup_dot_underscore_files` captura esse DropboxNotFoundError
+         e trata como sucesso idempotente — o fork já não existe, que é
+         exatamente o objetivo — apenas contabiliza em debug, sem WARNING.
+
+         O trabalho real (transcode, upload, reorganize) nunca foi afetado;
+         isto só elimina o desperdício de tempo e o spam de log.
+
+  Arquivos: src/transcoder/dropbox_client.py, src/transcoder/reorganize.py
+  Testes:   tests/test_relocation_not_found.py (7 casos novos)
+
+================================================================================
+
 Versão: 6.8.3
 Data: 27/05/2026
 --------------------------------------------------------------------------------

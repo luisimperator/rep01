@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Iterable
 
-from .dropbox_client import DropboxClient, DropboxFileInfo
+from .dropbox_client import DropboxClient, DropboxFileInfo, DropboxNotFoundError
 
 if TYPE_CHECKING:
     from .database import Database
@@ -750,14 +750,27 @@ def cleanup_dot_underscore_files(
         return 0
 
     moved = 0
+    already_gone = 0
     for entry in targets:
         src = parent + '/' + entry.name
         dst = quarantine_dir + '/' + entry.name
         try:
             dropbox.move_file(src, dst, allow_overwrite=True)
             moved += 1
+        except DropboxNotFoundError:
+            # Source ._ fork already vanished (a concurrent reorganize swept
+            # it, or Dropbox removed it between our listing and the move).
+            # The fork is gone, which is exactly the goal — idempotent, not an
+            # error. Skip silently instead of burning the full retry backoff.
+            already_gone += 1
         except Exception as e:
             logger.warning(f"cleanup_dot_underscore: move {src} -> {dst} failed: {e}")
+
+    if already_gone:
+        logger.debug(
+            f"cleanup_dot_underscore: {already_gone} ._ file(s) in {parent} "
+            f"were already relocated/removed; skipped"
+        )
 
     if moved == 0:
         return 0

@@ -151,6 +151,30 @@ def _is_path_not_found(api_error) -> bool:
         return False
 
 
+def _is_relocation_source_missing(api_error) -> bool:
+    """True iff a files_move/copy ApiError is a RelocationError whose
+    *source* (`from_lookup`) is not_found — i.e. the thing we're trying to
+    move already vanished (a concurrent sweep moved it, or Dropbox removed
+    it between our listing and the move).
+
+    RelocationError carries its path-not-found under `from_lookup`, not the
+    `path` union that `_is_path_not_found` understands, so it needs its own
+    probe. This is non-retryable: re-issuing the move just re-runs the same
+    doomed lookup, burning the full exponential backoff each time."""
+    try:
+        if not hasattr(api_error, "error"):
+            return False
+        err = api_error.error
+        is_from = getattr(err, "is_from_lookup", None)
+        if not (callable(is_from) and is_from()):
+            return False
+        lookup = err.get_from_lookup()
+        is_nf = getattr(lookup, "is_not_found", None)
+        return bool(is_nf() if callable(is_nf) else False)
+    except Exception:
+        return False
+
+
 def make_client_from_config(config, rate_limiter: TokenBucket | None = None) -> "DropboxClient":
     """
     Build a DropboxClient from a Config object, picking the right auth mode.
@@ -312,7 +336,7 @@ class DropboxClient:
                 #   - GetMetadataError.path -> LookupError (.is_not_found())
                 # Be tolerant: only flag DropboxNotFoundError when the
                 # returned error union actually exposes is_not_found().
-                if _is_path_not_found(e):
+                if _is_path_not_found(e) or _is_relocation_source_missing(e):
                     raise DropboxNotFoundError(f"Path not found: {e}") from e
 
                 last_error = e
