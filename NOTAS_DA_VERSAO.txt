@@ -2,6 +2,42 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.6
+Data: 05/06/2026
+--------------------------------------------------------------------------------
+
+Convoy/starvation mode agora vem DESLIGADO por padrão
+
+  [FIX] em pastas de arquivos grandes, o convoy estava cortando a banda de
+        download pela metade — o oposto do que prometia
+
+  DIAGNÓSTICO: o convoy parte da premissa de que UM stream do Dropbox satura
+         o WAN, então pausar os outros e dar o cano pro líder acelera tudo.
+         Os logs de produção mostram que essa premissa é FALSA: o Dropbox
+         limita por-conexão em ~8 MB/s. Medido no HEAVY7:
+           - líder sozinho (convoy ON):      ~8 MB/s
+           - 3 downloaders em paralelo:      ~16 MB/s agregado (~2x)
+         Como o transcoder de 1080p 4:2:0 no QSV roda a ~4-5x realtime, a
+         fila de transcode vive vazia e o convoy ficava engatado quase o
+         tempo todo — serializando um backlog que é limitado por THROUGHPUT,
+         não por latência-até-o-primeiro-arquivo. Resultado: downloads ~2x
+         mais lentos do que simplesmente baixar tudo em paralelo.
+
+  AGORA: `dispatcher.convoy_throttle_sec` tem padrão 0 (convoy desligado).
+         Os N downloaders rodam em paralelo o tempo todo e somam ~N× a banda.
+         O convoy continua existindo como opt-in: se algum dia um único stream
+         já maxar seu link, basta setar convoy_throttle_sec > 0 pra reativar.
+
+  MIGRAÇÃO: nenhuma ação manual no config.yaml. Quem usava o padrão antigo
+            (5s) passa a usar 0 automaticamente ao atualizar. O comando de
+            update normaliza qualquer valor explícito remanescente pra 0.
+
+  TESTES: tests/test_convoy_throttle.py ganhou test_convoy_disabled_by_default;
+          os testes do mecanismo (eleição/liberação/keepalive) seguem cobrindo
+          o caminho opt-in quando convoy_throttle_sec > 0.
+
+--------------------------------------------------------------------------------
+
 Versão: 6.8.5
 Data: 01/06/2026
 --------------------------------------------------------------------------------

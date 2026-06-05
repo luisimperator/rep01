@@ -257,14 +257,19 @@ class DispatcherSettings(BaseModel):
         description="Queue size = workers * this; controls pipelining slack"
     )
     convoy_throttle_sec: float = Field(
-        default=5.0,
+        default=0.0,
         ge=0.0,
         le=30.0,
         description=(
             "Convoy mode enable + poll cadence: when the transcoder queue is "
             "empty and ≥2 downloaders are in flight, non-leader workers PAUSE "
             "(re-checking every ~0.5s) so the leader gets effectively all the "
-            "WAN and finishes first. 0 disables convoy mode."
+            "WAN and finishes first. 0 disables convoy mode (the default). "
+            "Convoy only pays off when a single Dropbox connection can saturate "
+            "the WAN; in practice Dropbox throttles per-connection (~8 MB/s), so "
+            "N parallel downloaders move ~N× the aggregate bytes and convoy just "
+            "serializes a throughput-bound backlog. Leave at 0 unless you have "
+            "measured that one stream already maxes your link."
         ),
     )
     convoy_keepalive_sec: float = Field(

@@ -103,6 +103,20 @@ def test_drops_below_two_active_releases_throttle():
     assert d._convoy_leader is None
 
 
+# --- default posture ----------------------------------------------------------
+
+def test_convoy_disabled_by_default():
+    # v6.8.6: convoy ships OFF. It only helps when a single Dropbox stream
+    # saturates the WAN; in practice Dropbox throttles per-connection, so
+    # convoy serializes a throughput-bound backlog and halves aggregate speed.
+    assert DispatcherSettings().convoy_throttle_sec == 0.0
+
+    # With the shipped default, a busy convoy scenario throttles nobody.
+    d = _bare_dispatcher(throttle=DispatcherSettings().convoy_throttle_sec)
+    d._download_active = {"downloader-0": 1, "downloader-1": 2}
+    assert d.should_throttle_download("downloader-1") is False
+
+
 # --- keepalive knob -----------------------------------------------------------
 
 def test_keepalive_default_and_bounds():
