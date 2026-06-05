@@ -274,12 +274,23 @@ class DownloadWorker(BaseWorker):
                 logger.error(f"[{self.name}] Could not remove stale input: {e}")
                 raise
 
-        # Wipe any leftover partial from an aborted previous run too.
+        # Resume: keep leftover partial from previous attempt so the
+        # range-download picks up where it left off instead of re-pulling
+        # 25 GB from zero. Rev-change (file modified on Dropbox) wipes
+        # the partial inside the except block below.
         if partial_path.exists():
-            try:
-                partial_path.unlink()
-            except OSError:
-                pass
+            partial_size = partial_path.stat().st_size
+            expected = int(job.dropbox_size or 0)
+            if partial_size > 0 and (not expected or partial_size < expected):
+                logger.info(
+                    f"[{self.name}] Resumable partial found: "
+                    f"{format_bytes(partial_size)} of {format_bytes(expected)}"
+                )
+            else:
+                try:
+                    partial_path.unlink()
+                except OSError:
+                    pass
 
         # Preflight HEVC probe: range-download a few MB and run ffprobe on
         # the chunk so we never download a 100 GB file just to discover it's
@@ -321,10 +332,21 @@ class DownloadWorker(BaseWorker):
 
             logger.info(f"[{self.name}] Download complete: {job.dropbox_path}")
 
-        except Exception:
-            # Clean up on failure
+        except DropboxRevChangedError:
+            # Rev changed = file was modified on Dropbox. The partial is
+            # from a stale version and MUST be wiped.
             if partial_path.exists():
                 partial_path.unlink()
+            raise
+        except Exception:
+            # Retryable errors (IncompleteRead, timeout, network).
+            # Keep the partial so the next attempt resumes via Range header
+            # instead of re-downloading from zero.
+            if partial_path.exists():
+                logger.info(
+                    f"[{self.name}] Keeping partial "
+                    f"({format_bytes(partial_path.stat().st_size)}) for resume"
+                )
             raise
 
     def _preflight_hevc_check(self, job: Job, job_dir: Path) -> bool:

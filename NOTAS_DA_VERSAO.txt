@@ -2,6 +2,37 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.7
+Data: 05/06/2026
+--------------------------------------------------------------------------------
+
+Resume de download — IncompleteRead não recomeça do zero
+
+  [FIX] quando o download de um arquivo grande (25+ GB) falhava por
+        IncompleteRead, timeout, ou erro de rede, o daemon apagava o
+        .partial e recomeçava tudo do zero. Nos logs de produção, 3 arquivos
+        de ~25 GB falharam às 09:41 e 10:41 — ~75 GB de banda jogada fora.
+
+  AGORA: o download usa `files_get_temporary_link` (CDN) + header HTTP
+         `Range: bytes=N-` em vez do SDK `files_download` (que não suporta
+         Range). Quando um download falha:
+           1. O .partial é PRESERVADO no disco
+           2. Na próxima tentativa, o download detecta o .partial existente
+           3. Envia `Range: bytes=<tamanho_do_partial>-` e abre em append
+           4. Só os bytes restantes são baixados
+
+         Se o arquivo mudou no Dropbox (rev diferente), o .partial é apagado
+         e o download recomeça do zero — comportamento correto, não é resume.
+
+  EXEMPLO: arquivo de 25 GB falha com 18 GB baixados. Antes: re-baixa 25 GB.
+           Agora: re-baixa só 7 GB. Economia de ~72% da banda nesse caso.
+
+  TESTES: tests/test_download_resume.py — 6 testes cobrindo fresh download,
+          resume com Range header, partial já completo, rev-change abort,
+          e preservação/limpeza do .partial no worker.
+
+--------------------------------------------------------------------------------
+
 Versão: 6.8.6
 Data: 05/06/2026
 --------------------------------------------------------------------------------

@@ -16,7 +16,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "6.8.6"
+VERSION = "6.8.7"
 
 import socket
 import subprocess
