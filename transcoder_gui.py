@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HeavyDrops Transcoder v7.1.0
+HeavyDrops Transcoder v7.2.0
 
 Dropbox Video Transcoder - GUI Version
 Simple graphical interface for local folder transcoding.
@@ -16,7 +16,7 @@ Features:
 - Beep notification when queue finishes
 """
 
-VERSION = "7.1.0"
+VERSION = "7.2.0"
 
 import socket
 import subprocess
@@ -28,6 +28,7 @@ import sqlite3
 import shutil
 import queue
 import threading
+import faulthandler
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime
@@ -4948,7 +4949,60 @@ class TranscoderGUI:
         return base_cmd + video_opts + audio_opts + output_opts
 
 
+_crash_log_fh = None  # kept open for the whole process for faulthandler
+
+
+def install_crash_handler():
+    """Write unhandled exceptions and native faults to crash.log.
+
+    The GUI runs under pythonw (no console), so a silent death otherwise
+    leaves no trace to diagnose. We append a full traceback to a persistent
+    crash.log (next to the local DB at C:\\transcoder, falling back to the
+    script's own folder) so the next crash leaves a body to autopsy. Purely
+    additive — never let diagnostics break startup.
+    """
+    global _crash_log_fh
+    import os
+    for d in (Path(r"C:\transcoder"), Path(__file__).resolve().parent):
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+            _crash_log_fh = open(d / "crash.log", "a", encoding="utf-8", buffering=1)
+            break
+        except Exception:
+            continue
+    if _crash_log_fh is None:
+        return
+
+    faulthandler.enable(file=_crash_log_fh, all_threads=True)
+
+    def _record(exc_type, exc_value, exc_tb, source):
+        import traceback
+        _crash_log_fh.write(
+            f"\n{'=' * 72}\n{datetime.now().isoformat()} — UNHANDLED EXCEPTION "
+            f"({source}, pid {os.getpid()})\n{'=' * 72}\n"
+        )
+        traceback.print_exception(exc_type, exc_value, exc_tb, file=_crash_log_fh)
+        _crash_log_fh.flush()
+
+    def _excepthook(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        _record(exc_type, exc_value, exc_tb, "main thread")
+
+    sys.excepthook = _excepthook
+
+    def _thread_excepthook(args):
+        if issubclass(args.exc_type, (KeyboardInterrupt, SystemExit)):
+            return
+        name = args.thread.name if args.thread else "?"
+        _record(args.exc_type, args.exc_value, args.exc_traceback, f"thread '{name}'")
+
+    threading.excepthook = _thread_excepthook
+
+
 def main():
+    install_crash_handler()
     root = tk.Tk()
 
     # Try to use a modern theme

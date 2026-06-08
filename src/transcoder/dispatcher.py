@@ -64,18 +64,17 @@ class JobDispatcher(threading.Thread):
 
         self._active_lock = threading.Lock()
         self._active_set: set[int] = set()
-        # Folder of each in-flight job, so we can tell when the sticky folder
-        # has fully drained even after the candidate window stops returning
-        # dispatchable jobs from it (e.g. last job is mid-download).
+        # Folder of each in-flight job. Kept for observability (which folders
+        # are currently downloading); no longer gates sticky release.
         self._active_folders: dict[int, str] = {}
 
         # Sticky folder (v6.8.2): when set, the dispatcher only pulls jobs
-        # from this folder into the download queue. Releases automatically
-        # when the folder has zero dispatchable candidates AND zero in-flight
-        # jobs — at which point the head of the folder-priority sort becomes
-        # the new sticky. The goal is to close each folder fully before
-        # starting another so the reorganize cleanup batches dispatch
-        # sooner and the Dropbox quota drops faster.
+        # from this folder into the download queue, so every download worker
+        # concentrates on finishing one folder first — its Dropbox space then
+        # frees sooner. Releases the moment the folder has no more *dispatchable*
+        # jobs, WITHOUT waiting for its last in-flight downloads to finish, so
+        # idle workers move straight to the next folder (v7.2.0: no more tail
+        # idling). The head of the folder-priority sort becomes the new sticky.
         self._sticky_folder: str | None = None
 
         self.poll_interval = config.dispatcher.poll_interval_sec
@@ -360,22 +359,20 @@ class JobDispatcher(threading.Thread):
           - Sticky off via config → no-op, return list unchanged.
           - No sticky set → return list unchanged; the dispatch loop will
             adopt the first admitted job's folder as the new sticky.
-          - Sticky set and has candidates in this batch → return only those.
-          - Sticky set, no candidates, but still in flight → return [] so
-            downloaders wait for the current folder to finish before any
-            cross-folder work starts.
-          - Sticky set, no candidates, nothing in flight → release sticky
-            and return the original list so the next folder takes over.
+          - Sticky set and has dispatchable candidates → return only those, so
+            all download workers concentrate on finishing that one folder.
+          - Sticky set but no dispatchable candidates left in it → release the
+            sticky and return the full list so idle workers immediately start
+            the next folder. We deliberately do NOT wait for the folder's last
+            in-flight downloads to finish: once there is nothing left to *start*
+            there, holding workers idle is pure waste. Those in-flight jobs keep
+            running and drain on their own.
         """
         if not getattr(self.config.dispatcher, "sticky_folder_enabled", True):
             return sorted_candidates
 
         with self._active_lock:
             sticky = self._sticky_folder
-            sticky_in_flight = (
-                sticky is not None
-                and any(f == sticky for f in self._active_folders.values())
-            )
 
         if sticky is None:
             return sorted_candidates
@@ -387,15 +384,14 @@ class JobDispatcher(threading.Thread):
         if from_sticky:
             return from_sticky
 
-        if sticky_in_flight:
-            # Sticky folder still draining — make the downloaders wait
-            # instead of starting work on another folder.
-            return []
-
-        # Sticky folder fully drained — release and let the head of the
-        # folder-priority list become the next sticky.
+        # Nothing left to dispatch from the sticky folder. Release it now —
+        # even if a few of its downloads are still finishing — so the next
+        # folder takes over immediately instead of idling workers (v7.2.0).
+        # The fetch window is wide (>= 500 jobs, folder-priority sorted), so an
+        # empty slice means the folder is genuinely drained, not just paged out.
         logger.info(
-            "dispatcher: sticky folder '%s' drained — releasing for next folder",
+            "dispatcher: sticky folder '%s' has no more files to start — "
+            "releasing now so idle workers begin the next folder",
             sticky,
         )
         with self._active_lock:

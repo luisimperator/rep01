@@ -285,17 +285,18 @@ class DispatcherSettings(BaseModel):
         ),
     )
     sticky_folder_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "When True, the dispatcher commits to draining one folder at a "
-            "time: as long as any job from the 'sticky' folder is still in "
-            "flight or dispatchable, no jobs from other folders are pulled "
-            "into the download queue. Closes folders faster so the reorganize "
-            "cleanup batches fire and free up Dropbox quota sooner — but it "
-            "bottlenecks download parallelism when the current folder has "
-            "fewer files than download_workers (idle workers wait for the "
-            "folder to drain). Default False: plain folder-priority "
-            "interleaving keeps every download worker busy across folders."
+            "When True, the dispatcher concentrates all download workers on one "
+            "folder at a time: while the 'sticky' folder still has files left to "
+            "download, no other folder is started. This closes folders fast so "
+            "the reorganize/cleanup batches fire and free up Dropbox quota "
+            "sooner. As soon as the folder has no more files to start, the "
+            "sticky is released immediately and idle workers move to the next "
+            "folder — it does NOT wait for that folder's last in-flight "
+            "downloads to finish, so workers never sit idle (fixed in v7.2.0; "
+            "this tail-idling was the only reason it was ever disabled). Set "
+            "False for plain folder-priority interleaving (no concentration)."
         ),
     )
 

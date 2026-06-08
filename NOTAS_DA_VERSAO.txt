@@ -2,6 +2,40 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 7.2.0
+Data: 08/06/2026
+--------------------------------------------------------------------------------
+
+Foco por pasta sem ociosidade + caixa-preta de crash
+
+  [PERF] sticky_folder_enabled volta para True (padrão), mas SEM o problema
+         que o tinha desligado. Agora o dispatcher concentra todos os
+         download workers numa pasta só pra fechá-la rápido e liberar o
+         espaço do Dropbox mais cedo — e, assim que a pasta não tem mais
+         arquivo PRA COMEÇAR, ele solta na hora e os workers livres já
+         partem pra próxima pasta. Antes (v6.8.10/7.0.0) ele esperava os
+         últimos downloads daquela pasta terminarem, deixando workers
+         parados; esse "idle no rabo" era o único motivo de o sticky ter
+         sido desligado. dispatcher._apply_sticky_folder agora libera o
+         sticky quando não há candidatos dispatcháveis na pasta, sem olhar
+         o que ainda está em voo (os downloads em andamento drenam sozinhos).
+         A janela de fetch é larga (>= 500 jobs, ordenada por prioridade de
+         pasta), então uma fatia vazia significa pasta de fato drenada.
+         Quem preferir interleaving puro entre pastas: sticky_folder_enabled
+         = false.
+
+  [PERF] Caixa-preta de crash. A daemon roda sob pythonw (sem console), então
+         uma exceção não-tratada ou um crash nativo na camada QSV/ffmpeg
+         sumia sem deixar rastro — o processo evaporava e o Task Scheduler
+         religava. install_crash_handler() agora arma faulthandler +
+         sys.excepthook + threading.excepthook gravando o traceback completo
+         em logs/crash.log (e C:\transcoder\crash.log no GUI). Da próxima vez
+         que cair desse jeito, fica o corpo pra autópsia. É puramente
+         aditivo: nunca quebra o startup, e KeyboardInterrupt/SystemExit
+         passam direto sem virar ruído.
+
+--------------------------------------------------------------------------------
+
 Versão: 7.1.0
 Data: 08/06/2026
 --------------------------------------------------------------------------------

@@ -95,6 +95,65 @@ def setup_logging(verbose: bool = False, log_file: Path | None = None) -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+# Kept open for the whole process so faulthandler can write to it mid-crash.
+_crash_log_fh = None
+
+
+def install_crash_handler(log_dir: Path) -> None:
+    """Last-resort crash diagnostics for the headless (pythonw) daemon.
+
+    Under pythonw there is no console, so an unhandled Python exception or a
+    native fault in a linked library (e.g. the QSV/ffmpeg layer) leaves no
+    trace: the process just vanishes and Task Scheduler restarts it. We append
+    a full traceback to <log_dir>/crash.log so the *next* silent death leaves a
+    body to autopsy. Purely additive — never let diagnostics break startup.
+    """
+    global _crash_log_fh
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        crash_log = log_dir / 'crash.log'
+        # Line-buffered; faulthandler writes to this fd directly while the
+        # interpreter is crashing, when no Python code can run.
+        _crash_log_fh = open(crash_log, 'a', encoding='utf-8', buffering=1)
+    except Exception:  # pragma: no cover — diagnostics must not crash startup
+        logger.warning("Could not open crash.log; crash diagnostics disabled",
+                       exc_info=True)
+        return
+
+    import faulthandler
+    faulthandler.enable(file=_crash_log_fh, all_threads=True)
+
+    def _record(exc_type, exc_value, exc_tb, source: str) -> None:
+        import traceback
+        from datetime import datetime
+        _crash_log_fh.write(
+            f"\n{'=' * 72}\n{datetime.now().isoformat()} — UNHANDLED EXCEPTION "
+            f"({source}, pid {os.getpid()})\n{'=' * 72}\n"
+        )
+        traceback.print_exception(exc_type, exc_value, exc_tb, file=_crash_log_fh)
+        _crash_log_fh.flush()
+        logger.critical("Unhandled exception (%s) — written to crash.log",
+                        source, exc_info=(exc_type, exc_value, exc_tb))
+
+    def _excepthook(exc_type, exc_value, exc_tb) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        _record(exc_type, exc_value, exc_tb, "main thread")
+
+    sys.excepthook = _excepthook
+
+    def _thread_excepthook(args) -> None:
+        if issubclass(args.exc_type, (KeyboardInterrupt, SystemExit)):
+            return
+        name = args.thread.name if args.thread else "?"
+        _record(args.exc_type, args.exc_value, args.exc_traceback,
+                f"thread '{name}'")
+
+    threading.excepthook = _thread_excepthook
+    logger.info("Crash diagnostics armed → %s", crash_log)
+
+
 class Daemon:
     """Main daemon that orchestrates the transcoding pipeline."""
 
@@ -602,6 +661,7 @@ def start(ctx: click.Context) -> None:
 
     config = load_config(config_path)
     setup_logging(verbose, config.log_dir / 'transcoder.log')
+    install_crash_handler(config.log_dir)
 
     daemon = Daemon(config)
 
