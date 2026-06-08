@@ -2,6 +2,22 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.9
+Data: 08/06/2026
+--------------------------------------------------------------------------------
+
+Limpeza automática de staging — impede acúmulo de TB em disco
+
+  [FIX] staging acumulava arquivos de jobs falhados indefinidamente (2+ TB
+        no disco de produção). Agora todos os workers (download, transcode,
+        upload) limpam o staging dir quando um job atinge FAILED (max retries).
+
+  [NEW] self-health agent agora limpa staging dirs órfãos a cada 3h:
+        escaneia job_* dirs cujo job está em estado terminal (DONE, FAILED,
+        SKIPPED_*) ou não existe mais no banco. Libera disco automaticamente.
+
+--------------------------------------------------------------------------------
+
 Versão: 6.8.8
 Data: 08/06/2026
 --------------------------------------------------------------------------------
