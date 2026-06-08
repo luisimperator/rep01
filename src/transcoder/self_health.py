@@ -151,6 +151,7 @@ class SelfHealthAgent(threading.Thread):
         started = time.time()
         results: list[CheckResult] = [
             self._check_partials(),
+            self._check_orphan_staging(),
             self._check_stuck_jobs(),
             self._check_transcode_health(),
             self._check_disk_pressure(),
@@ -213,6 +214,44 @@ class SelfHealthAgent(threading.Thread):
                 actions_taken=actions,
             )
         return CheckResult("partials", True, "no stale partials")
+
+    def _check_orphan_staging(self) -> CheckResult:
+        """Remove staging job_* dirs whose jobs are in terminal or FAILED state."""
+        from .database import TERMINAL_STATES, JobState
+        staging = Path(self.config.local_staging_dir)
+        if not staging.exists():
+            return CheckResult("orphan-staging", True, "staging dir missing — skipping")
+
+        removable_states = TERMINAL_STATES | {JobState.FAILED}
+        removed = 0
+        bytes_freed = 0
+        actions = []
+        for d in staging.iterdir():
+            if not d.is_dir() or not d.name.startswith("job_"):
+                continue
+            try:
+                job_id = int(d.name.split("_", 1)[1])
+            except (ValueError, IndexError):
+                continue
+            job = self.db.get_job(job_id)
+            if job is None or job.state in removable_states:
+                try:
+                    dir_size = sum(f.stat().st_size for f in d.rglob("*") if f.is_file())
+                    shutil.rmtree(d)
+                    removed += 1
+                    bytes_freed += dir_size
+                    state_info = job.state if job else "missing"
+                    actions.append(f"removed {d.name} ({_fmt_bytes(dir_size)}, state={state_info})")
+                except Exception as e:
+                    actions.append(f"could not remove {d.name}: {e}")
+
+        if removed:
+            return CheckResult(
+                "orphan-staging", True,
+                f"cleaned {removed} orphan staging dir(s) ({_fmt_bytes(bytes_freed)})",
+                actions_taken=actions,
+            )
+        return CheckResult("orphan-staging", True, "no orphan staging dirs")
 
     def _check_stuck_jobs(self) -> CheckResult:
         """Jobs in DOWNLOADING/TRANSCODING/UPLOADING for >6h with no recent

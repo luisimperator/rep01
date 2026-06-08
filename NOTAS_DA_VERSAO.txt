@@ -2,6 +2,44 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.9
+Data: 08/06/2026
+--------------------------------------------------------------------------------
+
+Limpeza automática de staging — impede acúmulo de TB em disco
+
+  [FIX] staging acumulava arquivos de jobs falhados indefinidamente (2+ TB
+        no disco de produção). Agora todos os workers (download, transcode,
+        upload) limpam o staging dir quando um job atinge FAILED (max retries).
+
+  [NEW] self-health agent agora limpa staging dirs órfãos a cada 3h:
+        escaneia job_* dirs cujo job está em estado terminal (DONE, FAILED,
+        SKIPPED_*) ou não existe mais no banco. Libera disco automaticamente.
+
+--------------------------------------------------------------------------------
+
+Versão: 6.8.8
+Data: 08/06/2026
+--------------------------------------------------------------------------------
+
+Dispatcher backoff fix + h264 deletion delay padrão 5 min
+
+  [FIX] dispatcher re-despachava jobs em RETRY_WAIT direto pro download,
+        ignorando o backoff exponencial do watchdog. Jobs falhados voltavam
+        em ~2s ao invés de esperar min(300, 5×2^retry). Corrigido removendo
+        RETRY_WAIT do DOWNLOAD_STATES — agora só o watchdog promove
+        RETRY_WAIT → NEW após o delay correto.
+
+  [CHANGE] default de legacy_reorganize_delete_h264_after_seconds mudou
+           de 0 (manter para sempre) para 300 (5 minutos). Instalações
+           novas deletam backups h264/ automaticamente após 5 min.
+           Configurável via config.yaml.
+
+  [LOG] melhor diagnóstico de resume: mostra % do partial, avisa quando
+        partial não existe, mostra path completo do partial mantido.
+
+--------------------------------------------------------------------------------
+
 Versão: 6.8.7
 Data: 05/06/2026
 --------------------------------------------------------------------------------

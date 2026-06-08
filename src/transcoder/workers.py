@@ -285,8 +285,13 @@ class DownloadWorker(BaseWorker):
                 logger.info(
                     f"[{self.name}] Resumable partial found: "
                     f"{format_bytes(partial_size)} of {format_bytes(expected)}"
+                    + (f" ({partial_size / expected * 100:.1f}%)" if expected else "")
                 )
             else:
+                logger.info(
+                    f"[{self.name}] Discarding stale partial "
+                    f"({format_bytes(partial_size)} vs expected {format_bytes(expected)})"
+                )
                 try:
                     partial_path.unlink()
                 except OSError:
@@ -339,13 +344,16 @@ class DownloadWorker(BaseWorker):
                 partial_path.unlink()
             raise
         except Exception:
-            # Retryable errors (IncompleteRead, timeout, network).
-            # Keep the partial so the next attempt resumes via Range header
-            # instead of re-downloading from zero.
             if partial_path.exists():
+                sz = partial_path.stat().st_size
                 logger.info(
                     f"[{self.name}] Keeping partial "
-                    f"({format_bytes(partial_path.stat().st_size)}) for resume"
+                    f"({format_bytes(sz)}) for resume: {partial_path}"
+                )
+            else:
+                logger.warning(
+                    f"[{self.name}] No partial file to keep at {partial_path} "
+                    f"(download may have failed before writing any data)"
                 )
             raise
 
@@ -513,6 +521,7 @@ class DownloadWorker(BaseWorker):
                 JobState.FAILED,
                 error_message=f"Max retries exceeded: {error}",
             )
+            self._cleanup_staging_on_failure(job)
         else:
             # Exponential backoff delay
             delay = min(300, 5 * (2 ** retry_count))
@@ -522,6 +531,19 @@ class DownloadWorker(BaseWorker):
                 error_message=f"Retry {retry_count}: {error}",
             )
             logger.info(f"[{self.name}] Will retry job {job.id} in {delay}s")
+
+    def _cleanup_staging_on_failure(self, job: Job) -> None:
+        """Remove staging dir when a download job reaches terminal FAILED state."""
+        original_name = Path(job.dropbox_path).name
+        job_dir, _, _ = get_staging_paths(
+            self.config.local_staging_dir, job.id, original_name,
+        )
+        if job_dir.exists() and job_dir.name.startswith('job_'):
+            try:
+                shutil.rmtree(job_dir)
+                logger.info(f"[{self.name}] Cleaned staging for FAILED job {job.id}: {job_dir}")
+            except Exception as e:
+                logger.warning(f"[{self.name}] Could not clean staging for job {job.id}: {e}")
 
 
 class TranscodeWorker(BaseWorker):
@@ -1058,8 +1080,13 @@ class TranscodeWorker(BaseWorker):
                 JobState.FAILED,
                 error_message=f"Max retries exceeded: {error}",
             )
-            if self.disk_budget is not None:
-                self.disk_budget.release(job.id)
+            try:
+                self._cleanup_staging(job)
+            except Exception as cleanup_err:
+                logger.debug(
+                    f"[{self.name}] staging cleanup after FAILED "
+                    f"failed (non-fatal): {cleanup_err}"
+                )
         else:
             self.db.update_job_state(
                 job.id,
@@ -1513,8 +1540,13 @@ class UploadWorker(BaseWorker):
                 JobState.FAILED,
                 error_message=f"Upload failed after retries: {error}",
             )
-            if self.disk_budget is not None:
-                self.disk_budget.release(job.id)
+            try:
+                self._cleanup_staging(job)
+            except Exception as cleanup_err:
+                logger.debug(
+                    f"[{self.name}] staging cleanup after FAILED "
+                    f"failed (non-fatal): {cleanup_err}"
+                )
         else:
             # Stay in UPLOADING state for retry
             self.db.update_job_state(
