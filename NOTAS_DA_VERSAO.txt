@@ -2,6 +2,30 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.8
+Data: 08/06/2026
+--------------------------------------------------------------------------------
+
+Fix: dispatcher despachava RETRY_WAIT sem esperar backoff — resume não funcionava
+
+  [BUG] O dispatcher incluía RETRY_WAIT nos estados de download, despachando
+        jobs falhados imediatamente (~2s) em vez de respeitar o backoff
+        exponencial (10s→20s→40s→...). Isso fazia o resume nunca funcionar:
+        o job era re-despachado tão rápido que o .partial não era encontrado
+        pelo próximo worker.
+
+  [FIX] Removido RETRY_WAIT de DOWNLOAD_STATES no dispatcher. Agora apenas
+        o watchdog transiciona RETRY_WAIT → NEW após o delay correto.
+        O download resume agora funciona como projetado: o .partial é
+        preservado, o backoff é respeitado, e o próximo worker encontra
+        o arquivo parcial e continua de onde parou.
+
+  [LOG] Diagnóstico melhorado: quando o download falha sem .partial,
+        o log agora indica explicitamente "No partial file to keep".
+        Quando um partial é descartado por ser stale, o motivo é logado.
+
+--------------------------------------------------------------------------------
+
 Versão: 6.8.7
 Data: 05/06/2026
 --------------------------------------------------------------------------------

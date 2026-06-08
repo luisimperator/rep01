@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 # Which DB states feed which worker queue.
-DOWNLOAD_STATES = {JobState.NEW, JobState.RETRY_WAIT}
+DOWNLOAD_STATES = {JobState.NEW}
 TRANSCODE_STATES = {JobState.DOWNLOADED}
 UPLOAD_STATES = {JobState.UPLOADING}
 
