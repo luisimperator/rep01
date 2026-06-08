@@ -284,8 +284,8 @@ class DownloadWorker(BaseWorker):
             if partial_size > 0 and (not expected or partial_size < expected):
                 logger.info(
                     f"[{self.name}] Resumable partial found: "
-                    f"{format_bytes(partial_size)} of {format_bytes(expected)} "
-                    f"({partial_size / expected * 100:.1f}%)" if expected else ""
+                    f"{format_bytes(partial_size)} of {format_bytes(expected)}"
+                    + (f" ({partial_size / expected * 100:.1f}%)" if expected else "")
                 )
             else:
                 logger.info(
@@ -344,9 +344,6 @@ class DownloadWorker(BaseWorker):
                 partial_path.unlink()
             raise
         except Exception:
-            # Retryable errors (IncompleteRead, timeout, network).
-            # Keep the partial so the next attempt resumes via Range header
-            # instead of re-downloading from zero.
             if partial_path.exists():
                 sz = partial_path.stat().st_size
                 logger.info(

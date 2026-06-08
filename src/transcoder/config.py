@@ -661,12 +661,12 @@ class Config(BaseModel):
         ),
     )
     legacy_reorganize_delete_h264_after_seconds: int = Field(
-        default=0,
+        default=300,
         ge=0,
         description=(
             "After a per-folder reorganize batch succeeds, schedule deletion "
             "of the <parent>/h264/ backup folder this many seconds later. "
-            "0 disables deletion (default — keep backups). Dropbox keeps "
+            "0 disables deletion (keep backups forever). Dropbox keeps "
             "deleted files in its history for 30 days (Plus) or 180 days "
             "(Business), so this is recoverable."
         ),

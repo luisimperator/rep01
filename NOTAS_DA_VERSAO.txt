@@ -6,23 +6,21 @@ Versão: 6.8.8
 Data: 08/06/2026
 --------------------------------------------------------------------------------
 
-Fix: dispatcher despachava RETRY_WAIT sem esperar backoff — resume não funcionava
+Dispatcher backoff fix + h264 deletion delay padrão 5 min
 
-  [BUG] O dispatcher incluía RETRY_WAIT nos estados de download, despachando
-        jobs falhados imediatamente (~2s) em vez de respeitar o backoff
-        exponencial (10s→20s→40s→...). Isso fazia o resume nunca funcionar:
-        o job era re-despachado tão rápido que o .partial não era encontrado
-        pelo próximo worker.
+  [FIX] dispatcher re-despachava jobs em RETRY_WAIT direto pro download,
+        ignorando o backoff exponencial do watchdog. Jobs falhados voltavam
+        em ~2s ao invés de esperar min(300, 5×2^retry). Corrigido removendo
+        RETRY_WAIT do DOWNLOAD_STATES — agora só o watchdog promove
+        RETRY_WAIT → NEW após o delay correto.
 
-  [FIX] Removido RETRY_WAIT de DOWNLOAD_STATES no dispatcher. Agora apenas
-        o watchdog transiciona RETRY_WAIT → NEW após o delay correto.
-        O download resume agora funciona como projetado: o .partial é
-        preservado, o backoff é respeitado, e o próximo worker encontra
-        o arquivo parcial e continua de onde parou.
+  [CHANGE] default de legacy_reorganize_delete_h264_after_seconds mudou
+           de 0 (manter para sempre) para 300 (5 minutos). Instalações
+           novas deletam backups h264/ automaticamente após 5 min.
+           Configurável via config.yaml.
 
-  [LOG] Diagnóstico melhorado: quando o download falha sem .partial,
-        o log agora indica explicitamente "No partial file to keep".
-        Quando um partial é descartado por ser stale, o motivo é logado.
+  [LOG] melhor diagnóstico de resume: mostra % do partial, avisa quando
+        partial não existe, mostra path completo do partial mantido.
 
 --------------------------------------------------------------------------------
 
