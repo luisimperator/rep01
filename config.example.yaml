@@ -58,7 +58,7 @@ stability_profiles:
     min_age_sec: 900
 concurrency:
   scan_interval_sec: 600
-  download_workers: 2
+  download_workers: 4
   transcode_workers: 2
   upload_workers: 2
   audio_workers: 2

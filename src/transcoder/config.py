@@ -85,7 +85,7 @@ class ConcurrencySettings(BaseModel):
         description="Interval between full scans (seconds)"
     )
     download_workers: int = Field(
-        default=2,
+        default=4,
         ge=1,
         le=8,
         description="Number of parallel download workers"
@@ -926,7 +926,7 @@ def save_example_config(path: Path) -> None:
         },
         'concurrency': {
             'scan_interval_sec': 600,
-            'download_workers': 2,
+            'download_workers': 4,
             'transcode_workers': 2,
             'upload_workers': 2,
         },

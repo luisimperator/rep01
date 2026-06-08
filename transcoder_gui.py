@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-HeavyDrops Transcoder v6.8.6
+HeavyDrops Transcoder v6.8.7
 
 Dropbox Video Transcoder - GUI Version
 Simple graphical interface for local folder transcoding.
