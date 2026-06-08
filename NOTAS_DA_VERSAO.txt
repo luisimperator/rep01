@@ -2,6 +2,32 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 7.1.0
+Data: 08/06/2026
+--------------------------------------------------------------------------------
+
+Download: tira o rev-check de dentro do loop de bytes
+
+  [PERF] novo knob download_rev_check_interval_mb (default 2048, antes era
+         fixo em 100 MB). O download_file_with_rev_check chamava
+         files_get_metadata SÍNCRONO a cada 100 MB no meio do loop de bytes
+         — num ISO de 47 GB isso eram ~470 round-trips ao Dropbox, cada um
+         travando o stream (e ainda uma superfície de falha a cada 100 MB,
+         possivelmente contribuindo pros IncompleteRead em arquivos longos).
+         Em pasta de arquivo morto (_arquivo mais de 30 dias) o arquivo nem
+         muda, então era custo puro. A correção NÃO mexe na segurança: o
+         scanner.verify_job_rev pós-download já detecta arquivo alterado no
+         meio do caminho e descarta o parcial. O check periódico só servia
+         pra bailar mais cedo. 2048 MB mantém esse fast-fail cortando ~95%
+         das chamadas; 0 desliga o check periódico de vez.
+
+  [CHANGE] check_interval_mb <= 0 agora desliga o check periódico de forma
+           limpa (antes, 0 disparava o check em TODO chunk por causa do
+           >= 0). Os checks finais de rev/tamanho continuam guardando a
+           correção independente do valor.
+
+--------------------------------------------------------------------------------
+
 Versão: 7.0.0
 Data: 08/06/2026
 --------------------------------------------------------------------------------

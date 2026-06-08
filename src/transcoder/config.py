@@ -774,6 +774,22 @@ class Config(BaseModel):
             "exports without burning bandwidth."
         ),
     )
+    download_rev_check_interval_mb: int = Field(
+        default=2048,
+        ge=0,
+        description=(
+            "During a download, re-check the Dropbox file revision every N MB "
+            "to fast-fail if the source was modified mid-transfer. The "
+            "post-download rev check (scanner.verify_job_rev) already "
+            "guarantees correctness — a file changed mid-flight is detected and "
+            "the partial discarded — so this only saves bandwidth by bailing "
+            "early on the rare overwrite. The old 100 MB cadence fired a "
+            "synchronous metadata API call hundreds of times per multi-GB file "
+            "(~470 calls on a 47 GB ISO), stalling the byte stream for zero gain "
+            "on immutable archives. 2048 MB keeps the fast-fail while cutting "
+            "~95% of those calls. Set 0 to disable the periodic check entirely."
+        ),
+    )
 
     # GOP size
     gop_size: int = Field(
