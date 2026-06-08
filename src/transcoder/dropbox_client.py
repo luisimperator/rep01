@@ -199,8 +199,12 @@ class DropboxClient:
     Provides retry logic and error handling for common operations.
     """
 
-    CHUNK_SIZE = 4 * 1024 * 1024  # 4MB chunks for upload
-    DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024  # 8MB chunks for download
+    # 16MB upload session chunks. Dropbox allows up to 150MB per
+    # files_upload_session_append_v2 call; 4MB was needlessly small and made
+    # multi-GB transcoded outputs do 4x the HTTP round-trips. 16MB keeps the
+    # per-chunk retry cost modest on a flaky link while cutting round-trips.
+    CHUNK_SIZE = 16 * 1024 * 1024  # 16MB chunks for upload
+    DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024  # 8MB chunks for download (stream read buffer)
 
     def __init__(
         self,

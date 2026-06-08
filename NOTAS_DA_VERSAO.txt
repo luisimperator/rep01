@@ -2,11 +2,11 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
-Versão: 6.8.10
+Versão: 7.0.0
 Data: 08/06/2026
 --------------------------------------------------------------------------------
 
-Sticky folder desligado por padrão — usa todos os download workers
+Throughput pass — remove gargalos do pipeline
 
   [CHANGE] dispatcher.sticky_folder_enabled mudou de True para False.
            Antes o dispatcher travava numa pasta e só baixava dela até
@@ -16,6 +16,24 @@ Sticky folder desligado por padrão — usa todos os download workers
            Agora usa folder-priority interleaving: sempre puxa de qualquer
            pasta e mantém todos os download workers ocupados.
            O reorganize continua funcionando pasta-por-pasta normalmente.
+
+  [PERF] novo índice composto idx_jobs_state_created (state, created_at).
+         A query de dispatch (WHERE state IN (...) ORDER BY created_at)
+         roda a cada ~2s; sem o índice composto o SQLite filtrava por
+         state e fazia um filesort em created_at toda vez. Agora resolve
+         tudo num passo só. Criado automaticamente no startup (IF NOT
+         EXISTS) — vale também pros bancos de produção já existentes.
+
+  [PERF] chunk de upload subiu de 4 MB para 16 MB. Saídas transcodadas
+         de vários GB faziam 4x mais round-trips HTTP que o necessário.
+         16 MB corta os round-trips mantendo o custo de retry por chunk
+         baixo numa conexão instável.
+
+  [REVIEW] convoy throttle e disk_budget foram auditados e mantidos: o
+           convoy só atua quando a fila de transcode está vazia (alimenta
+           a GPU mais rápido, ajuda o throughput ponta-a-ponta) e o
+           disk_budget libera o lock antes de dormir (não serializa os
+           workers). Nenhum dos dois é gargalo real.
 
 --------------------------------------------------------------------------------
 

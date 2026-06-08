@@ -6,5 +6,5 @@ transcodes H.264 to H.265 (HEVC) using FFmpeg with hardware acceleration support
 and uploads the result back to Dropbox.
 """
 
-__version__ = "6.8.10"
+__version__ = "7.0.0"
 __author__ = "Dropbox Video Transcoder Team"
