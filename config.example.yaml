@@ -190,6 +190,12 @@ audio:
 # download to detect natively-encoded H.265 files via ffprobe. When detected,
 # the full download is skipped and the job is marked SKIPPED_HEVC. 0 disables.
 preflight_hevc_probe_mb: 16
+# During a download, re-check the Dropbox rev every N MB to fast-fail if the
+# source is overwritten mid-transfer. The post-download rev check already
+# guarantees correctness, so this is bandwidth-saving only. 2048 keeps the
+# fast-fail while avoiding the hundreds of synchronous metadata calls the old
+# 100 MB cadence made per multi-GB file. 0 disables the periodic check.
+download_rev_check_interval_mb: 2048
 allow_delete_original: false
 delete_original_delay_hours: 168
 allow_mkv_fallback: false

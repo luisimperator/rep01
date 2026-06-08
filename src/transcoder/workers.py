@@ -311,6 +311,7 @@ class DownloadWorker(BaseWorker):
                 partial_path,
                 expected_rev=job.dropbox_rev,
                 progress_callback=self._make_progress_callback(job),
+                check_interval_mb=self.config.download_rev_check_interval_mb,
             )
 
             # Final rev check before committing

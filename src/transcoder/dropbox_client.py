@@ -645,7 +645,7 @@ class DropboxClient:
         local_path: Path,
         expected_rev: str,
         progress_callback: Callable[[int, int], None] | None = None,
-        check_interval_mb: int = 100,
+        check_interval_mb: int = 2048,
     ) -> str:
         """
         Download file with periodic revision checks and resume support.
@@ -659,7 +659,13 @@ class DropboxClient:
             local_path: Destination local path.
             expected_rev: Expected file revision.
             progress_callback: Optional callback(bytes_downloaded, total_bytes).
-            check_interval_mb: Check rev every N megabytes downloaded.
+            check_interval_mb: Re-check the source rev every N megabytes as a
+                fast-fail against a mid-download overwrite. Correctness does not
+                depend on it — the caller's post-download rev check catches a
+                changed file regardless — so this is a bandwidth optimization
+                only. 0 disables the periodic check (the final rev/size checks
+                still run). Keep it large (GBs) so multi-GB downloads don't fire
+                a synchronous metadata call every few seconds.
 
         Returns:
             The file revision.
@@ -742,8 +748,12 @@ class DropboxClient:
                             progress_callback(bytes_downloaded, total_size)
                         GOVERNOR.consume(len(chunk))
 
-                        # Periodic rev check
-                        if bytes_downloaded - last_check_bytes >= check_interval:
+                        # Periodic rev check (fast-fail on a mid-download
+                        # overwrite). check_interval <= 0 disables it entirely;
+                        # the final rev/size checks after the loop still guard
+                        # correctness either way.
+                        if check_interval > 0 and \
+                                bytes_downloaded - last_check_bytes >= check_interval:
                             current_metadata = self._dbx.files_get_metadata(norm_path)
                             if isinstance(current_metadata, FileMetadata):
                                 if current_metadata.rev != expected_rev:
