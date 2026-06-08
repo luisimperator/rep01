@@ -644,10 +644,11 @@ class DropboxClient:
         check_interval_mb: int = 100,
     ) -> str:
         """
-        Download file with periodic revision checks.
+        Download file with periodic revision checks and resume support.
 
-        Checks the file revision periodically during download to detect
-        changes early.
+        Uses a temporary CDN link with HTTP Range headers so an interrupted
+        download resumes from the last byte written instead of restarting
+        from zero.
 
         Args:
             dropbox_path: Source path in Dropbox.
@@ -662,6 +663,8 @@ class DropboxClient:
         Raises:
             DropboxRevChangedError: If rev changed during download.
         """
+        import requests
+
         norm_path = self._normalize_path(dropbox_path)
         check_interval = check_interval_mb * 1024 * 1024
         last_check_bytes = 0
@@ -683,12 +686,50 @@ class DropboxClient:
         total_size = metadata.size
         local_path.parent.mkdir(parents=True, exist_ok=True)
 
-        _, response = self._dbx.files_download(norm_path, rev=expected_rev)
+        # Resume: if a partial file exists, start from where it left off.
+        resume_offset = 0
+        if local_path.exists():
+            resume_offset = local_path.stat().st_size
+            if resume_offset >= total_size:
+                return expected_rev
+            if resume_offset > 0:
+                logger.info(
+                    f"Resuming download of {dropbox_path} from "
+                    f"{resume_offset / (1024*1024):.1f} MB "
+                    f"({resume_offset / total_size * 100:.1f}%)"
+                )
 
-        bytes_downloaded = 0
+        # Temp link supports Range headers; SDK files_download does not.
+        link_result = self._retry_operation(
+            lambda: self._dbx.files_get_temporary_link(norm_path),
+            f"get_temporary_link({dropbox_path})",
+        )
+        url = link_result.link
+
+        headers = {}
+        if resume_offset > 0:
+            headers['Range'] = f'bytes={resume_offset}-'
+
+        resp = requests.get(url, headers=headers, stream=True, timeout=120)
+        if resume_offset > 0 and resp.status_code not in (200, 206):
+            logger.warning(
+                f"Server returned {resp.status_code} on resume attempt; "
+                f"restarting from zero"
+            )
+            resume_offset = 0
+            resp.close()
+            resp = requests.get(url, stream=True, timeout=120)
+        if resp.status_code not in (200, 206):
+            resp.close()
+            raise DropboxClientError(
+                f"Download HTTP {resp.status_code} for {dropbox_path}"
+            )
+
+        bytes_downloaded = resume_offset
         try:
-            with open(local_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=self.DOWNLOAD_CHUNK_SIZE):
+            mode = 'ab' if resume_offset > 0 else 'wb'
+            with open(local_path, mode) as f:
+                for chunk in resp.iter_content(chunk_size=self.DOWNLOAD_CHUNK_SIZE):
                     if chunk:
                         f.write(chunk)
                         bytes_downloaded += len(chunk)
@@ -707,12 +748,13 @@ class DropboxClient:
                                         f"{bytes_downloaded / (1024*1024):.1f} MB"
                                     )
                             last_check_bytes = bytes_downloaded
+        finally:
+            resp.close()
 
-        except DropboxRevChangedError:
-            # Clean up partial download
-            if local_path.exists():
-                local_path.unlink()
-            raise
+        if bytes_downloaded < total_size:
+            raise DropboxClientError(
+                f"Incomplete download: got {bytes_downloaded} of {total_size} bytes"
+            )
 
         return expected_rev
 
