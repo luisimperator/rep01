@@ -2,6 +2,23 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 6.8.10
+Data: 08/06/2026
+--------------------------------------------------------------------------------
+
+Sticky folder desligado por padrão — usa todos os download workers
+
+  [CHANGE] dispatcher.sticky_folder_enabled mudou de True para False.
+           Antes o dispatcher travava numa pasta e só baixava dela até
+           esvaziar — se a pasta tinha menos arquivos que download_workers,
+           os workers extras ficavam ociosos esperando. Ex: pasta com 2
+           arquivos = só 2 downloads, mesmo com 4 workers configurados.
+           Agora usa folder-priority interleaving: sempre puxa de qualquer
+           pasta e mantém todos os download workers ocupados.
+           O reorganize continua funcionando pasta-por-pasta normalmente.
+
+--------------------------------------------------------------------------------
+
 Versão: 6.8.9
 Data: 08/06/2026
 --------------------------------------------------------------------------------
