@@ -285,16 +285,17 @@ class DispatcherSettings(BaseModel):
         ),
     )
     sticky_folder_enabled: bool = Field(
-        default=True,
+        default=False,
         description=(
             "When True, the dispatcher commits to draining one folder at a "
             "time: as long as any job from the 'sticky' folder is still in "
             "flight or dispatchable, no jobs from other folders are pulled "
             "into the download queue. Closes folders faster so the reorganize "
-            "cleanup batches fire and free up Dropbox quota sooner. Folder "
-            "priority (largest pending bytes first) still picks the next "
-            "sticky folder once the current one drains. Disable to fall back "
-            "to plain folder-priority interleaving."
+            "cleanup batches fire and free up Dropbox quota sooner — but it "
+            "bottlenecks download parallelism when the current folder has "
+            "fewer files than download_workers (idle workers wait for the "
+            "folder to drain). Default False: plain folder-priority "
+            "interleaving keeps every download worker busy across folders."
         ),
     )
 

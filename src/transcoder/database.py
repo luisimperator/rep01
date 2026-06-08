@@ -208,6 +208,11 @@ CREATE TABLE IF NOT EXISTS jobs (
 CREATE INDEX IF NOT EXISTS idx_jobs_state ON jobs(state);
 CREATE INDEX IF NOT EXISTS idx_jobs_path ON jobs(dropbox_path);
 CREATE INDEX IF NOT EXISTS idx_jobs_updated ON jobs(updated_at);
+-- Composite index for the hot dispatch query: get_dispatchable_jobs filters
+-- by state IN (...) and orders by created_at ASC every ~2s. Without
+-- (state, created_at) SQLite filters on idx_jobs_state then does a separate
+-- filesort on created_at each poll; this index serves both in one pass.
+CREATE INDEX IF NOT EXISTS idx_jobs_state_created ON jobs(state, created_at);
 
 -- One active row per dropbox_path: blocks duplicate queued/in-progress jobs
 -- when the same file is rediscovered between scans.
