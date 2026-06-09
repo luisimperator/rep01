@@ -176,7 +176,7 @@ if (-not (Test-Path $FFmpegExe) -or -not (Test-Path $FFprobeExe)) {
     }
     Copy-Item $srcFf.FullName $FFmpegExe  -Force
     Copy-Item $srcFp.FullName $FFprobeExe -Force
-    # Temp cleanup is best-effort — never let it abort the install (e.g. a
+    # Temp cleanup is best-effort - never let it abort the install (e.g. a
     # user folder with a space like "Heavy 5" trips Remove-Item's path parse).
     Remove-Item -Recurse -Force $expand -ErrorAction SilentlyContinue
     Remove-Item -Force $zip -ErrorAction SilentlyContinue
