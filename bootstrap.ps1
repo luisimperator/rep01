@@ -60,6 +60,30 @@ function Info([string]$msg)  { Write-Host "[bootstrap] $msg" -ForegroundColor Cy
 function Warn([string]$msg)  { Write-Host "[bootstrap] $msg" -ForegroundColor Yellow }
 function Die([string]$msg)   { Write-Host "[bootstrap] $msg" -ForegroundColor Red; exit 1 }
 
+# --- Put scratch/data on the largest fixed drive --------------------------
+# The transcoder stages multi-GB downloads on disk. On editors' machines the
+# system drive (C:) is small/often full, so move the data dir (staging, output,
+# DB, logs) to the LARGEST non-system fixed drive (e.g. the 2 TB D:). The code
+# and venv stay small under the profile. Falls back to the profile if anything
+# goes wrong. The disk_budget min-free guard still protects the editors' space.
+try {
+    $biggest = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop |
+               Sort-Object Size -Descending | Select-Object -First 1
+    if ($biggest -and $biggest.DeviceID -and $biggest.DeviceID -ne $env:SystemDrive) {
+        $candidate = Join-Path ($biggest.DeviceID + '\') 'HeavyDrops-data'
+        New-Item -ItemType Directory -Force -Path $candidate -ErrorAction Stop | Out-Null
+        $DataDir  = $candidate
+        $LogDir   = Join-Path $DataDir 'logs'
+        $StageDir = Join-Path $DataDir 'staging'
+        Info ("Scratch/data on largest drive {0} ({1} GB): {2}" -f `
+              $biggest.DeviceID, [math]::Round($biggest.Size / 1GB), $DataDir)
+    } else {
+        Info "Largest drive is the system drive; keeping data under the profile."
+    }
+} catch {
+    Warn "Could not place data on the largest drive; using $DataDir"
+}
+
 # --- 1. Prerequisites -----------------------------------------------------
 
 function Ensure-Tool([string]$exe, [string]$wingetId, [string]$label) {
