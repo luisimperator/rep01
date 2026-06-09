@@ -11,6 +11,15 @@
 #
 #   $env:HD_WORKER=1; iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
 #
+# To also bake in the Dropbox credentials so you don't retype them on every
+# machine, set them too — they go into the command you paste, NEVER into the
+# repo. Use the durable refresh-token trio (copy the three values from a working
+# machine's config.yaml, e.g. HEAVY7); a plain access token expires in ~4h:
+#
+#   $env:HD_WORKER=1
+#   $env:HD_DROPBOX_APP_KEY='...'; $env:HD_DROPBOX_APP_SECRET='...'; $env:HD_DROPBOX_REFRESH_TOKEN='...'
+#   iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
+#
 # What it does:
 #   1. Ensures Git and Python 3.12 are installed (via winget, user scope).
 #   2. Clones this repo to %USERPROFILE%\HeavyDrops (or updates if it already exists).
@@ -142,7 +151,15 @@ if (-not (Test-Path $ExampleConfig)) {
 
 if (-not (Test-Path $ConfigPath)) {
     Info "Writing config.yaml..."
-    $token = Read-Host 'Paste your Dropbox access token (leave blank to set later)'
+    if ($env:HD_DROPBOX_TOKEN) {
+        $token = $env:HD_DROPBOX_TOKEN
+        Info "Using Dropbox access token from HD_DROPBOX_TOKEN."
+    } elseif ($env:HD_DROPBOX_REFRESH_TOKEN) {
+        $token = ''   # durable refresh-token auth set below; no short-lived token needed
+        Info "Using Dropbox refresh-token credentials from HD_DROPBOX_* env vars."
+    } else {
+        $token = Read-Host 'Paste your Dropbox access token (leave blank to set later)'
+    }
     $raw = Get-Content -Raw -LiteralPath $ExampleConfig
 
     # User-scoped paths
@@ -155,6 +172,17 @@ if (-not (Test-Path $ConfigPath)) {
     $raw = $raw -replace 'ffprobe_path: .*',      ('ffprobe_path: "'      + $FFprobeExe.Replace('\','/') + '"')
     if ($token) {
         $raw = $raw -replace 'dropbox_token: .*', ("dropbox_token: `"$token`"")
+    }
+    # Durable refresh-token auth (recommended — short-lived tokens die in ~4h).
+    # Copy these three values from a working machine's config.yaml (e.g. HEAVY7).
+    if ($env:HD_DROPBOX_APP_KEY) {
+        $raw = $raw -replace 'dropbox_app_key: .*', ("dropbox_app_key: `"$($env:HD_DROPBOX_APP_KEY)`"")
+    }
+    if ($env:HD_DROPBOX_APP_SECRET) {
+        $raw = $raw -replace 'dropbox_app_secret: .*', ("dropbox_app_secret: `"$($env:HD_DROPBOX_APP_SECRET)`"")
+    }
+    if ($env:HD_DROPBOX_REFRESH_TOKEN) {
+        $raw = $raw -replace 'dropbox_refresh_token: .*', ("dropbox_refresh_token: `"$($env:HD_DROPBOX_REFRESH_TOKEN)`"")
     }
 
     Set-Content -LiteralPath $ConfigPath -Value $raw -Encoding UTF8

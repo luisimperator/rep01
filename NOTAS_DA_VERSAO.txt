@@ -2,6 +2,26 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 7.6.2
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Credenciais do Dropbox por variável de ambiente (não repetir em 6 PCs)
+
+  [FEATURE] O bootstrap.ps1 agora lê as credenciais do Dropbox de variáveis de
+            ambiente, pra instalar a frota sem digitar o token em cada máquina:
+              - HD_DROPBOX_APP_KEY / HD_DROPBOX_APP_SECRET /
+                HD_DROPBOX_REFRESH_TOKEN  → auth durável (recomendado; o token
+                simples expira em ~4h e a daemon morre)
+              - HD_DROPBOX_TOKEN  → token de acesso legado (curta duração)
+            As credenciais vão no COMANDO que você cola (mesma linha nos 6 PCs)
+            e são gravadas só no config.yaml LOCAL — NUNCA no repositório.
+            Copie os 3 valores do config.yaml de uma máquina que já funciona
+            (ex.: HEAVY7). Se nenhuma env var estiver setada, ele pergunta como
+            antes.
+
+--------------------------------------------------------------------------------
+
 Versão: 7.6.1
 Data: 09/06/2026
 --------------------------------------------------------------------------------
