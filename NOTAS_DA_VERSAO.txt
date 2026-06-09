@@ -2,6 +2,19 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versao: 7.6.3
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Fix: bootstrap.ps1 quebrava no Windows PowerShell (travessao)
+
+  [FIX] O bootstrap.ps1 usava travessoes (em-dash) nas mensagens. O Windows
+        PowerShell le .ps1 como Windows-1252 (sem BOM), entao o em-dash virava
+        bytes com aspas no meio e quebrava a string ("missing terminator").
+        Agora o script e ASCII puro - instala sem erro de parse.
+
+--------------------------------------------------------------------------------
+
 Versão: 7.6.2
 Data: 09/06/2026
 --------------------------------------------------------------------------------
