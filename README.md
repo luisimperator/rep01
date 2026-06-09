@@ -26,6 +26,16 @@ $env:HD_WORKER=1; iwr https://raw.githubusercontent.com/luisimperator/rep01/main
 
 Same one command — it just applies the production profile (`installer/apply_worker_profile.py`) on top of the normal install. Point every machine at the **same Dropbox account/folder and claims folder**, and roll out on one machine first. Everything is adjustable afterwards from the dashboard's **Settings → Fleet** section — no files to edit.
 
+To avoid retyping the Dropbox credentials on each of the 6 machines, bake them into the command (they go into the pasted command, **never into the repo**). Use the durable refresh-token trio — copy `dropbox_app_key`, `dropbox_app_secret`, and `dropbox_refresh_token` from a working machine's `config.yaml` (e.g. HEAVY7); a plain access token expires in ~4 h:
+
+```powershell
+$env:HD_WORKER=1
+$env:HD_DROPBOX_APP_KEY='...'; $env:HD_DROPBOX_APP_SECRET='...'; $env:HD_DROPBOX_REFRESH_TOKEN='...'
+iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
+```
+
+The bootstrap also reads `HD_DROPBOX_TOKEN` for the legacy short-lived token. Credentials are written only to the machine's local `config.yaml`, never committed.
+
 To apply a new release later:
 
 ```powershell
