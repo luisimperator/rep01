@@ -165,7 +165,7 @@ if (-not (Test-Path $FFmpegExe) -or -not (Test-Path $FFprobeExe)) {
     Info "Downloading FFmpeg..."
     $zip = Join-Path $env:TEMP 'hd-ffmpeg.zip'
     $expand = Join-Path $env:TEMP 'hd-ffmpeg-unpack'
-    if (Test-Path $expand) { Remove-Item -Recurse -Force $expand -ErrorAction SilentlyContinue }
+    if (Test-Path -LiteralPath $expand) { try { Remove-Item -LiteralPath $expand -Recurse -Force } catch {} }
     Invoke-WebRequest -Uri $FFmpegUrl -OutFile $zip -UseBasicParsing
     Expand-Archive -Path $zip -DestinationPath $expand -Force
 
@@ -176,10 +176,12 @@ if (-not (Test-Path $FFmpegExe) -or -not (Test-Path $FFprobeExe)) {
     }
     Copy-Item $srcFf.FullName $FFmpegExe  -Force
     Copy-Item $srcFp.FullName $FFprobeExe -Force
-    # Temp cleanup is best-effort - never let it abort the install (e.g. a
-    # user folder with a space like "Heavy 5" trips Remove-Item's path parse).
-    Remove-Item -Recurse -Force $expand -ErrorAction SilentlyContinue
-    Remove-Item -Force $zip -ErrorAction SilentlyContinue
+    # Temp cleanup is best-effort. A user folder with a space
+    # (C:\Users\Heavy 5 -> 8.3 HEAVY5~1) makes Remove-Item throw a TERMINATING
+    # ArgumentException that -ErrorAction can't swallow, so wrap in try/catch
+    # and use -LiteralPath. Never let temp cleanup abort the install.
+    try { Remove-Item -LiteralPath $expand -Recurse -Force } catch {}
+    try { Remove-Item -LiteralPath $zip -Force } catch {}
     Info "FFmpeg installed at $BinDir."
 }
 
@@ -266,7 +268,7 @@ $TaskXmlTmp = Join-Path $env:TEMP "hd-task-$PID.xml"
 
 Info "Registering scheduled task '$TaskName'..."
 schtasks /Create /TN $TaskName /XML $TaskXmlTmp /F | Out-Null
-Remove-Item -Force $TaskXmlTmp
+try { Remove-Item -LiteralPath $TaskXmlTmp -Force } catch {}
 
 Info "Starting daemon via Task Scheduler..."
 schtasks /Run /TN $TaskName | Out-Null
