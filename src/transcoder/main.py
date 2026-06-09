@@ -166,6 +166,7 @@ class Daemon:
         self.dispatcher: JobDispatcher | None = None
         self.rate_limiter: TokenBucket | None = None
         self.disk_budget: DiskBudget | None = None
+        self.claims = None  # ClaimStore | None, set in setup() when coordination on
         self.api_server: ApiServer | None = None
         self.census_worker: CensusWorker | None = None
         self.deep_scan: DeepScanWorker | None = None
@@ -444,6 +445,37 @@ class Daemon:
             f"(interval={self.config.incidents.health_check_interval_minutes}min)"
         )
 
+        # Cross-machine claim coordination — only when several machines share
+        # one Dropbox pool. Built before the download workers so they can
+        # consult it; the reconciler heartbeats/releases claims out of band.
+        coord = self.config.coordination
+        if coord.enabled:
+            import socket as _socket
+            from .claims import ClaimStore, ClaimReconciler
+            pc = (coord.pc_name or "").strip() or _socket.gethostname()
+            self.claims = ClaimStore(
+                self.dropbox,
+                folder=coord.claims_folder,
+                pc_name=pc,
+                ttl_minutes=coord.claim_ttl_minutes,
+            )
+            # Re-adopt claims for jobs already in flight after a restart.
+            try:
+                active = self.db.get_jobs_by_states(ACTIVE_STATES, limit=100_000)
+                self.claims.seed_held(j.dropbox_path for j in active)
+            except Exception:
+                logger.warning("claims: initial seed failed", exc_info=True)
+            reconciler = ClaimReconciler(
+                self.claims, self.db, ACTIVE_STATES, self.stop_event,
+                interval_sec=max(30, coord.heartbeat_minutes * 60),
+            )
+            reconciler.start()
+            self.workers.append(reconciler)
+            logger.info(
+                "claims: coordination ON as '%s' (folder=%s, ttl=%dm)",
+                pc, coord.claims_folder, coord.claim_ttl_minutes,
+            )
+
         # Download workers
         for i in range(self.config.concurrency.download_workers):
             worker = DownloadWorker(
@@ -455,6 +487,7 @@ class Daemon:
                 self.stop_event,
                 self.dispatcher,
                 disk_budget=self.disk_budget,
+                claims=self.claims,
             )
             worker.start()
             self.workers.append(worker)

@@ -8,10 +8,10 @@
 # the way. The dedicated 24/7 box (HEAVY7) keeps its normal config (none of
 # the settings below).
 #
-# NOTE: dividing the SAME Dropbox pool safely between machines needs the
-# cross-machine claim mechanism (separate work item). Until that ships, point
-# these machines at their OWN folders to avoid two machines grabbing the same
-# video.
+# Dividing the SAME Dropbox pool safely is handled by the coordination block
+# below (cross-machine claim): every machine — including the dedicated box —
+# must point at the same claims_folder so exactly one machine processes each
+# video. Roll it out on ONE machine first and watch the logs before the fleet.
 # =============================================================================
 
 # --- Use the NVIDIA GPU (these boxes have NVENC, not Intel QSV) ---------------
@@ -46,3 +46,14 @@ concurrency:
   download_workers: 1
   transcode_workers: 1
   upload_workers: 1
+
+# --- Share the work safely with HEAVY7 and the other machines -----------------
+# Every machine in the pool (including the dedicated box) must enable this and
+# use the SAME claims_folder. Keep claim_ttl_minutes above the time to
+# download+transcode your largest file so a slow job is never stolen mid-flight.
+coordination:
+  enabled: true
+  claims_folder: "/_h265_claims"
+  claim_ttl_minutes: 120
+  heartbeat_minutes: 10
+  pc_name: ""        # blank → uses the machine's hostname (Heavy1, Heavy2, ...)

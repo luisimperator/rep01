@@ -529,6 +529,48 @@ class AvailabilitySettings(BaseModel):
         return f"{int(hh):02d}:{int(mm):02d}"
 
 
+class CoordinationSettings(BaseModel):
+    """Cross-machine claim so several machines can divide ONE shared Dropbox
+    pool without two of them grabbing the same video.
+
+    Each machine has its own local DB, so coordination happens through Dropbox:
+    before a machine starts a file it atomically creates a tiny claim file in
+    `claims_folder`; if another machine already holds it, this one skips it. A
+    claim is heartbeated while the job is in flight and released when it's done;
+    a claim with no heartbeat for `claim_ttl_minutes` is considered abandoned
+    (machine crashed/powered off) and may be stolen so the work isn't lost.
+    Off by default — a single machine needs none of this.
+    """
+    enabled: bool = Field(
+        default=False,
+        description="Turn on cross-machine claiming. Required before pointing "
+                    "more than one machine at the same Dropbox folders."
+    )
+    claims_folder: str = Field(
+        default="/_h265_claims",
+        description="Dropbox folder holding the claim files (shared by all machines)."
+    )
+    claim_ttl_minutes: int = Field(
+        default=60,
+        ge=5,
+        le=1440,
+        description="A claim with no heartbeat for this long is abandoned and "
+                    "can be stolen. Keep well above the time to download+transcode "
+                    "your largest file so a slow job isn't stolen mid-flight."
+    )
+    heartbeat_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=240,
+        description="How often a machine refreshes the claims on its in-flight "
+                    "jobs. Must be comfortably smaller than claim_ttl_minutes."
+    )
+    pc_name: str = Field(
+        default="",
+        description="Machine id stamped on claims. Blank → the hostname."
+    )
+
+
 class Config(BaseModel):
     """Main configuration model."""
 
@@ -652,6 +694,9 @@ class Config(BaseModel):
 
     # Availability gating: night-window + machine-idle for shared machines.
     availability: AvailabilitySettings = Field(default_factory=AvailabilitySettings)
+
+    # Cross-machine claim so a shared Dropbox pool divides safely.
+    coordination: CoordinationSettings = Field(default_factory=CoordinationSettings)
 
     # Reduction-map census: daily Dropbox tree walk that classifies every
     # file (pending/done/ineligible) and powers the dashboard's colored

@@ -118,6 +118,15 @@ availability:
   pause_when_user_active: true
   idle_minutes: 10
   check_interval_sec: 60
+# Cross-machine claim: turn on when MORE THAN ONE machine shares the same
+# Dropbox folders, so exactly one machine processes each video. Off for a
+# single machine. All machines must point at the same claims_folder.
+coordination:
+  enabled: false
+  claims_folder: "/_h265_claims"
+  claim_ttl_minutes: 60
+  heartbeat_minutes: 10
+  pc_name: ""
 dropbox_api:
   rate_per_min: 600
   burst: 50

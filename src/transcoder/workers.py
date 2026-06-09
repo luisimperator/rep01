@@ -38,6 +38,7 @@ from .utils import (
 
 if TYPE_CHECKING:
     from .config import Config
+    from .claims import ClaimStore
 
 logger = logging.getLogger(__name__)
 
@@ -122,11 +123,13 @@ class DownloadWorker(BaseWorker):
         stop_event: threading.Event,
         dispatcher: JobDispatcher,
         disk_budget: DiskBudget | None = None,
+        claims: "ClaimStore | None" = None,
     ):
         super().__init__(f"downloader-{worker_id}", config, db, stop_event, dispatcher)
         self.dropbox = dropbox
         self.scanner = scanner
         self.disk_budget = disk_budget
+        self.claims = claims
 
     def process_job(self, job: Job) -> None:
         """Download the file for the given job."""
@@ -143,6 +146,20 @@ class DownloadWorker(BaseWorker):
             self.db.update_job_state(
                 job.id, JobState.SKIPPED_EXCLUDED,
                 error_message="path under /assets/ — project resources never transcoded",
+            )
+            return
+
+        # Cross-machine claim: when several machines share one Dropbox pool,
+        # ensure exactly one of them works this file. Losing the claim means
+        # another machine already owns it — skip without wasting bandwidth.
+        if self.claims is not None and not self.claims.try_claim(job.dropbox_path):
+            logger.info(
+                f"[{self.name}] Skipping (claimed by another machine): "
+                f"{job.dropbox_path}"
+            )
+            self.db.update_job_state(
+                job.id, JobState.SKIPPED_EXCLUDED,
+                error_message="claimed by another machine (coordination)",
             )
             return
 

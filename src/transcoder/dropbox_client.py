@@ -1091,6 +1091,33 @@ class DropboxClient:
 
         return self._retry_operation(operation, f"write_text({path})")
 
+    def claim_create(self, path: str, content: str, encoding: str = "utf-8") -> bool:
+        """Atomically create a file, failing (returning False) if it exists.
+
+        Dropbox has no native "create exclusive", but `add` mode auto-renames
+        on conflict instead of overwriting. So we upload in `add` mode and check
+        where it landed: if it's our exact path we won the race; if Dropbox
+        renamed it to '<path> (1)' someone else already holds it — we delete our
+        duplicate and report False. This is the atomic arbiter behind the
+        cross-machine claim coordination.
+        """
+        norm_path = self._normalize_path(path)
+        data = content.encode(encoding)
+
+        def operation() -> bool:
+            meta = self._dbx.files_upload(data, norm_path, mode=WriteMode.add)
+            actual = (getattr(meta, "path_lower", None) or "")
+            if actual == norm_path.lower():
+                return True
+            # Lost the race: Dropbox renamed our upload. Remove the duplicate.
+            try:
+                self._dbx.files_delete_v2(actual)
+            except Exception:
+                logger.warning("claim_create: could not delete duplicate %s", actual)
+            return False
+
+        return self._retry_operation(operation, f"claim_create({path})")
+
     def compute_content_hash(self, local_path: Path) -> str:
         """
         Compute Dropbox content hash for local file.

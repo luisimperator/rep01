@@ -2,6 +2,46 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 7.5.0
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Divisão dinâmica do Dropbox: várias máquinas, mesmo monte, sem duplicar
+
+  [FEATURE] Novo módulo claims.py + seção coordination no config. Permite
+            várias máquinas dividirem O MESMO Dropbox sem duas pegarem o
+            mesmo vídeo. Cada máquina tem banco local, então a coordenação é
+            via Dropbox: antes de começar um arquivo, a máquina cria de forma
+            ATÔMICA um arquivo de "reserva" em claims_folder (/_h265_claims).
+            A atomicidade vem do DropboxClient.claim_create — upload em modo
+            'add', que renomeia em conflito em vez de sobrescrever: se caiu no
+            caminho exato, ganhou; se o Dropbox renomeou, perdeu (apaga a
+            cópia e pula o arquivo). Quem perde marca o job como
+            SKIPPED_EXCLUDED ("claimed by another machine") sem gastar banda.
+
+  [FEATURE] Ciclo de vida desacoplado: o ClaimReconciler (thread) renova
+            (heartbeat) as reservas dos jobs em andamento e LIBERA as dos
+            jobs que terminaram. Reserva sem heartbeat por claim_ttl_minutes
+            (default 60, perfil de produção 120) é considerada abandonada
+            (máquina caiu/desligou) e pode ser ROUBADA por outra — trabalho
+            nunca fica preso. No restart, a máquina re-adota as reservas dos
+            jobs que já estavam em andamento (seed_held).
+
+  [INTEGRATION] DownloadWorker ganha o portão de reserva antes do download;
+                main.py monta o ClaimStore + reconciler quando
+                coordination.enabled. Desligado por padrão (1 máquina não
+                precisa). config.editor-machine.example.yaml já vem com
+                coordination ligado pras Heavy1-6. RECOMENDADO: ligar em UMA
+                máquina primeiro e observar os logs antes de soltar na frota.
+
+  [LIMIT] Conhecido (aceitável v1): após uma queda maior que o TTL, a máquina
+          pode achar que ainda tem uma reserva que já foi roubada, e o mesmo
+          arquivo rodar duas vezes. As checagens de saída/rev pós-processo
+          deduplicam esse caso raro; mantenha o TTL acima do tempo de
+          baixar+transcodar seu maior arquivo.
+
+--------------------------------------------------------------------------------
+
 Versão: 7.4.0
 Data: 09/06/2026
 --------------------------------------------------------------------------------
