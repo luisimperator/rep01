@@ -22,11 +22,12 @@ Modo máquina de produção: encoda de madrugada, sem atrapalhar editor
             padrão — a HEAVY7 dedicada continua 24/7.
 
   [DOC] Novo config.editor-machine.example.yaml: perfil pronto pras Heavy1-6
-        — NVENC (encoder_preference: nvenc), teto de disco baixo (disk_budget
-        com max_staging_bytes ~100 GB e min_free_bytes ~1.5 TB pra preservar o
-        D: dos editores) e concorrência 1/1/1. É só sobrepor no config.yaml da
-        máquina. (A divisão SEGURA do mesmo Dropbox entre máquinas é um item
-        à parte — até lá, aponte cada máquina pras próprias pastas.)
+        — NVENC (encoder_preference: nvenc), dois tetos BAIXOS de disco
+        (max_staging_bytes ~100 GB de rascunho + min_free_bytes ~100 GB de
+        margem: se o disco já tá apertado, o encoder nem começa) e concorrência
+        1/1/1. É só sobrepor no config.yaml da máquina. (A divisão SEGURA do
+        mesmo Dropbox entre máquinas é um item à parte — até lá, aponte cada
+        máquina pras próprias pastas.)
 
 --------------------------------------------------------------------------------
 
