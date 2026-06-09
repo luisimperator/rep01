@@ -1,0 +1,42 @@
+# =============================================================================
+# Editor-machine profile (Heavy1-6) — overlay these settings on top of your
+# normal config.yaml on each production machine.
+#
+# Goal: chip in on the transcode pool OVERNIGHT WHILE IDLE, on the NVIDIA GPU,
+# using almost no disk — never disrupting an editor. It is fine for these
+# machines to be slower than the dedicated box; the priority is staying out of
+# the way. The dedicated 24/7 box (HEAVY7) keeps its normal config (none of
+# the settings below).
+#
+# NOTE: dividing the SAME Dropbox pool safely between machines needs the
+# cross-machine claim mechanism (separate work item). Until that ships, point
+# these machines at their OWN folders to avoid two machines grabbing the same
+# video.
+# =============================================================================
+
+# --- Use the NVIDIA GPU (these boxes have NVENC, not Intel QSV) ---------------
+encoder_preference: nvenc
+
+# --- Only work at night, and yield the instant an editor touches the machine -
+availability:
+  enabled: true
+  night_start: "20:00"     # start of the safe window (local time)
+  night_end: "07:00"       # stop before the editors arrive
+  pause_when_user_active: true
+  idle_minutes: 10         # no keyboard/mouse for 10 min before it starts
+  check_interval_sec: 60
+
+# --- Tread lightly on the disk (D: is the editors' 2 TB working drive) --------
+# max_staging_bytes caps total scratch space the encoder may use at once;
+# min_free_bytes guarantees this much stays free for the editors no matter what.
+disk_budget:
+  enabled: true
+  max_staging_bytes: 100000000000     # ~100 GB scratch ceiling
+  min_free_bytes:   1500000000000     # keep ~1.5 TB of the 2 TB free for editors
+  poll_interval_sec: 30
+
+# --- Low concurrency so only a file or two sits on disk at a time -------------
+concurrency:
+  download_workers: 1
+  transcode_workers: 1
+  upload_workers: 1

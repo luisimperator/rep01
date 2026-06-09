@@ -2,6 +2,34 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 7.4.0
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Modo máquina de produção: encoda de madrugada, sem atrapalhar editor
+
+  [FEATURE] Novo módulo availability.py + seção availability no config. Pra
+            rodar nas máquinas dos editores (Heavy1-6) sem incomodar: com
+            availability.enabled, o pipeline só trabalha dentro de uma janela
+            noturna (night_start/night_end, ex.: 20h-7h) E só quando ninguém
+            mexe no teclado/mouse (pause_when_user_active + idle_minutes). No
+            instante que alguém senta na máquina ou amanhece, ele pausa o
+            dispatcher e MATA o ffmpeg em andamento pra devolver a GPU na
+            hora. Volta sozinho quando é seguro. Só desfaz uma pausa que ele
+            mesmo deu — pause manual pelo dashboard (/api/pause) nunca é
+            atropelado. Detecção de ocioso é via GetLastInputInfo (Windows);
+            onde não dá pra saber, não bloqueia por ocioso. Desligado por
+            padrão — a HEAVY7 dedicada continua 24/7.
+
+  [DOC] Novo config.editor-machine.example.yaml: perfil pronto pras Heavy1-6
+        — NVENC (encoder_preference: nvenc), teto de disco baixo (disk_budget
+        com max_staging_bytes ~100 GB e min_free_bytes ~1.5 TB pra preservar o
+        D: dos editores) e concorrência 1/1/1. É só sobrepor no config.yaml da
+        máquina. (A divisão SEGURA do mesmo Dropbox entre máquinas é um item
+        à parte — até lá, aponte cada máquina pras próprias pastas.)
+
+--------------------------------------------------------------------------------
+
 Versão: 7.3.0
 Data: 09/06/2026
 --------------------------------------------------------------------------------

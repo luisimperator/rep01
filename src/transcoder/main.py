@@ -524,6 +524,18 @@ class Daemon:
             dispatcher=self.dispatcher,
         )
 
+        # Availability gating: on the editors' machines this keeps the
+        # pipeline asleep (and the GPU free) outside the night window or while
+        # someone is at the keyboard. Off by default → dedicated box runs 24/7.
+        if self.config.availability.enabled:
+            from .availability import AvailabilityWorker
+            from .api import _kill_all_ffmpeg
+            avail = AvailabilityWorker(
+                self.config, self.dispatcher, self.stop_event, _kill_all_ffmpeg,
+            )
+            avail.start()
+            self.workers.append(avail)
+
         # Remote health telemetry: publish a status snapshot to GitHub on a
         # timer so the daemon can be watched without copying logs by hand.
         # Reuses the incidents token (or GITHUB_TOKEN) when none is set here.

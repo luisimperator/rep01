@@ -483,6 +483,52 @@ class TelemetrySettings(BaseModel):
     )
 
 
+class AvailabilitySettings(BaseModel):
+    """Only let a shared/production machine encode at night while idle.
+
+    Off by default → the dedicated box runs 24/7. On the editors' machines,
+    turn it on so the pipeline pauses (and frees the GPU) outside the night
+    window or the moment someone uses the machine.
+    """
+    enabled: bool = Field(
+        default=False,
+        description="Gate encoding to a night window and/or machine-idle. Off = 24/7."
+    )
+    night_start: str = Field(
+        default="20:00",
+        description="Start of the work window, local 'HH:MM' (overnight allowed)."
+    )
+    night_end: str = Field(
+        default="07:00",
+        description="End of the work window, local 'HH:MM'."
+    )
+    pause_when_user_active: bool = Field(
+        default=True,
+        description="Pause immediately if someone is using the keyboard/mouse "
+                    "(Windows). Yields the GPU back to the editor."
+    )
+    idle_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=240,
+        description="Minutes with no input before the machine counts as idle."
+    )
+    check_interval_sec: int = Field(
+        default=60,
+        ge=5,
+        le=600,
+        description="How often to re-evaluate the night/idle gate."
+    )
+
+    @field_validator("night_start", "night_end")
+    @classmethod
+    def _valid_hhmm(cls, v: str) -> str:
+        hh, mm = v.strip().split(":")
+        if not (0 <= int(hh) <= 23 and 0 <= int(mm) <= 59):
+            raise ValueError(f"time out of range: {v!r}")
+        return f"{int(hh):02d}:{int(mm):02d}"
+
+
 class Config(BaseModel):
     """Main configuration model."""
 
@@ -603,6 +649,9 @@ class Config(BaseModel):
 
     # Remote health telemetry: periodic status snapshot pushed to GitHub.
     telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
+
+    # Availability gating: night-window + machine-idle for shared machines.
+    availability: AvailabilitySettings = Field(default_factory=AvailabilitySettings)
 
     # Reduction-map census: daily Dropbox tree walk that classifies every
     # file (pending/done/ineligible) and powers the dashboard's colored

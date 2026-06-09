@@ -108,6 +108,16 @@ telemetry:
   branch: telemetry
   interval_minutes: 30
   log_tail_lines: 120
+# Availability gating: only encode at night while the machine is idle. Off by
+# default (dedicated box runs 24/7). Turn on for shared/editor machines — see
+# config.editor-machine.example.yaml for the full production-machine profile.
+availability:
+  enabled: false
+  night_start: "20:00"
+  night_end: "07:00"
+  pause_when_user_active: true
+  idle_minutes: 10
+  check_interval_sec: 60
 dropbox_api:
   rate_per_min: 600
   burst: 50
