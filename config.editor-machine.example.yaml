@@ -29,7 +29,7 @@ availability:
 # --- Tread lightly on the disk (D: is the editors' 2 TB working drive) --------
 # Both knobs are SMALL on purpose:
 #   max_staging_bytes — hard ceiling on scratch the encoder uses at once. With
-#     1 download + 1 transcode of 20-47 GB files, ~100 GB holds a file or two.
+#     1 download + 1 transcode of 20-47 GB files, ~150 GB holds a few in flight.
 #   min_free_bytes — safety margin. If the drive already has less than this
 #     free (editors filled it up), the encoder simply doesn't start — it steps
 #     aside instead of pushing the disk toward full. This is NOT reserved
@@ -37,7 +37,7 @@ availability:
 #     headroom you want to guarantee the editors (e.g. 80-150 GB).
 disk_budget:
   enabled: true
-  max_staging_bytes: 100000000000     # ~100 GB scratch ceiling
+  max_staging_bytes: 150000000000     # ~150 GB scratch ceiling
   min_free_bytes:    100000000000     # back off if under ~100 GB free
   poll_interval_sec: 30
 
