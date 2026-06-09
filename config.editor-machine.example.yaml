@@ -20,8 +20,8 @@ encoder_preference: nvenc
 # --- Only work at night, and yield the instant an editor touches the machine -
 availability:
   enabled: true
-  night_start: "20:00"     # start of the safe window (local time)
-  night_end: "07:00"       # stop before the editors arrive
+  night_start: "18:00"     # start of the safe window (local time)
+  night_end: "09:00"       # stop before the editors arrive
   pause_when_user_active: true
   idle_minutes: 10         # no keyboard/mouse for 10 min before it starts
   check_interval_sec: 60
