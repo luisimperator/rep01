@@ -2,6 +2,27 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 7.3.0
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Telemetria remota: publica um snapshot de saúde no GitHub
+
+  [FEATURE] Novo módulo telemetry.py + seção telemetry no config. Com
+            telemetry.enabled, um StatusPublisher sobe a cada N minutos
+            (default 30) um arquivo Markdown pro GitHub — telemetry/<pc>-
+            status.md, no branch 'telemetry' (criado sozinho, fora do main)
+            — com tail do transcoder.log, contagem de jobs por estado,
+            espaço em disco e qualquer conteúdo NOVO do crash.log. Assim dá
+            pra acompanhar a daemon de longe (ex.: revisão a cada 6h) sem
+            ninguém copiar log na mão. Reaproveita o token do incidents (ou
+            GITHUB_TOKEN) — normalmente não precisa configurar token novo.
+            Desligado por padrão; falhas de rede só logam e tentam de novo no
+            próximo ciclo (telemetria nunca derruba a daemon); o token nunca
+            é logado nem publicado.
+
+--------------------------------------------------------------------------------
+
 Versão: 7.2.0
 Data: 08/06/2026
 --------------------------------------------------------------------------------

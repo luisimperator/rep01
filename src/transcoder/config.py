@@ -447,6 +447,42 @@ class IncidentsSettings(BaseModel):
     )
 
 
+class TelemetrySettings(BaseModel):
+    """Publish a periodic health snapshot to GitHub for remote monitoring."""
+    enabled: bool = Field(
+        default=False,
+        description="Push a redacted status snapshot (log tail, job counts, disk, "
+                    "crashes) to GitHub on a timer so it can be watched remotely."
+    )
+    github_repo: str = Field(
+        default="luisimperator/rep01",
+        description="Target repo, in 'owner/name' form."
+    )
+    github_token: str = Field(
+        default="",
+        description="GitHub PAT with contents:write on the repo. If blank, the "
+                    "incidents.github_token (or GITHUB_TOKEN env) is reused."
+    )
+    branch: str = Field(
+        default="telemetry",
+        description="Branch the snapshot file is written to (kept off main). "
+                    "Auto-created from the default branch on first publish."
+    )
+    interval_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=1440,
+        description="How often to publish a fresh snapshot. 30min keeps a 6-hourly "
+                    "reader well-fed without spamming commits."
+    )
+    log_tail_lines: int = Field(
+        default=120,
+        ge=10,
+        le=2000,
+        description="How many trailing lines of transcoder.log to include."
+    )
+
+
 class Config(BaseModel):
     """Main configuration model."""
 
@@ -564,6 +600,9 @@ class Config(BaseModel):
     # Update-notification via GitHub Releases (notify-only; apply via `hd update`)
     updater: UpdaterSettings = Field(default_factory=UpdaterSettings)
     incidents: IncidentsSettings = Field(default_factory=IncidentsSettings)
+
+    # Remote health telemetry: periodic status snapshot pushed to GitHub.
+    telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
 
     # Reduction-map census: daily Dropbox tree walk that classifies every
     # file (pending/done/ineligible) and powers the dashboard's colored

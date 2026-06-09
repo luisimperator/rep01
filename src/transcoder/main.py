@@ -524,6 +524,23 @@ class Daemon:
             dispatcher=self.dispatcher,
         )
 
+        # Remote health telemetry: publish a status snapshot to GitHub on a
+        # timer so the daemon can be watched without copying logs by hand.
+        # Reuses the incidents token (or GITHUB_TOKEN) when none is set here.
+        tele = self.config.telemetry
+        if tele.enabled:
+            from .telemetry import StatusPublisher
+            tele_token = (
+                (tele.github_token or "").strip()
+                or (self.config.incidents.github_token or "").strip()
+                or os.environ.get("GITHUB_TOKEN", "")
+            )
+            publisher = StatusPublisher(
+                self.config, self.db, self.stop_event, self.config.log_dir, tele_token,
+            )
+            publisher.start()
+            self.workers.append(publisher)
+
         audio_n = self.config.concurrency.audio_workers if self.config.audio.enabled else 0
         logger.info(
             f"Started dispatcher + {len(self.workers) - 2} workers + watchdog: "
