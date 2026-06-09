@@ -65,12 +65,12 @@ function Info([string]$msg)  { Write-Host "[bootstrap] $msg" -ForegroundColor Cy
 function Warn([string]$msg)  { Write-Host "[bootstrap] $msg" -ForegroundColor Yellow }
 function Die([string]$msg)   { Write-Host "[bootstrap] $msg" -ForegroundColor Red; exit 1 }
 
-# --- Put scratch/data on the largest fixed drive --------------------------
-# The transcoder stages multi-GB downloads on disk. On editors' machines the
-# system drive (C:) is small/often full, so move the data dir (staging, output,
-# DB, logs) to the LARGEST non-system fixed drive (e.g. the 2 TB D:). The code
-# and venv stay small under the profile. Falls back to the profile if anything
-# goes wrong. The disk_budget min-free guard still protects the editors' space.
+# --- Choose where scratch/data (staging, output, DB, logs) lives ----------
+# Priority: 1) explicit HD_DATA_DIR, 2) on WORKER machines only, the largest
+# non-system fixed drive (e.g. the 2 TB D:, since the editors' C: is small/full),
+# 3) otherwise the profile drive. The dedicated box (no worker mode) therefore
+# stays on C: as before. Code + venv always stay small under the profile, and
+# the disk_budget min-free guard still protects the editors' space.
 try {
     if ($env:HD_DATA_DIR) {
         $DataDir  = $env:HD_DATA_DIR
@@ -79,7 +79,8 @@ try {
         $StageDir = Join-Path $DataDir 'staging'
         Info "Scratch/data dir set from HD_DATA_DIR: $DataDir"
     }
-    elseif (($biggest = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop |
+    elseif ($WorkerMode -and
+            ($biggest = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop |
                Sort-Object Size -Descending | Select-Object -First 1) -and
             $biggest.DeviceID -and $biggest.DeviceID -ne $env:SystemDrive) {
         $candidate = Join-Path ($biggest.DeviceID + '\') 'HeavyDrops-data'
@@ -91,7 +92,8 @@ try {
               $biggest.DeviceID, [math]::Round($biggest.Size / 1GB), $DataDir)
     }
     else {
-        Info "Largest drive is the system drive; keeping data under the profile."
+        # Dedicated box (no worker mode) keeps its data under the profile (C:).
+        Info "Keeping data under the profile: $DataDir"
     }
 } catch {
     Warn "Could not place data on the chosen drive; using $DataDir"
