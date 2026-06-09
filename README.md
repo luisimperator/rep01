@@ -30,11 +30,12 @@ To avoid retyping the Dropbox credentials on each of the 6 machines, bake them i
 
 ```powershell
 $env:HD_WORKER=1
+$env:HD_DATA_DIR='D:\HeavyDrops-data'
 $env:HD_DROPBOX_APP_KEY='...'; $env:HD_DROPBOX_APP_SECRET='...'; $env:HD_DROPBOX_REFRESH_TOKEN='...'
 iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
 ```
 
-The bootstrap also reads `HD_DROPBOX_TOKEN` for the legacy short-lived token. Credentials are written only to the machine's local `config.yaml`, never committed.
+`HD_DATA_DIR` forces where the scratch/data (downloads, transcodes, DB, logs) live — point it at the big drive (e.g. `D:`) so it never fills the small system disk. If unset, the installer auto-picks the largest non-system fixed drive. The bootstrap also reads `HD_DROPBOX_TOKEN` for the legacy short-lived token. Credentials are written only to the machine's local `config.yaml`, never committed.
 
 To apply a new release later:
 

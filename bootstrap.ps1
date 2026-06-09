@@ -17,8 +17,13 @@
 # machine's config.yaml, e.g. HEAVY7); a plain access token expires in ~4h:
 #
 #   $env:HD_WORKER=1
+#   $env:HD_DATA_DIR='D:\HeavyDrops-data'   # put the scratch/data on the big drive
 #   $env:HD_DROPBOX_APP_KEY='...'; $env:HD_DROPBOX_APP_SECRET='...'; $env:HD_DROPBOX_REFRESH_TOKEN='...'
 #   iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
+#
+# HD_DATA_DIR forces where downloads/transcodes/db/logs live. If unset, the
+# installer auto-picks the largest non-system drive. Code + venv stay small
+# under %USERPROFILE%.
 #
 # What it does:
 #   1. Ensures Git and Python 3.12 are installed (via winget, user scope).
@@ -67,9 +72,16 @@ function Die([string]$msg)   { Write-Host "[bootstrap] $msg" -ForegroundColor Re
 # and venv stay small under the profile. Falls back to the profile if anything
 # goes wrong. The disk_budget min-free guard still protects the editors' space.
 try {
-    $biggest = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop |
-               Sort-Object Size -Descending | Select-Object -First 1
-    if ($biggest -and $biggest.DeviceID -and $biggest.DeviceID -ne $env:SystemDrive) {
+    if ($env:HD_DATA_DIR) {
+        $DataDir  = $env:HD_DATA_DIR
+        New-Item -ItemType Directory -Force -Path $DataDir -ErrorAction Stop | Out-Null
+        $LogDir   = Join-Path $DataDir 'logs'
+        $StageDir = Join-Path $DataDir 'staging'
+        Info "Scratch/data dir set from HD_DATA_DIR: $DataDir"
+    }
+    elseif (($biggest = Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction Stop |
+               Sort-Object Size -Descending | Select-Object -First 1) -and
+            $biggest.DeviceID -and $biggest.DeviceID -ne $env:SystemDrive) {
         $candidate = Join-Path ($biggest.DeviceID + '\') 'HeavyDrops-data'
         New-Item -ItemType Directory -Force -Path $candidate -ErrorAction Stop | Out-Null
         $DataDir  = $candidate
@@ -77,11 +89,12 @@ try {
         $StageDir = Join-Path $DataDir 'staging'
         Info ("Scratch/data on largest drive {0} ({1} GB): {2}" -f `
               $biggest.DeviceID, [math]::Round($biggest.Size / 1GB), $DataDir)
-    } else {
+    }
+    else {
         Info "Largest drive is the system drive; keeping data under the profile."
     }
 } catch {
-    Warn "Could not place data on the largest drive; using $DataDir"
+    Warn "Could not place data on the chosen drive; using $DataDir"
 }
 
 # --- 1. Prerequisites -----------------------------------------------------
