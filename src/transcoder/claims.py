@@ -26,6 +26,7 @@ import hashlib
 import json
 import logging
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Iterable
 
@@ -59,6 +60,7 @@ class ClaimStore:
         self.ttl = timedelta(minutes=ttl_minutes)
         self._held: set[str] = set()
         self._lock = threading.Lock()
+        self._last_warn = 0.0   # monotonic time of the last "unavailable" warning
 
     # ---- key / path / payload helpers --------------------------------------
 
@@ -86,34 +88,59 @@ class ClaimStore:
                 self._held.add(self._key(p))
 
     def try_claim(self, dropbox_path: str) -> bool:
-        """Attempt to claim a file. True → this machine may process it."""
+        """Attempt to claim a file. True → this machine may process it.
+
+        If the claims store itself is unreachable/misconfigured (e.g. the folder
+        isn't writable on a team Dropbox), we fail OPEN: warn once and let the
+        job proceed WITHOUT coordination, rather than jamming the whole pipeline
+        in a retry loop. Fix coordination.claims_folder to restore protection.
+        """
         key = self._key(dropbox_path)
         with self._lock:
             if key in self._held:
                 return True
 
         claim_path = self._claim_path(key)
-        if self.client.claim_create(claim_path, self._payload(dropbox_path)):
-            with self._lock:
-                self._held.add(key)
-            return True
+        try:
+            if self.client.claim_create(claim_path, self._payload(dropbox_path)):
+                with self._lock:
+                    self._held.add(key)
+                return True
 
-        # We lost the race — inspect the existing claim for staleness.
-        meta = self.client.get_metadata(claim_path)
-        if meta is None:
-            return False  # vanished underneath us; retry on the next pass
-        age = datetime.now(timezone.utc) - _as_utc(meta.server_modified)
-        if age <= self.ttl:
-            return False  # a live claim held by another machine
+            # We lost the race — inspect the existing claim for staleness.
+            meta = self.client.get_metadata(claim_path)
+            if meta is None:
+                return False  # vanished underneath us; retry on the next pass
+            age = datetime.now(timezone.utc) - _as_utc(meta.server_modified)
+            if age <= self.ttl:
+                return False  # a live claim held by another machine
 
-        # Abandoned claim → steal it.
-        self.client.delete_file(claim_path)
-        if self.client.claim_create(claim_path, self._payload(dropbox_path)):
-            with self._lock:
-                self._held.add(key)
-            logger.info("claims: stole abandoned claim (age %s) for %s", age, dropbox_path)
-            return True
-        return False
+            # Abandoned claim → steal it.
+            self.client.delete_file(claim_path)
+            if self.client.claim_create(claim_path, self._payload(dropbox_path)):
+                with self._lock:
+                    self._held.add(key)
+                logger.info("claims: stole abandoned claim (age %s) for %s", age, dropbox_path)
+                return True
+            return False
+        except Exception as e:
+            self._warn_unavailable(e)
+            return True  # fail open — don't block work on a claims outage/misconfig
+
+    def _warn_unavailable(self, err: Exception) -> None:
+        """Log a single rate-limited warning when the claims store is unusable."""
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_warn < 300:
+                return
+            self._last_warn = now
+        logger.warning(
+            "claims: cannot use claims folder '%s' (%s). Running WITHOUT "
+            "cross-machine coordination until fixed — point "
+            "coordination.claims_folder at a WRITABLE Dropbox path (on a team "
+            "account the namespace root is not writable; use a subfolder).",
+            self.folder, err,
+        )
 
     def heartbeat(self, dropbox_path: str) -> None:
         """Refresh the claim's timestamp so it isn't seen as abandoned."""
