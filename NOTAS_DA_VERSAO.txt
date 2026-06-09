@@ -2,6 +2,32 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 7.6.0
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Tudo no dashboard: zero YAML pra configurar a frota
+
+  [FEATURE] As configurações de frota agora são clicáveis no dashboard web
+            (/api/settings grava no config.yaml sozinho) — sem editar arquivo
+            na mão. Novos controles: escolha do encoder (NVENC/QSV/CPU), modo
+            noturno completo (liga/desliga, horário início-fim, pausar quando
+            alguém usa a máquina, minutos de ocioso), teto de rascunho de
+            disco (GB), e a divisão entre máquinas (liga/desliga, pasta de
+            reservas, expiração). Mais upload_workers.
+
+  [API] _SETTINGS_KNOBS ganhou os tipos 'choice' (com coerção pro enum, ex.:
+        encoder_preference) e 'hhmm' (HH:MM). A gravação no YAML cita strings
+        com ':' (ex.: night_start: "18:00") pra o YAML não ler 18:00 como
+        número sexagesimal. O teto de disco (max_staging) é aplicado ao vivo
+        no DiskBudget; o resto persiste e vale no próximo restart (botão de
+        restart já existe no dashboard).
+
+  [UI] dashboard.html ganhou a seção "Fleet / production machine" com os
+       controles acima, agrupados e com dicas de quando precisa reiniciar.
+
+--------------------------------------------------------------------------------
+
 Versão: 7.5.0
 Data: 09/06/2026
 --------------------------------------------------------------------------------

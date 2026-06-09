@@ -31,6 +31,7 @@ from urllib.parse import parse_qs, urlparse
 
 from dataclasses import dataclass, field
 
+from .config import EncoderPreference
 from .database import Database, JobState
 from .progress import REGISTRY as ACTIVITY
 from .updater import read_status as read_update_status
@@ -842,6 +843,71 @@ _SETTINGS_KNOBS: dict[str, dict] = {
         "yaml_key": "disk_budget.min_free_bytes",
         "label": "Min free disk space (GB) — daemon waits when below",
     },
+    "disk_budget_max_staging_gb": {
+        "type": "gb_to_bytes",
+        "min": 10,
+        "max": 100_000,
+        "yaml_key": "disk_budget.max_staging_bytes",
+        "label": "Max scratch space (GB) the encoder may use at once",
+    },
+    "upload_workers": {
+        "type": "int",
+        "min": 1,
+        "max": 8,
+        "yaml_key": "concurrency.upload_workers",
+        "label": "Parallel uploads to Dropbox (restart)",
+    },
+    "encoder_preference": {
+        "type": "choice",
+        "choices": ["auto", "qsv", "nvenc", "cpu"],
+        "enum": EncoderPreference,
+        "yaml_key": "encoder_preference",
+        "label": "GPU encoder — nvenc = NVIDIA, qsv = Intel (restart)",
+    },
+    "availability_enabled": {
+        "type": "bool",
+        "yaml_key": "availability.enabled",
+        "label": "Night mode: only encode at night while the machine is idle (restart)",
+    },
+    "availability_night_start": {
+        "type": "hhmm",
+        "yaml_key": "availability.night_start",
+        "label": "Night mode starts (HH:MM)",
+    },
+    "availability_night_end": {
+        "type": "hhmm",
+        "yaml_key": "availability.night_end",
+        "label": "Night mode ends (HH:MM)",
+    },
+    "availability_pause_when_user_active": {
+        "type": "bool",
+        "yaml_key": "availability.pause_when_user_active",
+        "label": "Night mode: pause the instant someone uses the machine",
+    },
+    "availability_idle_minutes": {
+        "type": "int",
+        "min": 1,
+        "max": 240,
+        "yaml_key": "availability.idle_minutes",
+        "label": "Night mode: minutes with no input before it starts",
+    },
+    "coordination_enabled": {
+        "type": "bool",
+        "yaml_key": "coordination.enabled",
+        "label": "Share one Dropbox with other machines — no duplicates (restart)",
+    },
+    "coordination_claims_folder": {
+        "type": "path",
+        "yaml_key": "coordination.claims_folder",
+        "label": "Shared claims folder (must be the SAME on every machine)",
+    },
+    "coordination_claim_ttl_minutes": {
+        "type": "int",
+        "min": 5,
+        "max": 1440,
+        "yaml_key": "coordination.claim_ttl_minutes",
+        "label": "Reservation expiry (min) — keep above your largest job's time",
+    },
 }
 
 
@@ -870,6 +936,17 @@ def _settings_payload(api: ApiServer) -> dict:
             "min_size_gb": cfg.min_size_gb,
             "disk_budget_enabled": cfg.disk_budget.enabled,
             "disk_budget_min_free_gb": round(cfg.disk_budget.min_free_bytes / 1_000_000_000, 1),
+            "disk_budget_max_staging_gb": round(cfg.disk_budget.max_staging_bytes / 1_000_000_000, 1),
+            "upload_workers": cfg.concurrency.upload_workers,
+            "encoder_preference": cfg.encoder_preference.value,
+            "availability_enabled": cfg.availability.enabled,
+            "availability_night_start": cfg.availability.night_start,
+            "availability_night_end": cfg.availability.night_end,
+            "availability_pause_when_user_active": cfg.availability.pause_when_user_active,
+            "availability_idle_minutes": cfg.availability.idle_minutes,
+            "coordination_enabled": cfg.coordination.enabled,
+            "coordination_claims_folder": cfg.coordination.claims_folder,
+            "coordination_claim_ttl_minutes": cfg.coordination.claim_ttl_minutes,
         },
         "knobs": {k: {kk: vv for kk, vv in v.items() if kk != "yaml_key"} for k, v in _SETTINGS_KNOBS.items()},
         "context": {
@@ -959,6 +1036,21 @@ def _apply_settings(api: ApiServer, body: dict) -> dict:
             value = str(raw or "").strip()
             if value not in ("127.0.0.1", "0.0.0.0"):
                 raise ValueError(f"{key} must be '127.0.0.1' or '0.0.0.0'")
+        elif knob["type"] == "choice":
+            value = str(raw or "").strip()
+            if value not in knob["choices"]:
+                raise ValueError(f"{key} must be one of {knob['choices']}")
+            if "enum" in knob:
+                value = knob["enum"](value)
+        elif knob["type"] == "hhmm":
+            value = str(raw or "").strip()
+            try:
+                hh, mm = value.split(":")
+                if not (0 <= int(hh) <= 23 and 0 <= int(mm) <= 59):
+                    raise ValueError
+            except Exception:
+                raise ValueError(f"{key} must be a time like 18:00")
+            value = f"{int(hh):02d}:{int(mm):02d}"
         else:
             raise ValueError(f"unsupported type for {key}")
 
@@ -991,6 +1083,12 @@ def _apply_settings(api: ApiServer, body: dict) -> dict:
             new_value = getattr(cfg, key)
         if isinstance(new_value, bool):
             yaml_val = "true" if new_value else "false"
+        elif knob["type"] == "choice":
+            # Enum (e.g. EncoderPreference) → its plain string value.
+            yaml_val = str(getattr(new_value, "value", new_value))
+        elif knob["type"] == "hhmm":
+            # Quote so YAML doesn't read 18:00 as a sexagesimal number.
+            yaml_val = f'"{new_value}"'
         else:
             yaml_val = str(new_value)
         if "." in yaml_key:
@@ -1039,15 +1137,18 @@ def _apply_settings(api: ApiServer, body: dict) -> dict:
             agent.interval_sec = max(60, int(cfg.incidents.health_check_interval_minutes) * 60)
             logger.info(f"self-health interval updated live to {agent.interval_sec}s")
 
-    if "disk_budget_enabled" in updated or "disk_budget_min_free_gb" in updated:
+    if any(k in updated for k in (
+        "disk_budget_enabled", "disk_budget_min_free_gb", "disk_budget_max_staging_gb",
+    )):
         budget = getattr(getattr(api, "daemon", None), "disk_budget", None)
         if budget is not None:
             budget.enabled = bool(cfg.disk_budget.enabled)
             budget.min_free_bytes = int(cfg.disk_budget.min_free_bytes)
+            budget.max_staging_bytes = int(cfg.disk_budget.max_staging_bytes)
             logger.info(
-                "disk_budget updated live: enabled=%s, min_free_bytes=%d (%.1f GB)",
-                budget.enabled, budget.min_free_bytes,
-                budget.min_free_bytes / 1_000_000_000,
+                "disk_budget updated live: enabled=%s, min_free=%.1f GB, max_staging=%.1f GB",
+                budget.enabled, budget.min_free_bytes / 1_000_000_000,
+                budget.max_staging_bytes / 1_000_000_000,
             )
 
     logger.info("settings updated via API: %s", updated)

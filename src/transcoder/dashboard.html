@@ -722,8 +722,72 @@ async function renderSettings() {
       <span class="hint">Daemon refuses to start a download if it would leave less than this much free. Live-applied; no restart.</span>
     </div>
     <div class="field">
-      <label>Encoder · Profile</label>
-      <span class="hint">${escapeHtml(ctx.encoder_preference || '')} · ${escapeHtml(ctx.profile || '')} (edit in config.yaml + restart)</span>
+      <label for="set-budget-max">${lbl('disk_budget_max_staging_gb', 'Max scratch space (GB)')}</label>
+      <input id="set-budget-max" type="number" min="10" max="100000" step="10" value="${s.disk_budget_max_staging_gb ?? 2000}">
+      <span class="hint">Hard ceiling on disk the encoder uses at once. Live-applied.</span>
+    </div>
+
+    <div class="field" style="margin-top:1em; border-top:1px solid var(--border, #333); padding-top:1em;">
+      <label style="color:var(--text); font-weight:600;">— Fleet / production machine —</label>
+      <span class="hint">For extra machines (e.g. editors' PCs) that help out. Changes marked "restart" apply after a daemon restart.</span>
+    </div>
+    <div class="field">
+      <label for="set-encoder">${lbl('encoder_preference', 'GPU encoder')}</label>
+      <select id="set-encoder">
+        ${['auto','nvenc','qsv','cpu'].map(v => `<option value="${v}" ${v === (s.encoder_preference||'auto') ? 'selected' : ''}>${v==='auto'?'auto (detect)':v==='nvenc'?'NVIDIA (NVENC)':v==='qsv'?'Intel (QSV)':'CPU (slow)'}</option>`).join('')}
+      </select>
+      <span class="hint">Restart needed.</span>
+    </div>
+    <div class="field">
+      <label for="set-uw">${lbl('upload_workers', 'Parallel uploads')}</label>
+      <select id="set-uw">
+        ${[1,2,3,4].map(v => `<option value="${v}" ${v === s.upload_workers ? 'selected' : ''}>${v}</option>`).join('')}
+      </select>
+      <span class="hint">Restart needed.</span>
+    </div>
+    <div class="field">
+      <label>${lbl('availability_enabled', 'Night mode')}</label>
+      <label class="switch" style="display:inline-flex; align-items:center; gap:.5em;">
+        <input id="set-avail-enabled" type="checkbox" ${s.availability_enabled ? 'checked' : ''}>
+        <span style="color: var(--muted); font-size: .9em">${s.availability_enabled ? 'on — only encodes at night while idle' : 'off — runs 24/7'}</span>
+      </label>
+      <span class="hint">Restart needed to start/stop.</span>
+    </div>
+    <div class="field">
+      <label for="set-avail-start">${lbl('availability_night_start', 'Night starts / ends (HH:MM)')}</label>
+      <input id="set-avail-start" type="text" value="${escapeHtml(s.availability_night_start || '20:00')}" style="width:80px;">
+      <span style="color:var(--muted); margin:0 .5em;">to</span>
+      <input id="set-avail-end" type="text" value="${escapeHtml(s.availability_night_end || '07:00')}" style="width:80px;">
+    </div>
+    <div class="field">
+      <label>${lbl('availability_pause_when_user_active', 'Pause when someone uses the machine')}</label>
+      <label class="switch">
+        <input id="set-avail-pause" type="checkbox" ${s.availability_pause_when_user_active ? 'checked' : ''}>
+        <span class="track"></span>
+        <span style="color: var(--muted); font-size: .9em">frees the GPU instantly for the editor</span>
+      </label>
+    </div>
+    <div class="field">
+      <label for="set-avail-idle">${lbl('availability_idle_minutes', 'Idle minutes before starting')}</label>
+      <input id="set-avail-idle" type="number" min="1" max="240" value="${s.availability_idle_minutes ?? 10}">
+    </div>
+    <div class="field">
+      <label>${lbl('coordination_enabled', 'Share one Dropbox with other machines')}</label>
+      <label class="switch" style="display:inline-flex; align-items:center; gap:.5em;">
+        <input id="set-coord-enabled" type="checkbox" ${s.coordination_enabled ? 'checked' : ''}>
+        <span style="color: var(--muted); font-size: .9em">${s.coordination_enabled ? 'on — machines split the work, no duplicates' : 'off — single machine'}</span>
+      </label>
+      <span class="hint">Turn on for EVERY machine in the pool. Restart needed.</span>
+    </div>
+    <div class="field">
+      <label for="set-coord-folder">${lbl('coordination_claims_folder', 'Shared claims folder')}</label>
+      <input id="set-coord-folder" type="text" value="${escapeHtml(s.coordination_claims_folder || '/_h265_claims')}" style="min-width:220px;">
+      <span class="hint">Must be identical on every machine.</span>
+    </div>
+    <div class="field">
+      <label for="set-coord-ttl">${lbl('coordination_claim_ttl_minutes', 'Reservation expiry (min)')}</label>
+      <input id="set-coord-ttl" type="number" min="5" max="1440" value="${s.coordination_claim_ttl_minutes ?? 60}">
+      <span class="hint">Keep above your largest job's download+transcode time.</span>
     </div>
     <div class="field">
       <label>Dropbox root</label>
@@ -774,6 +838,17 @@ async function saveSettings() {
     download_workers: parseInt(document.getElementById('set-dw').value),
     disk_budget_enabled: document.getElementById('set-budget-enabled').checked,
     disk_budget_min_free_gb: parseFloat(document.getElementById('set-budget-min-free').value),
+    disk_budget_max_staging_gb: parseFloat(document.getElementById('set-budget-max').value),
+    encoder_preference: document.getElementById('set-encoder').value,
+    upload_workers: parseInt(document.getElementById('set-uw').value),
+    availability_enabled: document.getElementById('set-avail-enabled').checked,
+    availability_night_start: document.getElementById('set-avail-start').value,
+    availability_night_end: document.getElementById('set-avail-end').value,
+    availability_pause_when_user_active: document.getElementById('set-avail-pause').checked,
+    availability_idle_minutes: parseInt(document.getElementById('set-avail-idle').value),
+    coordination_enabled: document.getElementById('set-coord-enabled').checked,
+    coordination_claims_folder: document.getElementById('set-coord-folder').value,
+    coordination_claim_ttl_minutes: parseInt(document.getElementById('set-coord-ttl').value),
   };
   try {
     const r = await fetchJSON('/api/settings', {
