@@ -16,6 +16,16 @@ iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -Us
 
 This installs under `%USERPROFILE%\HeavyDrops`, pulls Python 3.12 and Git via `winget` if missing, downloads FFmpeg, writes a `config.yaml` (you'll be prompted once for your Dropbox token), registers a scheduled task so the daemon auto-starts at logon and restarts on failure, and drops a **HeavyDrops** shortcut on the Desktop. The shortcut opens the dashboard at <http://127.0.0.1:9123/> in your default browser — queue status, bulk-scan progress, disk usage, and pause / scan-now / retry-failed buttons, refreshing every 3 seconds. Closing the browser does **not** stop the daemon.
 
+### Editors' machines (night workers)
+
+To set up a shared/production machine (e.g. Heavy1-6) that should only chip in **overnight while idle** — pre-configured for NVIDIA NVENC, night mode (18:00–09:00, pausing the instant someone uses the PC), shared-Dropbox claim (so machines split the work with no duplicates), and a low disk footprint — set `HD_WORKER` first:
+
+```powershell
+$env:HD_WORKER=1; iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
+```
+
+Same one command — it just applies the production profile (`installer/apply_worker_profile.py`) on top of the normal install. Point every machine at the **same Dropbox account/folder and claims folder**, and roll out on one machine first. Everything is adjustable afterwards from the dashboard's **Settings → Fleet** section — no files to edit.
+
 To apply a new release later:
 
 ```powershell

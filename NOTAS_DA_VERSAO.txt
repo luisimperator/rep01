@@ -2,6 +2,34 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 7.6.1
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Instalação fácil das máquinas operárias (Heavy1-6)
+
+  [FEATURE] Modo "worker" no bootstrap.ps1: um comando só já instala a máquina
+            JÁ configurada como operária noturna. Basta rodar com HD_WORKER=1:
+
+              $env:HD_WORKER=1; iwr .../bootstrap.ps1 -UseBasicParsing | iex
+
+            Ele faz a instalação normal (Python, FFmpeg, daemon, tarefa que
+            liga sozinho, dashboard) e, no fim, aplica o perfil de produção:
+            NVENC, modo noturno 18:00-09:00 (pausa quando alguém usa a
+            máquina), divisão do Dropbox ligada e disco baixo (150 GB de teto,
+            100 GB de margem, concorrência 1/1/1).
+
+  [FEATURE] Novo installer/apply_worker_profile.py: aplica esse perfil num
+            config.yaml existente (merge — preserva auth/paths e chaves
+            vizinhas; idempotente). Dá pra rodar à mão também. Coberto por
+            testes (perfil correto, idempotência, config válida pós-merge).
+
+  [DOC] README.md ganhou a seção "Editors' machines (night workers)" com o
+        one-liner. Tudo continua ajustável depois pelo dashboard (Settings >
+        Fleet) — zero edição de arquivo.
+
+--------------------------------------------------------------------------------
+
 Versão: 7.6.0
 Data: 09/06/2026
 --------------------------------------------------------------------------------

@@ -4,6 +4,13 @@
 #
 #   iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
 #
+# For an EDITORS' machine (Heavy1-6) that should only chip in OVERNIGHT —
+# pre-configured for NVIDIA NVENC, night mode (18:00-09:00, yields the instant
+# someone uses the PC), shared-Dropbox claim, and a low disk footprint — set
+# HD_WORKER first:
+#
+#   $env:HD_WORKER=1; iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
+#
 # What it does:
 #   1. Ensures Git and Python 3.12 are installed (via winget, user scope).
 #   2. Clones this repo to %USERPROFILE%\HeavyDrops (or updates if it already exists).
@@ -21,6 +28,10 @@
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version 2
+
+# Worker mode: editors' machines get the production profile (NVENC, night mode,
+# shared Dropbox, low disk). Selected via `$env:HD_WORKER=1` before piping to iex.
+$WorkerMode = [bool]$env:HD_WORKER
 
 # --- Paths ----------------------------------------------------------------
 
@@ -152,6 +163,18 @@ if (-not (Test-Path $ConfigPath)) {
     Info "config.yaml already present; not overwriting."
 }
 
+# --- 5b. Worker profile (editors' machines) -------------------------------
+
+if ($WorkerMode) {
+    Info "Applying production-machine profile (NVENC, night mode 18:00-09:00, shared Dropbox, low disk)..."
+    $WorkerScript = Join-Path $InstallDir 'installer\apply_worker_profile.py'
+    if (Test-Path $WorkerScript) {
+        & $VenvPy $WorkerScript $ConfigPath
+    } else {
+        Warn "apply_worker_profile.py not found; skipping profile. Set it from the dashboard instead."
+    }
+}
+
 # --- 6. Scheduled task ----------------------------------------------------
 
 $TaskXmlTemplate = Join-Path $InstallDir 'installer\tasks\HeavyDropsDaemon.xml'
@@ -198,6 +221,15 @@ Info "  Shortcut:  $LnkPath"
 Info "  Config:    $ConfigPath"
 Info "  Logs:      $LogDir"
 Info ""
+if ($WorkerMode) {
+    Info "This machine is set up as a NIGHT WORKER:"
+    Info "  - encodes only 18:00-09:00, and pauses the instant someone uses it"
+    Info "  - shares the Dropbox pool (no duplicate work) — same claims folder as the others"
+    Info "  - NVIDIA NVENC, low disk footprint"
+    Info "  Make sure it points at the SAME Dropbox account/folder as the dedicated box."
+    Info "  Tweak anything from the dashboard's Settings > Fleet section — no files to edit."
+    Info ""
+}
 Info "The daemon auto-starts at each logon. To stop or restart now:"
 Info "  schtasks /End /TN $TaskName"
 Info "  schtasks /Run /TN $TaskName"
