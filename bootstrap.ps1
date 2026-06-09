@@ -165,7 +165,7 @@ if (-not (Test-Path $FFmpegExe) -or -not (Test-Path $FFprobeExe)) {
     Info "Downloading FFmpeg..."
     $zip = Join-Path $env:TEMP 'hd-ffmpeg.zip'
     $expand = Join-Path $env:TEMP 'hd-ffmpeg-unpack'
-    if (Test-Path $expand) { Remove-Item -Recurse -Force $expand }
+    if (Test-Path $expand) { Remove-Item -Recurse -Force $expand -ErrorAction SilentlyContinue }
     Invoke-WebRequest -Uri $FFmpegUrl -OutFile $zip -UseBasicParsing
     Expand-Archive -Path $zip -DestinationPath $expand -Force
 
@@ -176,8 +176,10 @@ if (-not (Test-Path $FFmpegExe) -or -not (Test-Path $FFprobeExe)) {
     }
     Copy-Item $srcFf.FullName $FFmpegExe  -Force
     Copy-Item $srcFp.FullName $FFprobeExe -Force
-    Remove-Item -Recurse -Force $expand
-    Remove-Item -Force $zip
+    # Temp cleanup is best-effort — never let it abort the install (e.g. a
+    # user folder with a space like "Heavy 5" trips Remove-Item's path parse).
+    Remove-Item -Recurse -Force $expand -ErrorAction SilentlyContinue
+    Remove-Item -Force $zip -ErrorAction SilentlyContinue
     Info "FFmpeg installed at $BinDir."
 }
 
