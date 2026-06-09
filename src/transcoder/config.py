@@ -513,6 +513,15 @@ class AvailabilitySettings(BaseModel):
         le=240,
         description="Minutes with no input before the machine counts as idle."
     )
+    pause_when_apps: list[str] = Field(
+        default_factory=lambda: [
+            "Adobe Media Encoder", "Adobe Premiere Pro", "AfterFX", "Resolve",
+        ],
+        description="Pause encoding while any of these apps is running (substring "
+                    "match on the Windows process name). So an editor's overnight "
+                    "Media Encoder render isn't slowed by the transcoder. Empty "
+                    "list disables this check."
+    )
     check_interval_sec: int = Field(
         default=60,
         ge=5,

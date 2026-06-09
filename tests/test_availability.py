@@ -13,6 +13,7 @@ def _gate(**kw):
     defaults = dict(
         enabled=True, night_start="20:00", night_end="07:00",
         pause_when_user_active=True, idle_minutes=10, check_interval_sec=60,
+        pause_when_apps=["Adobe Media Encoder", "Resolve"],
     )
     defaults.update(kw)
     return AvailabilityGate(SimpleNamespace(availability=SimpleNamespace(**defaults)))
@@ -81,3 +82,28 @@ def test_idle_check_off_ignores_activity():
 def test_invalid_window_fails_closed():
     ok, reason = _gate(night_start="banana").should_work(NIGHT, idle_seconds=None)
     assert not ok and "invalid" in reason
+
+
+def test_editor_app_running_blocks():
+    # Idle keyboard, inside window, but Media Encoder is rendering → yield.
+    procs = {"adobe media encoder.exe", "explorer.exe"}
+    ok, reason = _gate().should_work(NIGHT, idle_seconds=10_000, running_procs=procs)
+    assert not ok and "Adobe Media Encoder" in reason
+
+
+def test_no_editor_app_works():
+    procs = {"explorer.exe", "ffmpeg.exe"}
+    ok, _ = _gate().should_work(NIGHT, idle_seconds=10_000, running_procs=procs)
+    assert ok
+
+
+def test_app_check_skipped_when_procs_unknown():
+    # Non-Windows / detection failed → None → don't gate on apps.
+    ok, _ = _gate().should_work(NIGHT, idle_seconds=10_000, running_procs=None)
+    assert ok
+
+
+def test_empty_app_list_disables_check():
+    procs = {"adobe media encoder.exe"}
+    ok, _ = _gate(pause_when_apps=[]).should_work(NIGHT, idle_seconds=10_000, running_procs=procs)
+    assert ok

@@ -51,6 +51,12 @@ class WorkerStop(Exception):
     pass
 
 
+class TranscodePaused(Exception):
+    """The transcode was interrupted because the pipeline paused (e.g. night
+    mode yielding the GPU). The job should be requeued, NOT retried/failed."""
+    pass
+
+
 class BaseWorker(threading.Thread):
     """Base class for pipeline workers."""
 
@@ -595,6 +601,15 @@ class TranscodeWorker(BaseWorker):
 
         try:
             self._transcode_job(job)
+        except TranscodePaused:
+            # Night mode (or a manual pause) interrupted this transcode. Put the
+            # job back so it's re-transcoded when work resumes — not a failure,
+            # so it doesn't burn a retry. The downloaded input stays on disk.
+            logger.info(
+                f"[{self.name}] Transcode paused — requeuing job {job.id} "
+                f"({Path(job.dropbox_path).name}) to finish later"
+            )
+            self.db.update_job_state(job.id, JobState.DOWNLOADED)
         except Exception as e:
             logger.error(f"[{self.name}] Transcode failed: {e}")
             self._handle_failure(job, str(e))
@@ -944,6 +959,12 @@ class TranscodeWorker(BaseWorker):
                     if self.should_stop():
                         self._kill_ffmpeg()
                         raise WorkerStop("Worker stopping")
+                    # If the pipeline was paused (night mode yielding the GPU,
+                    # or a manual dashboard pause), stop encoding NOW — don't
+                    # let the retry logic relaunch ffmpeg and keep the GPU busy.
+                    if self.dispatcher.is_paused():
+                        self._kill_ffmpeg()
+                        raise TranscodePaused()
                     try:
                         return_code = self._ffmpeg_process.wait(timeout=1.0)
                         break
@@ -954,6 +975,10 @@ class TranscodeWorker(BaseWorker):
                 tail_thread.join(timeout=3)
 
             if return_code != 0:
+                # If we're paused, the non-zero code is because the availability
+                # gate killed ffmpeg — treat it as a pause, not a real failure.
+                if self.dispatcher.is_paused():
+                    raise TranscodePaused()
                 # Surface the actual ffmpeg stderr so the operator can see
                 # why it bailed (codec init error, missing nvcuda.dll, bad
                 # input dimension for the HW encoder, etc). Code on its
@@ -968,7 +993,7 @@ class TranscodeWorker(BaseWorker):
 
             return True
 
-        except WorkerStop:
+        except (WorkerStop, TranscodePaused):
             raise
         except Exception as e:
             logger.error(f"[{self.name}] FFmpeg error: {e}")
