@@ -57,6 +57,12 @@ class TranscodePaused(Exception):
     pass
 
 
+class DownloadPaused(Exception):
+    """The download was interrupted because the pipeline paused (night mode).
+    The partial is kept and the job requeued, so it resumes next window."""
+    pass
+
+
 class BaseWorker(threading.Thread):
     """Base class for pipeline workers."""
 
@@ -223,6 +229,14 @@ class DownloadWorker(BaseWorker):
                 JobState.STABLE_WAIT,
                 error_message=str(e),
             )
+            if self.disk_budget is not None:
+                self.disk_budget.release(job.id)
+        except DownloadPaused:
+            logger.info(
+                f"[{self.name}] Download paused (night mode) — requeuing job "
+                f"{job.id}; resumes from the partial next window"
+            )
+            self.db.update_job_state(job.id, JobState.NEW)
             if self.disk_budget is not None:
                 self.disk_budget.release(job.id)
         except Exception as e:
@@ -491,6 +505,10 @@ class DownloadWorker(BaseWorker):
         def callback(downloaded: int, total: int) -> None:
             if self.should_stop():
                 raise WorkerStop("Worker stopping")
+            # Night mode (or a manual pause) — stop downloading too, not just
+            # transcoding. The partial is kept, so it resumes next window.
+            if self.dispatcher.is_paused():
+                raise DownloadPaused()
 
             REGISTRY.update(self.name, bytes_done=downloaded, bytes_total=total)
 
