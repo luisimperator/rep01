@@ -14,6 +14,7 @@ dashboard (/api/pause) is never overridden.
 from __future__ import annotations
 
 import logging
+import subprocess
 import sys
 import threading
 from datetime import datetime, time as dtime
@@ -50,6 +51,31 @@ def user_idle_seconds() -> float | None:
         return None
 
 
+def running_process_names() -> set[str] | None:
+    """Lowercased set of running process image names (Windows). None if unknown.
+
+    Used to yield the GPU to an editor's render app (e.g. Adobe Media Encoder)
+    even when nobody is touching the keyboard — an overnight render queue looks
+    "idle" to GetLastInputInfo but is hammering the GPU.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        out = subprocess.run(
+            ["tasklist", "/fo", "csv", "/nh"],
+            capture_output=True, text=True, timeout=20,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        names: set[str] = set()
+        for line in out.stdout.splitlines():
+            line = line.strip()
+            if line.startswith('"'):
+                names.add(line.split('","', 1)[0].strip('"').lower())
+        return names or None
+    except Exception:  # pragma: no cover — never block on a detection failure
+        return None
+
+
 def parse_hhmm(value: str) -> dtime:
     """Parse 'HH:MM' into a time. Raises ValueError on a bad string."""
     hh, mm = value.strip().split(":")
@@ -73,7 +99,10 @@ class AvailabilityGate:
         self.config = config
 
     def should_work(
-        self, now: datetime, idle_seconds: float | None
+        self,
+        now: datetime,
+        idle_seconds: float | None,
+        running_procs: "set[str] | None" = None,
     ) -> tuple[bool, str]:
         a = self.config.availability
         if not a.enabled:
@@ -92,6 +121,15 @@ class AvailabilityGate:
         if a.pause_when_user_active and idle_seconds is not None:
             if idle_seconds < a.idle_minutes * 60:
                 return False, f"someone is using the machine ({idle_seconds:.0f}s idle)"
+
+        # Yield to an editor's render app (Adobe Media Encoder, Premiere, etc.)
+        # even if the keyboard is idle — their overnight render needs the GPU.
+        apps = [x for x in getattr(a, "pause_when_apps", []) or [] if x.strip()]
+        if apps and running_procs:
+            for app in apps:
+                al = app.lower()
+                if any(al in p for p in running_procs):
+                    return False, f"editor app running ({app})"
 
         return True, "inside night window, machine idle"
 
@@ -129,7 +167,7 @@ class AvailabilityWorker(threading.Thread):
         while not self.stop_event.is_set():
             try:
                 should, reason = self.gate.should_work(
-                    datetime.now(), user_idle_seconds()
+                    datetime.now(), user_idle_seconds(), running_process_names()
                 )
                 if should:
                     if self._paused_by_us and self.dispatcher.is_paused():

@@ -117,6 +117,13 @@ availability:
   night_end: "07:00"
   pause_when_user_active: true
   idle_minutes: 10
+  # Pause while an editor's render app is running, so it doesn't fight for the
+  # GPU (e.g. an overnight Adobe Media Encoder queue). Empty list disables.
+  pause_when_apps:
+    - "Adobe Media Encoder"
+    - "Adobe Premiere Pro"
+    - "AfterFX"
+    - "Resolve"
   check_interval_sec: 60
 # Cross-machine claim: turn on when MORE THAN ONE machine shares the same
 # Dropbox folders, so exactly one machine processes each video. Off for a
