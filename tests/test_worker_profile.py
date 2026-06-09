@@ -33,6 +33,7 @@ def test_profile_sets_expected_keys(tmp_path):
     assert data["availability"]["night_start"] == "18:00"
     assert data["availability"]["night_end"] == "09:00"
     assert data["coordination"]["enabled"] is True
+    assert data["coordination"]["claims_folder"] == "/HeavyDrops/_h265_claims"
     assert data["disk_budget"]["max_staging_bytes"] == 150_000_000_000
     assert data["concurrency"]["download_workers"] == 1
     assert data["concurrency"]["transcode_workers"] == 1

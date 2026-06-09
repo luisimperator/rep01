@@ -119,6 +119,20 @@ def test_heartbeat_only_touches_held():
     assert fake.entries[cp]["server_modified"] > datetime.now(timezone.utc) - timedelta(minutes=1)
 
 
+def test_claim_failure_fails_open():
+    # A broken/unwritable claims store must not jam the pipeline: try_claim
+    # warns and returns True (proceed without coordination) instead of raising.
+    class BrokenDropbox(FakeDropbox):
+        def claim_create(self, path, content, encoding="utf-8"):
+            raise RuntimeError("no_write_permission")
+
+    fake = BrokenDropbox()
+    a = _store(fake, "Heavy1")
+    assert a.try_claim(PATH) is True
+    # The fail-open path does not record the key as held (we don't own a claim).
+    assert a._key(PATH) not in a.held_keys()
+
+
 def _fake_db(active_paths):
     jobs = [SimpleNamespace(dropbox_path=p) for p in active_paths]
     return SimpleNamespace(get_jobs_by_states=lambda states, limit=0: jobs)

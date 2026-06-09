@@ -36,7 +36,9 @@ PROFILE = {
     },
     "coordination": {
         "enabled": True,
-        "claims_folder": "/_h265_claims",
+        # Inside the user's own folder so it's writable. The Dropbox namespace
+        # ROOT ("/_h265_claims") is NOT writable on a team/Business account.
+        "claims_folder": "/HeavyDrops/_h265_claims",
         "claim_ttl_minutes": 120,
         "heartbeat_minutes": 10,
     },
