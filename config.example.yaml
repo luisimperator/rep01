@@ -97,6 +97,36 @@ updater:
   enabled: true
   github_repo: luisimperator/rep01
   check_timeout_sec: 5.0
+# Remote health telemetry: publish a status snapshot (recent log tail, job
+# counts, disk free, any new crash.log) to GitHub on a timer so the daemon can
+# be watched without copying logs by hand. Off by default. github_token is
+# optional — if blank, the incidents token (or GITHUB_TOKEN env) is reused.
+telemetry:
+  enabled: false
+  github_repo: luisimperator/rep01
+  github_token: ""
+  branch: telemetry
+  interval_minutes: 30
+  log_tail_lines: 120
+# Availability gating: only encode at night while the machine is idle. Off by
+# default (dedicated box runs 24/7). Turn on for shared/editor machines — see
+# config.editor-machine.example.yaml for the full production-machine profile.
+availability:
+  enabled: false
+  night_start: "20:00"
+  night_end: "07:00"
+  pause_when_user_active: true
+  idle_minutes: 10
+  check_interval_sec: 60
+# Cross-machine claim: turn on when MORE THAN ONE machine shares the same
+# Dropbox folders, so exactly one machine processes each video. Off for a
+# single machine. All machines must point at the same claims_folder.
+coordination:
+  enabled: false
+  claims_folder: "/_h265_claims"
+  claim_ttl_minutes: 60
+  heartbeat_minutes: 10
+  pc_name: ""
 dropbox_api:
   rate_per_min: 600
   burst: 50

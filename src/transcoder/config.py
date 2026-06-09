@@ -285,17 +285,18 @@ class DispatcherSettings(BaseModel):
         ),
     )
     sticky_folder_enabled: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "When True, the dispatcher commits to draining one folder at a "
-            "time: as long as any job from the 'sticky' folder is still in "
-            "flight or dispatchable, no jobs from other folders are pulled "
-            "into the download queue. Closes folders faster so the reorganize "
-            "cleanup batches fire and free up Dropbox quota sooner — but it "
-            "bottlenecks download parallelism when the current folder has "
-            "fewer files than download_workers (idle workers wait for the "
-            "folder to drain). Default False: plain folder-priority "
-            "interleaving keeps every download worker busy across folders."
+            "When True, the dispatcher concentrates all download workers on one "
+            "folder at a time: while the 'sticky' folder still has files left to "
+            "download, no other folder is started. This closes folders fast so "
+            "the reorganize/cleanup batches fire and free up Dropbox quota "
+            "sooner. As soon as the folder has no more files to start, the "
+            "sticky is released immediately and idle workers move to the next "
+            "folder — it does NOT wait for that folder's last in-flight "
+            "downloads to finish, so workers never sit idle (fixed in v7.2.0; "
+            "this tail-idling was the only reason it was ever disabled). Set "
+            "False for plain folder-priority interleaving (no concentration)."
         ),
     )
 
@@ -446,6 +447,130 @@ class IncidentsSettings(BaseModel):
     )
 
 
+class TelemetrySettings(BaseModel):
+    """Publish a periodic health snapshot to GitHub for remote monitoring."""
+    enabled: bool = Field(
+        default=False,
+        description="Push a redacted status snapshot (log tail, job counts, disk, "
+                    "crashes) to GitHub on a timer so it can be watched remotely."
+    )
+    github_repo: str = Field(
+        default="luisimperator/rep01",
+        description="Target repo, in 'owner/name' form."
+    )
+    github_token: str = Field(
+        default="",
+        description="GitHub PAT with contents:write on the repo. If blank, the "
+                    "incidents.github_token (or GITHUB_TOKEN env) is reused."
+    )
+    branch: str = Field(
+        default="telemetry",
+        description="Branch the snapshot file is written to (kept off main). "
+                    "Auto-created from the default branch on first publish."
+    )
+    interval_minutes: int = Field(
+        default=30,
+        ge=1,
+        le=1440,
+        description="How often to publish a fresh snapshot. 30min keeps a 6-hourly "
+                    "reader well-fed without spamming commits."
+    )
+    log_tail_lines: int = Field(
+        default=120,
+        ge=10,
+        le=2000,
+        description="How many trailing lines of transcoder.log to include."
+    )
+
+
+class AvailabilitySettings(BaseModel):
+    """Only let a shared/production machine encode at night while idle.
+
+    Off by default → the dedicated box runs 24/7. On the editors' machines,
+    turn it on so the pipeline pauses (and frees the GPU) outside the night
+    window or the moment someone uses the machine.
+    """
+    enabled: bool = Field(
+        default=False,
+        description="Gate encoding to a night window and/or machine-idle. Off = 24/7."
+    )
+    night_start: str = Field(
+        default="20:00",
+        description="Start of the work window, local 'HH:MM' (overnight allowed)."
+    )
+    night_end: str = Field(
+        default="07:00",
+        description="End of the work window, local 'HH:MM'."
+    )
+    pause_when_user_active: bool = Field(
+        default=True,
+        description="Pause immediately if someone is using the keyboard/mouse "
+                    "(Windows). Yields the GPU back to the editor."
+    )
+    idle_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=240,
+        description="Minutes with no input before the machine counts as idle."
+    )
+    check_interval_sec: int = Field(
+        default=60,
+        ge=5,
+        le=600,
+        description="How often to re-evaluate the night/idle gate."
+    )
+
+    @field_validator("night_start", "night_end")
+    @classmethod
+    def _valid_hhmm(cls, v: str) -> str:
+        hh, mm = v.strip().split(":")
+        if not (0 <= int(hh) <= 23 and 0 <= int(mm) <= 59):
+            raise ValueError(f"time out of range: {v!r}")
+        return f"{int(hh):02d}:{int(mm):02d}"
+
+
+class CoordinationSettings(BaseModel):
+    """Cross-machine claim so several machines can divide ONE shared Dropbox
+    pool without two of them grabbing the same video.
+
+    Each machine has its own local DB, so coordination happens through Dropbox:
+    before a machine starts a file it atomically creates a tiny claim file in
+    `claims_folder`; if another machine already holds it, this one skips it. A
+    claim is heartbeated while the job is in flight and released when it's done;
+    a claim with no heartbeat for `claim_ttl_minutes` is considered abandoned
+    (machine crashed/powered off) and may be stolen so the work isn't lost.
+    Off by default — a single machine needs none of this.
+    """
+    enabled: bool = Field(
+        default=False,
+        description="Turn on cross-machine claiming. Required before pointing "
+                    "more than one machine at the same Dropbox folders."
+    )
+    claims_folder: str = Field(
+        default="/_h265_claims",
+        description="Dropbox folder holding the claim files (shared by all machines)."
+    )
+    claim_ttl_minutes: int = Field(
+        default=60,
+        ge=5,
+        le=1440,
+        description="A claim with no heartbeat for this long is abandoned and "
+                    "can be stolen. Keep well above the time to download+transcode "
+                    "your largest file so a slow job isn't stolen mid-flight."
+    )
+    heartbeat_minutes: int = Field(
+        default=10,
+        ge=1,
+        le=240,
+        description="How often a machine refreshes the claims on its in-flight "
+                    "jobs. Must be comfortably smaller than claim_ttl_minutes."
+    )
+    pc_name: str = Field(
+        default="",
+        description="Machine id stamped on claims. Blank → the hostname."
+    )
+
+
 class Config(BaseModel):
     """Main configuration model."""
 
@@ -563,6 +688,15 @@ class Config(BaseModel):
     # Update-notification via GitHub Releases (notify-only; apply via `hd update`)
     updater: UpdaterSettings = Field(default_factory=UpdaterSettings)
     incidents: IncidentsSettings = Field(default_factory=IncidentsSettings)
+
+    # Remote health telemetry: periodic status snapshot pushed to GitHub.
+    telemetry: TelemetrySettings = Field(default_factory=TelemetrySettings)
+
+    # Availability gating: night-window + machine-idle for shared machines.
+    availability: AvailabilitySettings = Field(default_factory=AvailabilitySettings)
+
+    # Cross-machine claim so a shared Dropbox pool divides safely.
+    coordination: CoordinationSettings = Field(default_factory=CoordinationSettings)
 
     # Reduction-map census: daily Dropbox tree walk that classifies every
     # file (pending/done/ineligible) and powers the dashboard's colored

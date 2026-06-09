@@ -1,0 +1,59 @@
+# =============================================================================
+# Editor-machine profile (Heavy1-6) — overlay these settings on top of your
+# normal config.yaml on each production machine.
+#
+# Goal: chip in on the transcode pool OVERNIGHT WHILE IDLE, on the NVIDIA GPU,
+# using almost no disk — never disrupting an editor. It is fine for these
+# machines to be slower than the dedicated box; the priority is staying out of
+# the way. The dedicated 24/7 box (HEAVY7) keeps its normal config (none of
+# the settings below).
+#
+# Dividing the SAME Dropbox pool safely is handled by the coordination block
+# below (cross-machine claim): every machine — including the dedicated box —
+# must point at the same claims_folder so exactly one machine processes each
+# video. Roll it out on ONE machine first and watch the logs before the fleet.
+# =============================================================================
+
+# --- Use the NVIDIA GPU (these boxes have NVENC, not Intel QSV) ---------------
+encoder_preference: nvenc
+
+# --- Only work at night, and yield the instant an editor touches the machine -
+availability:
+  enabled: true
+  night_start: "18:00"     # start of the safe window (local time)
+  night_end: "09:00"       # stop before the editors arrive
+  pause_when_user_active: true
+  idle_minutes: 10         # no keyboard/mouse for 10 min before it starts
+  check_interval_sec: 60
+
+# --- Tread lightly on the disk (D: is the editors' 2 TB working drive) --------
+# Both knobs are SMALL on purpose:
+#   max_staging_bytes — hard ceiling on scratch the encoder uses at once. With
+#     1 download + 1 transcode of 20-47 GB files, ~150 GB holds a few in flight.
+#   min_free_bytes — safety margin. If the drive already has less than this
+#     free (editors filled it up), the encoder simply doesn't start — it steps
+#     aside instead of pushing the disk toward full. This is NOT reserved
+#     space; it's a "back off when the disk is tight" floor. Tune to whatever
+#     headroom you want to guarantee the editors (e.g. 80-150 GB).
+disk_budget:
+  enabled: true
+  max_staging_bytes: 150000000000     # ~150 GB scratch ceiling
+  min_free_bytes:    100000000000     # back off if under ~100 GB free
+  poll_interval_sec: 30
+
+# --- Low concurrency so only a file or two sits on disk at a time -------------
+concurrency:
+  download_workers: 1
+  transcode_workers: 1
+  upload_workers: 1
+
+# --- Share the work safely with HEAVY7 and the other machines -----------------
+# Every machine in the pool (including the dedicated box) must enable this and
+# use the SAME claims_folder. Keep claim_ttl_minutes above the time to
+# download+transcode your largest file so a slow job is never stolen mid-flight.
+coordination:
+  enabled: true
+  claims_folder: "/_h265_claims"
+  claim_ttl_minutes: 120
+  heartbeat_minutes: 10
+  pc_name: ""        # blank → uses the machine's hostname (Heavy1, Heavy2, ...)

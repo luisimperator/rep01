@@ -95,6 +95,65 @@ def setup_logging(verbose: bool = False, log_file: Path | None = None) -> None:
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 
+# Kept open for the whole process so faulthandler can write to it mid-crash.
+_crash_log_fh = None
+
+
+def install_crash_handler(log_dir: Path) -> None:
+    """Last-resort crash diagnostics for the headless (pythonw) daemon.
+
+    Under pythonw there is no console, so an unhandled Python exception or a
+    native fault in a linked library (e.g. the QSV/ffmpeg layer) leaves no
+    trace: the process just vanishes and Task Scheduler restarts it. We append
+    a full traceback to <log_dir>/crash.log so the *next* silent death leaves a
+    body to autopsy. Purely additive — never let diagnostics break startup.
+    """
+    global _crash_log_fh
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        crash_log = log_dir / 'crash.log'
+        # Line-buffered; faulthandler writes to this fd directly while the
+        # interpreter is crashing, when no Python code can run.
+        _crash_log_fh = open(crash_log, 'a', encoding='utf-8', buffering=1)
+    except Exception:  # pragma: no cover — diagnostics must not crash startup
+        logger.warning("Could not open crash.log; crash diagnostics disabled",
+                       exc_info=True)
+        return
+
+    import faulthandler
+    faulthandler.enable(file=_crash_log_fh, all_threads=True)
+
+    def _record(exc_type, exc_value, exc_tb, source: str) -> None:
+        import traceback
+        from datetime import datetime
+        _crash_log_fh.write(
+            f"\n{'=' * 72}\n{datetime.now().isoformat()} — UNHANDLED EXCEPTION "
+            f"({source}, pid {os.getpid()})\n{'=' * 72}\n"
+        )
+        traceback.print_exception(exc_type, exc_value, exc_tb, file=_crash_log_fh)
+        _crash_log_fh.flush()
+        logger.critical("Unhandled exception (%s) — written to crash.log",
+                        source, exc_info=(exc_type, exc_value, exc_tb))
+
+    def _excepthook(exc_type, exc_value, exc_tb) -> None:
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        _record(exc_type, exc_value, exc_tb, "main thread")
+
+    sys.excepthook = _excepthook
+
+    def _thread_excepthook(args) -> None:
+        if issubclass(args.exc_type, (KeyboardInterrupt, SystemExit)):
+            return
+        name = args.thread.name if args.thread else "?"
+        _record(args.exc_type, args.exc_value, args.exc_traceback,
+                f"thread '{name}'")
+
+    threading.excepthook = _thread_excepthook
+    logger.info("Crash diagnostics armed → %s", crash_log)
+
+
 class Daemon:
     """Main daemon that orchestrates the transcoding pipeline."""
 
@@ -107,6 +166,7 @@ class Daemon:
         self.dispatcher: JobDispatcher | None = None
         self.rate_limiter: TokenBucket | None = None
         self.disk_budget: DiskBudget | None = None
+        self.claims = None  # ClaimStore | None, set in setup() when coordination on
         self.api_server: ApiServer | None = None
         self.census_worker: CensusWorker | None = None
         self.deep_scan: DeepScanWorker | None = None
@@ -385,6 +445,37 @@ class Daemon:
             f"(interval={self.config.incidents.health_check_interval_minutes}min)"
         )
 
+        # Cross-machine claim coordination — only when several machines share
+        # one Dropbox pool. Built before the download workers so they can
+        # consult it; the reconciler heartbeats/releases claims out of band.
+        coord = self.config.coordination
+        if coord.enabled:
+            import socket as _socket
+            from .claims import ClaimStore, ClaimReconciler
+            pc = (coord.pc_name or "").strip() or _socket.gethostname()
+            self.claims = ClaimStore(
+                self.dropbox,
+                folder=coord.claims_folder,
+                pc_name=pc,
+                ttl_minutes=coord.claim_ttl_minutes,
+            )
+            # Re-adopt claims for jobs already in flight after a restart.
+            try:
+                active = self.db.get_jobs_by_states(ACTIVE_STATES, limit=100_000)
+                self.claims.seed_held(j.dropbox_path for j in active)
+            except Exception:
+                logger.warning("claims: initial seed failed", exc_info=True)
+            reconciler = ClaimReconciler(
+                self.claims, self.db, ACTIVE_STATES, self.stop_event,
+                interval_sec=max(30, coord.heartbeat_minutes * 60),
+            )
+            reconciler.start()
+            self.workers.append(reconciler)
+            logger.info(
+                "claims: coordination ON as '%s' (folder=%s, ttl=%dm)",
+                pc, coord.claims_folder, coord.claim_ttl_minutes,
+            )
+
         # Download workers
         for i in range(self.config.concurrency.download_workers):
             worker = DownloadWorker(
@@ -396,6 +487,7 @@ class Daemon:
                 self.stop_event,
                 self.dispatcher,
                 disk_budget=self.disk_budget,
+                claims=self.claims,
             )
             worker.start()
             self.workers.append(worker)
@@ -464,6 +556,35 @@ class Daemon:
             self.config, self.db, self.dropbox, self.stop_event,
             dispatcher=self.dispatcher,
         )
+
+        # Availability gating: on the editors' machines this keeps the
+        # pipeline asleep (and the GPU free) outside the night window or while
+        # someone is at the keyboard. Off by default → dedicated box runs 24/7.
+        if self.config.availability.enabled:
+            from .availability import AvailabilityWorker
+            from .api import _kill_all_ffmpeg
+            avail = AvailabilityWorker(
+                self.config, self.dispatcher, self.stop_event, _kill_all_ffmpeg,
+            )
+            avail.start()
+            self.workers.append(avail)
+
+        # Remote health telemetry: publish a status snapshot to GitHub on a
+        # timer so the daemon can be watched without copying logs by hand.
+        # Reuses the incidents token (or GITHUB_TOKEN) when none is set here.
+        tele = self.config.telemetry
+        if tele.enabled:
+            from .telemetry import StatusPublisher
+            tele_token = (
+                (tele.github_token or "").strip()
+                or (self.config.incidents.github_token or "").strip()
+                or os.environ.get("GITHUB_TOKEN", "")
+            )
+            publisher = StatusPublisher(
+                self.config, self.db, self.stop_event, self.config.log_dir, tele_token,
+            )
+            publisher.start()
+            self.workers.append(publisher)
 
         audio_n = self.config.concurrency.audio_workers if self.config.audio.enabled else 0
         logger.info(
@@ -602,6 +723,7 @@ def start(ctx: click.Context) -> None:
 
     config = load_config(config_path)
     setup_logging(verbose, config.log_dir / 'transcoder.log')
+    install_crash_handler(config.log_dir)
 
     daemon = Daemon(config)
 

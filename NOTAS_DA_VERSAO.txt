@@ -2,6 +2,184 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 7.6.1
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Instalação fácil das máquinas operárias (Heavy1-6)
+
+  [FEATURE] Modo "worker" no bootstrap.ps1: um comando só já instala a máquina
+            JÁ configurada como operária noturna. Basta rodar com HD_WORKER=1:
+
+              $env:HD_WORKER=1; iwr .../bootstrap.ps1 -UseBasicParsing | iex
+
+            Ele faz a instalação normal (Python, FFmpeg, daemon, tarefa que
+            liga sozinho, dashboard) e, no fim, aplica o perfil de produção:
+            NVENC, modo noturno 18:00-09:00 (pausa quando alguém usa a
+            máquina), divisão do Dropbox ligada e disco baixo (150 GB de teto,
+            100 GB de margem, concorrência 1/1/1).
+
+  [FEATURE] Novo installer/apply_worker_profile.py: aplica esse perfil num
+            config.yaml existente (merge — preserva auth/paths e chaves
+            vizinhas; idempotente). Dá pra rodar à mão também. Coberto por
+            testes (perfil correto, idempotência, config válida pós-merge).
+
+  [DOC] README.md ganhou a seção "Editors' machines (night workers)" com o
+        one-liner. Tudo continua ajustável depois pelo dashboard (Settings >
+        Fleet) — zero edição de arquivo.
+
+--------------------------------------------------------------------------------
+
+Versão: 7.6.0
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Tudo no dashboard: zero YAML pra configurar a frota
+
+  [FEATURE] As configurações de frota agora são clicáveis no dashboard web
+            (/api/settings grava no config.yaml sozinho) — sem editar arquivo
+            na mão. Novos controles: escolha do encoder (NVENC/QSV/CPU), modo
+            noturno completo (liga/desliga, horário início-fim, pausar quando
+            alguém usa a máquina, minutos de ocioso), teto de rascunho de
+            disco (GB), e a divisão entre máquinas (liga/desliga, pasta de
+            reservas, expiração). Mais upload_workers.
+
+  [API] _SETTINGS_KNOBS ganhou os tipos 'choice' (com coerção pro enum, ex.:
+        encoder_preference) e 'hhmm' (HH:MM). A gravação no YAML cita strings
+        com ':' (ex.: night_start: "18:00") pra o YAML não ler 18:00 como
+        número sexagesimal. O teto de disco (max_staging) é aplicado ao vivo
+        no DiskBudget; o resto persiste e vale no próximo restart (botão de
+        restart já existe no dashboard).
+
+  [UI] dashboard.html ganhou a seção "Fleet / production machine" com os
+       controles acima, agrupados e com dicas de quando precisa reiniciar.
+
+--------------------------------------------------------------------------------
+
+Versão: 7.5.0
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Divisão dinâmica do Dropbox: várias máquinas, mesmo monte, sem duplicar
+
+  [FEATURE] Novo módulo claims.py + seção coordination no config. Permite
+            várias máquinas dividirem O MESMO Dropbox sem duas pegarem o
+            mesmo vídeo. Cada máquina tem banco local, então a coordenação é
+            via Dropbox: antes de começar um arquivo, a máquina cria de forma
+            ATÔMICA um arquivo de "reserva" em claims_folder (/_h265_claims).
+            A atomicidade vem do DropboxClient.claim_create — upload em modo
+            'add', que renomeia em conflito em vez de sobrescrever: se caiu no
+            caminho exato, ganhou; se o Dropbox renomeou, perdeu (apaga a
+            cópia e pula o arquivo). Quem perde marca o job como
+            SKIPPED_EXCLUDED ("claimed by another machine") sem gastar banda.
+
+  [FEATURE] Ciclo de vida desacoplado: o ClaimReconciler (thread) renova
+            (heartbeat) as reservas dos jobs em andamento e LIBERA as dos
+            jobs que terminaram. Reserva sem heartbeat por claim_ttl_minutes
+            (default 60, perfil de produção 120) é considerada abandonada
+            (máquina caiu/desligou) e pode ser ROUBADA por outra — trabalho
+            nunca fica preso. No restart, a máquina re-adota as reservas dos
+            jobs que já estavam em andamento (seed_held).
+
+  [INTEGRATION] DownloadWorker ganha o portão de reserva antes do download;
+                main.py monta o ClaimStore + reconciler quando
+                coordination.enabled. Desligado por padrão (1 máquina não
+                precisa). config.editor-machine.example.yaml já vem com
+                coordination ligado pras Heavy1-6. RECOMENDADO: ligar em UMA
+                máquina primeiro e observar os logs antes de soltar na frota.
+
+  [LIMIT] Conhecido (aceitável v1): após uma queda maior que o TTL, a máquina
+          pode achar que ainda tem uma reserva que já foi roubada, e o mesmo
+          arquivo rodar duas vezes. As checagens de saída/rev pós-processo
+          deduplicam esse caso raro; mantenha o TTL acima do tempo de
+          baixar+transcodar seu maior arquivo.
+
+--------------------------------------------------------------------------------
+
+Versão: 7.4.0
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Modo máquina de produção: encoda de madrugada, sem atrapalhar editor
+
+  [FEATURE] Novo módulo availability.py + seção availability no config. Pra
+            rodar nas máquinas dos editores (Heavy1-6) sem incomodar: com
+            availability.enabled, o pipeline só trabalha dentro de uma janela
+            noturna (night_start/night_end, ex.: 20h-7h) E só quando ninguém
+            mexe no teclado/mouse (pause_when_user_active + idle_minutes). No
+            instante que alguém senta na máquina ou amanhece, ele pausa o
+            dispatcher e MATA o ffmpeg em andamento pra devolver a GPU na
+            hora. Volta sozinho quando é seguro. Só desfaz uma pausa que ele
+            mesmo deu — pause manual pelo dashboard (/api/pause) nunca é
+            atropelado. Detecção de ocioso é via GetLastInputInfo (Windows);
+            onde não dá pra saber, não bloqueia por ocioso. Desligado por
+            padrão — a HEAVY7 dedicada continua 24/7.
+
+  [DOC] Novo config.editor-machine.example.yaml: perfil pronto pras Heavy1-6
+        — NVENC (encoder_preference: nvenc), dois tetos BAIXOS de disco
+        (max_staging_bytes ~100 GB de rascunho + min_free_bytes ~100 GB de
+        margem: se o disco já tá apertado, o encoder nem começa) e concorrência
+        1/1/1. É só sobrepor no config.yaml da máquina. (A divisão SEGURA do
+        mesmo Dropbox entre máquinas é um item à parte — até lá, aponte cada
+        máquina pras próprias pastas.)
+
+--------------------------------------------------------------------------------
+
+Versão: 7.3.0
+Data: 09/06/2026
+--------------------------------------------------------------------------------
+
+Telemetria remota: publica um snapshot de saúde no GitHub
+
+  [FEATURE] Novo módulo telemetry.py + seção telemetry no config. Com
+            telemetry.enabled, um StatusPublisher sobe a cada N minutos
+            (default 30) um arquivo Markdown pro GitHub — telemetry/<pc>-
+            status.md, no branch 'telemetry' (criado sozinho, fora do main)
+            — com tail do transcoder.log, contagem de jobs por estado,
+            espaço em disco e qualquer conteúdo NOVO do crash.log. Assim dá
+            pra acompanhar a daemon de longe (ex.: revisão a cada 6h) sem
+            ninguém copiar log na mão. Reaproveita o token do incidents (ou
+            GITHUB_TOKEN) — normalmente não precisa configurar token novo.
+            Desligado por padrão; falhas de rede só logam e tentam de novo no
+            próximo ciclo (telemetria nunca derruba a daemon); o token nunca
+            é logado nem publicado.
+
+--------------------------------------------------------------------------------
+
+Versão: 7.2.0
+Data: 08/06/2026
+--------------------------------------------------------------------------------
+
+Foco por pasta sem ociosidade + caixa-preta de crash
+
+  [PERF] sticky_folder_enabled volta para True (padrão), mas SEM o problema
+         que o tinha desligado. Agora o dispatcher concentra todos os
+         download workers numa pasta só pra fechá-la rápido e liberar o
+         espaço do Dropbox mais cedo — e, assim que a pasta não tem mais
+         arquivo PRA COMEÇAR, ele solta na hora e os workers livres já
+         partem pra próxima pasta. Antes (v6.8.10/7.0.0) ele esperava os
+         últimos downloads daquela pasta terminarem, deixando workers
+         parados; esse "idle no rabo" era o único motivo de o sticky ter
+         sido desligado. dispatcher._apply_sticky_folder agora libera o
+         sticky quando não há candidatos dispatcháveis na pasta, sem olhar
+         o que ainda está em voo (os downloads em andamento drenam sozinhos).
+         A janela de fetch é larga (>= 500 jobs, ordenada por prioridade de
+         pasta), então uma fatia vazia significa pasta de fato drenada.
+         Quem preferir interleaving puro entre pastas: sticky_folder_enabled
+         = false.
+
+  [PERF] Caixa-preta de crash. A daemon roda sob pythonw (sem console), então
+         uma exceção não-tratada ou um crash nativo na camada QSV/ffmpeg
+         sumia sem deixar rastro — o processo evaporava e o Task Scheduler
+         religava. install_crash_handler() agora arma faulthandler +
+         sys.excepthook + threading.excepthook gravando o traceback completo
+         em logs/crash.log (e C:\transcoder\crash.log no GUI). Da próxima vez
+         que cair desse jeito, fica o corpo pra autópsia. É puramente
+         aditivo: nunca quebra o startup, e KeyboardInterrupt/SystemExit
+         passam direto sem virar ruído.
+
+--------------------------------------------------------------------------------
+
 Versão: 7.1.0
 Data: 08/06/2026
 --------------------------------------------------------------------------------
