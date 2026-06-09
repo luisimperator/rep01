@@ -1,18 +1,18 @@
-# HeavyDrops Transcoder — Windows one-liner bootstrap.
+# HeavyDrops Transcoder - Windows one-liner bootstrap.
 #
 # Usage (paste into PowerShell):
 #
 #   iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
 #
-# For an EDITORS' machine (Heavy1-6) that should only chip in OVERNIGHT —
+# For an EDITORS' machine (Heavy1-6) that should only chip in OVERNIGHT -
 # pre-configured for NVIDIA NVENC, night mode (18:00-09:00, yields the instant
-# someone uses the PC), shared-Dropbox claim, and a low disk footprint — set
+# someone uses the PC), shared-Dropbox claim, and a low disk footprint - set
 # HD_WORKER first:
 #
 #   $env:HD_WORKER=1; iwr https://raw.githubusercontent.com/luisimperator/rep01/main/bootstrap.ps1 -UseBasicParsing | iex
 #
 # To also bake in the Dropbox credentials so you don't retype them on every
-# machine, set them too — they go into the command you paste, NEVER into the
+# machine, set them too - they go into the command you paste, NEVER into the
 # repo. Use the durable refresh-token trio (copy the three values from a working
 # machine's config.yaml, e.g. HEAVY7); a plain access token expires in ~4h:
 #
@@ -173,7 +173,7 @@ if (-not (Test-Path $ConfigPath)) {
     if ($token) {
         $raw = $raw -replace 'dropbox_token: .*', ("dropbox_token: `"$token`"")
     }
-    # Durable refresh-token auth (recommended — short-lived tokens die in ~4h).
+    # Durable refresh-token auth (recommended - short-lived tokens die in ~4h).
     # Copy these three values from a working machine's config.yaml (e.g. HEAVY7).
     if ($env:HD_DROPBOX_APP_KEY) {
         $raw = $raw -replace 'dropbox_app_key: .*', ("dropbox_app_key: `"$($env:HD_DROPBOX_APP_KEY)`"")
@@ -252,10 +252,10 @@ Info ""
 if ($WorkerMode) {
     Info "This machine is set up as a NIGHT WORKER:"
     Info "  - encodes only 18:00-09:00, and pauses the instant someone uses it"
-    Info "  - shares the Dropbox pool (no duplicate work) — same claims folder as the others"
+    Info "  - shares the Dropbox pool (no duplicate work) - same claims folder as the others"
     Info "  - NVIDIA NVENC, low disk footprint"
     Info "  Make sure it points at the SAME Dropbox account/folder as the dedicated box."
-    Info "  Tweak anything from the dashboard's Settings > Fleet section — no files to edit."
+    Info "  Tweak anything from the dashboard's Settings > Fleet section - no files to edit."
     Info ""
 }
 Info "The daemon auto-starts at each logon. To stop or restart now:"
