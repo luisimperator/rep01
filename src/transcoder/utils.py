@@ -179,29 +179,47 @@ def path_is_premiere_preview(path: str) -> bool:
     return False
 
 
-# Sony cameras (FX3, A7S III, etc.) write low-bitrate proxy copies of every
-# clip into a `Proxies/` subfolder, named `<original>_Proxy.<ext>`. They're
-# only useful for offline edit on slower machines — if the user has the
-# originals (we already scan those), transcoding the proxies is pure waste.
-_PROXIES_SEGMENT_NAMES = {"Proxies", "proxies", "PROXIES"}
+# Cameras (Sony FX3/A7S III: `<original>_Proxy.<ext>`) and NLEs (Premiere
+# "Create proxies", DaVinci) write low-bitrate proxy copies of every clip
+# into a `Proxies/` subfolder. They're only useful for offline edit on
+# slower machines — if the user has the originals (we already scan those),
+# downloading/transcoding the proxies is pure waste. Until v7.7.x only
+# Sony-named `*_Proxy.*` files were matched; the operator confirmed every
+# `Proxies/` folder in this pipeline is regenerable, so the whole folder
+# is now treated as throwaway regardless of the file naming inside.
+_PROXIES_SEGMENT_NAME = "proxies"
 
 
-def path_is_camera_proxy(path: str) -> bool:
-    """True when the path is a Sony-style camera proxy file.
+def path_is_in_proxies_folder(path: str) -> bool:
+    """True when the path lives anywhere under a `Proxies/` folder.
 
-    Pattern: any path segment named `Proxies/` AND the file basename ends
-    with `_Proxy.<ext>` (Sony convention). The basename check is the
-    safety net so unrelated files in a folder coincidentally called
-    "Proxies/" don't get nuked.
+    Case-insensitive segment match, any depth — Premiere proxy trees
+    nest as `Proxies/<resolution>/clip.mov`, Sony as `Proxies/clip_Proxy.mp4`.
     """
     if not path:
         return False
     from pathlib import PurePosixPath
-    p = PurePosixPath(path)
-    if not any(seg in _PROXIES_SEGMENT_NAMES for seg in p.parts):
-        return False
-    stem = p.stem
-    return stem.lower().endswith("_proxy")
+    return any(
+        seg.lower() == _PROXIES_SEGMENT_NAME
+        for seg in PurePosixPath(path).parts
+    )
+
+
+def proxies_folder_root(path: str) -> str | None:
+    """Return the path of the outermost `Proxies/` ancestor of `path`.
+
+    `/a/b/Proxies/sub/clip.mov` → `/a/b/Proxies`. None when the path has
+    no Proxies segment. Used to delete the whole proxy tree in one
+    files_delete_v2 call instead of file-by-file.
+    """
+    if not path:
+        return None
+    from pathlib import PurePosixPath
+    parts = PurePosixPath(path).parts
+    for i, seg in enumerate(parts):
+        if seg.lower() == _PROXIES_SEGMENT_NAME:
+            return str(PurePosixPath(*parts[: i + 1]))
+    return None
 
 
 # Codecs that ffprobe reports for files that are technically images

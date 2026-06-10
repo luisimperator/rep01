@@ -188,9 +188,12 @@ class ScannerSettings(BaseModel):
     delete_throwaway_files: bool = Field(
         default=False,
         description=(
-            "When True, scanner DELETES files it identifies as throwaway "
-            "(Adobe Premiere preview cache and Sony-style camera proxies) "
-            "from Dropbox during scan instead of just skipping them. "
+            "When True, scanner DELETES throwaway media from Dropbox during "
+            "scan instead of just skipping it: Adobe Premiere preview-cache "
+            "files, and entire Proxies/ folders (camera/NLE proxies — the "
+            "whole folder goes in one delete). Both are gated by the "
+            "legacy_reorganize_min_age_days folder-age check, so a Proxies "
+            "folder is only deleted once it's older than that threshold. "
             "Dropbox version history preserves the deletes for ~30 days. "
             "Default False — opt-in because destructive."
         ),

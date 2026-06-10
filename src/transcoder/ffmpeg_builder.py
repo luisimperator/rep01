@@ -121,6 +121,7 @@ class FFmpegCommandBuilder:
         output_path: Path,
         video_info: VideoInfo,
         encoder: EncoderType,
+        force_sw_decode: bool = False,
     ) -> FFmpegCommand:
         """
         Build FFmpeg transcode command.
@@ -130,6 +131,11 @@ class FFmpegCommandBuilder:
             output_path: Path for output video.
             video_info: Probed video information.
             encoder: Encoder to use.
+            force_sw_decode: Skip the hardware decoder and software-decode the
+                input (hybrid mode) even when the HW decoder could handle it.
+                Used to recover sources whose bitstream makes the QSV/NVENC
+                decoder bail mid-file while ffmpeg still exits 0 — software
+                decode is far more error-tolerant. The encoder stays HW.
 
         Returns:
             FFmpegCommand ready for execution.
@@ -158,7 +164,7 @@ class FFmpegCommandBuilder:
         # ~5-10x faster than pure libx265 because the encode itself is
         # still hardware. Detected upfront so we don't waste two failed
         # ffmpeg launches before the auto-fallback kicks in.
-        args.extend(self._get_input_hwaccel(encoder, video_info))
+        args.extend(self._get_input_hwaccel(encoder, video_info, force_sw_decode))
 
         # Input file
         args.extend(["-i", str(input_path)])
@@ -212,7 +218,7 @@ class FFmpegCommandBuilder:
         # mode (sw decode for 4:2:2/4:4:4 inputs the HW decoder rejects).
         # No-op for libx265 (pix_fmt covers it) and no-op when full HW
         # decode is in play.
-        args.extend(self._get_video_filter_args(encoder, video_info))
+        args.extend(self._get_video_filter_args(encoder, video_info, force_sw_decode))
 
         # Video encoder settings
         args.extend(self._get_video_encoder_args(encoder, profile, video_info))
@@ -239,6 +245,8 @@ class FFmpegCommandBuilder:
             f"{video_info.width}x{video_info.height}, "
             f"{video_info.duration_sec:.1f}s"
         )
+        if force_sw_decode:
+            description += " (forced sw decode)"
 
         return FFmpegCommand(
             args=args,
@@ -275,8 +283,16 @@ class FFmpegCommandBuilder:
         self,
         encoder: EncoderType,
         video_info: VideoInfo | None = None,
+        force_sw_decode: bool = False,
     ) -> list[str]:
         """Get input hardware acceleration arguments."""
+        if force_sw_decode and encoder != EncoderType.CPU:
+            logger.info(
+                "ffmpeg: %s hardware decode disabled by caller (forced sw "
+                "decode); using software decode + %s hardware encode",
+                encoder.value, encoder.value,
+            )
+            return []
         if encoder == EncoderType.QSV:
             if self._hw_can_decode_input(video_info):
                 return ["-hwaccel", "qsv", "-hwaccel_output_format", "qsv"]
@@ -306,6 +322,7 @@ class FFmpegCommandBuilder:
         self,
         encoder: EncoderType,
         video_info: VideoInfo,
+        force_sw_decode: bool = False,
     ) -> list[str]:
         """Software chroma/format conversion filter, used when:
           - the hardware encoder needs 4:2:0 but the source is 4:2:2; AND
@@ -319,8 +336,10 @@ class FFmpegCommandBuilder:
         if encoder == EncoderType.CPU:
             return []
         # If hwaccel is active (frames live on GPU surfaces), no
-        # software filter is appropriate.
-        if self._hw_can_decode_input(video_info):
+        # software filter is appropriate. force_sw_decode means the caller
+        # disabled hwaccel, so the filter IS needed regardless of chroma —
+        # the sw-decoded frames must be formatted for the HW encoder.
+        if self._hw_can_decode_input(video_info) and not force_sw_decode:
             return []
         # Hybrid mode: pick the same pix_fmt the encoder will produce so
         # the chroma reduction happens once, in software, before upload.
@@ -551,13 +570,17 @@ class FFmpegCommandBuilder:
         output_path: Path,
         video_info: VideoInfo,
         encoder: EncoderType,
+        force_sw_decode: bool = False,
     ) -> FFmpegCommand:
         """
         Build command with audio re-encoding fallback.
 
         Used when audio copy fails (incompatible codec).
         """
-        cmd = self.build_transcode_command(input_path, output_path, video_info, encoder)
+        cmd = self.build_transcode_command(
+            input_path, output_path, video_info, encoder,
+            force_sw_decode=force_sw_decode,
+        )
 
         # Replace audio copy with re-encode
         new_args = []

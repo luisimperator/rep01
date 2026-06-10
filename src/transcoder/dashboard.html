@@ -666,6 +666,15 @@ async function renderSettings() {
       <span class="hint" style="color: #f59e0b;">⚠ Forces libx265 (CPU) for 4:2:2 sources. Encoding is roughly <b>10× slower</b> than QSV — a 4K 10-bit 4:2:2 clip of 1h becomes 5-10h of transcode. Only enable for masters that need chroma fidelity (graphics, chroma key). Default OFF.</span>
     </div>
     <div class="field">
+      <label>${lbl('delete_throwaway_files', 'Delete Premiere previews + Proxies/ folders from Dropbox')}</label>
+      <label class="switch">
+        <input id="set-del-throwaway" type="checkbox" ${s.delete_throwaway_files ? 'checked' : ''}>
+        <span class="track"></span>
+        <span style="color: var(--muted); font-size: .9em">${s.delete_throwaway_files ? 'ON — Proxies/ removed as a whole folder once settled' : 'OFF — proxies/previews are skipped but kept on Dropbox'}</span>
+      </label>
+      <span class="hint">Deletes only run after the folder is older than the reorganize wait above — active edits are never touched. Proxies/previews are never transcoded either way. Deletes are recoverable in Dropbox version history for ~30 days.</span>
+    </div>
+    <div class="field">
       <label>${lbl('cleanup_dot_underscore', "Quarantine ._ macOS metadata into 'ponto tracinho/'")}</label>
       <label class="switch">
         <input id="set-cleanup-dotu" type="checkbox" ${s.cleanup_dot_underscore ? 'checked' : ''}>
@@ -830,6 +839,7 @@ async function saveSettings() {
     legacy_reorganize_delete_wav_after_seconds: parseInt(document.getElementById('set-wav-del').value),
     audio_enabled: document.getElementById('set-audio-enabled').checked,
     audio_workers: parseInt(document.getElementById('set-audio-workers').value),
+    delete_throwaway_files: document.getElementById('set-del-throwaway').checked,
     cleanup_dot_underscore: document.getElementById('set-cleanup-dotu').checked,
     cleanup_dot_underscore_delete_after_seconds: parseInt(document.getElementById('set-cleanup-dotu-del').value),
     health_check_interval_minutes: parseInt(document.getElementById('set-health').value),
