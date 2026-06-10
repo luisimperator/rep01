@@ -186,16 +186,17 @@ class ScannerSettings(BaseModel):
         description="Max age of a cached feito.txt read before it is refetched"
     )
     delete_throwaway_files: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "When True, scanner DELETES throwaway media from Dropbox during "
-            "scan instead of just skipping it: Adobe Premiere preview-cache "
-            "files, and entire Proxies/ folders (camera/NLE proxies — the "
-            "whole folder goes in one delete). Both are gated by the "
-            "legacy_reorganize_min_age_days folder-age check, so a Proxies "
-            "folder is only deleted once it's older than that threshold. "
-            "Dropbox version history preserves the deletes for ~30 days. "
-            "Default False — opt-in because destructive."
+            "When True (default), scanner DELETES throwaway media from "
+            "Dropbox during scan instead of just skipping it: Adobe Premiere "
+            "preview-cache files, and entire Proxies/ folders (camera/NLE "
+            "proxies — the whole folder goes in one delete). Both are gated "
+            "by the legacy_reorganize_min_age_days folder-age check (default "
+            "60d), so a Proxies folder is only deleted once nothing inside "
+            "it was touched for that many days — active edits are never "
+            "affected. Dropbox version history preserves the deletes for "
+            "~30 days. Set False to skip-but-keep."
         ),
     )
 

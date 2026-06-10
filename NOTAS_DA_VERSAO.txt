@@ -14,14 +14,16 @@ Proxies nunca mais: pula tudo dentro de Proxies/ e pode apagar a pasta inteira
             como os C8547_Proxy.mov da HEAVY7). O downloader também pula
             jobs de proxy que já estavam na fila (enfileirados por scanner
             antigo) — zero banda gasta.
-  [FEATURE] Com "delete throwaway" ligado, a pasta Proxies/ é apagada
-            INTEIRA num delete só (em vez de arquivo por arquivo, que
-            deixava a árvore vazia pra trás). Respeita a mesma trava de
-            idade do reorganize (legacy_reorganize_min_age_days): só apaga
-            pasta sem atividade há mais de N dias — edição ativa nunca é
-            tocada. Recuperável no histórico do Dropbox por ~30 dias.
+  [FEATURE] A pasta Proxies/ é apagada INTEIRA num delete só (em vez de
+            arquivo por arquivo, que deixava a árvore vazia pra trás).
+            LIGADO POR PADRÃO, respeitando a mesma trava de idade do
+            reorganize (legacy_reorganize_min_age_days, padrão 60d): só
+            apaga pasta sem NENHUMA atividade há mais de N dias — edição
+            ativa nunca é tocada. Recuperável no histórico do Dropbox por
+            ~30 dias. Vale também pros previews do Premiere.
   [FEATURE] Novo toggle no dashboard (Settings): "Delete Premiere previews
-            + Proxies/ folders from Dropbox". Liga sem editar arquivo.
+            + Proxies/ folders from Dropbox" — serve pra DESLIGAR por
+            máquina se um dia precisar (sem editar arquivo).
 
 Fim do loop infinito de download em arquivo que sumiu do Dropbox (404)
 

@@ -672,7 +672,7 @@ async function renderSettings() {
         <span class="track"></span>
         <span style="color: var(--muted); font-size: .9em">${s.delete_throwaway_files ? 'ON — Proxies/ removed as a whole folder once settled' : 'OFF — proxies/previews are skipped but kept on Dropbox'}</span>
       </label>
-      <span class="hint">Deletes only run after the folder is older than the reorganize wait above — active edits are never touched. Proxies/previews are never transcoded either way. Deletes are recoverable in Dropbox version history for ~30 days.</span>
+      <span class="hint">ON by default. Deletes only run after the folder is older than the reorganize wait above — active edits are never touched. Proxies/previews are never transcoded either way. Deletes are recoverable in Dropbox version history for ~30 days.</span>
     </div>
     <div class="field">
       <label>${lbl('cleanup_dot_underscore', "Quarantine ._ macOS metadata into 'ponto tracinho/'")}</label>

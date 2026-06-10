@@ -94,6 +94,13 @@ def test_download_worker_skips_queued_proxy_job():
 
 # --- scanner: whole-folder delete -------------------------------------------------
 
+def test_delete_throwaway_is_on_by_default():
+    """Operator decision (Transcoder 11): always on. The folder-age gate
+    (legacy_reorganize_min_age_days, default 60d) is the only brake."""
+    from transcoder.config import ScannerSettings
+
+    assert ScannerSettings().delete_throwaway_files is True
+
 class _FakeDropbox:
     def __init__(self):
         self.deleted: list[str] = []
