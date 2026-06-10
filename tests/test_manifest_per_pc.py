@@ -112,19 +112,22 @@ class TestManifestPerPC:
 
     def test_cleanup_old_history(self, tmp_path):
         mgr = self._make_manager(tmp_path, "Heavy1")
+        from datetime import datetime, timedelta
         from transcoder.manifest import DailyProgress
+        # Dynamic date so the test doesn't rot out of the 90-day window.
+        recent = (datetime.now() - timedelta(days=5)).strftime('%Y-%m-%d')
         mgr.manifest.daily_history['2020-01-01'] = DailyProgress(
             date='2020-01-01', files_processed=1,
             bytes_processed=100, bytes_saved=50, by_pc={'Heavy1': 1},
         )
-        mgr.manifest.daily_history['2025-12-01'] = DailyProgress(
-            date='2025-12-01', files_processed=1,
+        mgr.manifest.daily_history[recent] = DailyProgress(
+            date=recent, files_processed=1,
             bytes_processed=100, bytes_saved=50, by_pc={'Heavy1': 1},
         )
         removed = mgr.cleanup_old_history(max_days=90)
         assert removed == 1
         assert '2020-01-01' not in mgr.manifest.daily_history
-        assert '2025-12-01' in mgr.manifest.daily_history
+        assert recent in mgr.manifest.daily_history
 
     def test_path_normalization(self, tmp_path):
         mgr = self._make_manager(tmp_path, "Heavy1")

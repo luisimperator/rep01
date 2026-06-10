@@ -84,6 +84,15 @@ dispatcher:
 scanner:
   cursor_checkpoint_entries: 500
   feito_cache_ttl_sec: 3600
+  # Delete throwaway media from Dropbox during scan instead of just skipping:
+  # Adobe Premiere preview caches (file-by-file) and entire Proxies/ folders
+  # (camera/NLE proxies — one delete for the whole folder). ON by default.
+  # Gated by legacy_reorganize_min_age_days (default 60): a Proxies folder is
+  # only deleted once nothing inside it was touched for that many days, so
+  # active edits are never affected. Deletes are recoverable in Dropbox
+  # version history for ~30 days. Either way these files are NEVER
+  # downloaded/transcoded. Set false to skip-but-keep.
+  delete_throwaway_files: true
 disk_budget:
   enabled: false
   max_staging_bytes: 2000000000000

@@ -363,6 +363,15 @@ class DropboxClient:
                         f"retrying in {delay:.1f}s: {e}"
                     )
                     time.sleep(delay)
+            except DropboxNotFoundError:
+                # Permanent: the path is gone. Some operations (e.g.
+                # download_partial) probe-and-convert the ApiError inside
+                # their own closure, so the not-found arrives here already
+                # wrapped — without this re-raise it would fall into the
+                # generic handler below and burn the full 2+4+8+16s backoff
+                # on a 404 that can never succeed (the HEAVY7 preflight
+                # retry storm).
+                raise
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries - 1:
