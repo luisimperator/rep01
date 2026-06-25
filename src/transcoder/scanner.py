@@ -76,6 +76,10 @@ class Scanner:
         # without this memo each sibling would re-issue the settled check +
         # delete call against a folder that no longer exists.
         self._deleted_proxy_dirs: set[str] = set()
+        # Per-scan memo of .prproj lookups (folder -> newest project mtime or
+        # None) so sibling media folders sharing an edit ancestor don't each
+        # re-list the whole chain during the settled check.
+        self._settled_prproj_cache: dict = {}
 
     # ------------------------------------------------------------------ public
 
@@ -90,6 +94,7 @@ class Scanner:
         # Per-scan memo: a Proxies/ folder recreated by a new edit session
         # must be re-evaluated on later scans once it ages past the gate.
         self._deleted_proxy_dirs.clear()
+        self._settled_prproj_cache.clear()
 
         state = self.db.get_scan_state(self.config.dropbox_root)
         logger.info(
@@ -348,7 +353,11 @@ class Scanner:
                     self.config, "legacy_reorganize_min_age_days", 0
                 ) or 0)
                 try:
-                    settled = _is_folder_settled(self.dropbox, age_scope, min_age)
+                    settled = _is_folder_settled(
+                        self.dropbox, age_scope, min_age,
+                        dropbox_root=getattr(self.config, "dropbox_root", None),
+                        cache=self._settled_prproj_cache,
+                    )
                 except Exception as e:
                     logger.warning(
                         f"Skipping (throwaway {kind}, folder-age check failed): "

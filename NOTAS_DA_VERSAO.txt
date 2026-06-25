@@ -2,6 +2,37 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 7.9.0
+Data: 25/06/2026
+--------------------------------------------------------------------------------
+
+Reorganize e deleção agora seguem o PROJETO do Premiere, não "arquivo mexido"
+
+  [FIX] O conceito de "pasta ativa" estava errado. A trava de idade
+        (legacy_reorganize_min_age_days, padrão 60d) olhava se QUALQUER
+        arquivo da pasta tinha sido modificado nos últimos 60 dias — e usava
+        a data de UPLOAD do Dropbox (server_modified). Resultado: re-subir um
+        material velho (gravação de 2021) pro Dropbox "zerava o relógio", a
+        pasta parecia ativa e o daemon NUNCA fechava (h265 ficava no /h265,
+        h264 não era apagado) nem deletava Proxies. Era o que travava as
+        pastas recentes na HEAVY7 mesmo com material antigo.
+  [FEATURE] Agora o sinal é o projeto do Premiere (.prproj). O daemon sobe da
+            pasta da mídia até a pasta-de-entrega mais próxima que tenha um
+            .prproj e usa a data REAL de salvamento dele (client_modified):
+            projeto salvo há MENOS de 60 dias = em edição → segura; há mais de
+            60 dias → libera (fecha, troca o h265 no lugar, apaga o /h264 e a
+            pasta Proxies/). Se não existir .prproj em lugar nenhum (até o
+            dropbox_root), cai pra data REAL de gravação do próprio material.
+  [FIX] Passa a usar client_modified (a data real do arquivo em disco), nunca
+        server_modified (a hora em que o byte chegou no Dropbox). Re-sincronizar
+        um acervo antigo não congela mais o reorganize.
+  [NOTE] Vale para os DOIS caminhos com a mesma regra: o reorganize
+         (h264→h265 + deleção do backup /h264) E a deleção das pastas
+         Proxies/. Continua tudo recuperável no histórico do Dropbox (~30d) e
+         a pasta Proxies/ ainda é apagada INTEIRA num delete só.
+
+================================================================================
+
 Versão: 7.8.0
 Data: 10/06/2026
 --------------------------------------------------------------------------------

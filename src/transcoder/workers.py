@@ -1598,17 +1598,21 @@ class UploadWorker(BaseWorker):
 
         parent = str(PurePosixPath(just_finished_job.dropbox_path).parent)
 
-        # Gate 1: user activity (existing semantic)
+        # Gate 1: is the edit still active? Driven by the Premiere project's
+        # real save time (.prproj), falling back to the footage's real date.
         activity = is_folder_settled(
             self.dropbox, parent, self.config.legacy_reorganize_min_age_days,
+            dropbox_root=self.config.dropbox_root,
         )
         if not activity.settled:
             days = (f"{activity.days_since_newest:.1f}"
                     if activity.days_since_newest is not None else "?")
+            what = (".prproj saved" if getattr(activity, "source", "") == "prproj"
+                    else "footage")
             logger.info(
-                f"[{self.name}] Reorganize deferred ({parent}): folder activity "
-                f"{days}d old (< threshold {activity.threshold_days}d). "
-                f"Will retry after the next upload in this folder."
+                f"[{self.name}] Reorganize deferred ({parent}): {what} "
+                f"{days}d ago (< threshold {activity.threshold_days}d — project "
+                f"still active). Will retry after the next upload in this folder."
             )
             return
 

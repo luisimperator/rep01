@@ -1236,8 +1236,12 @@ def _reorganize_preview(api: ApiServer, body: dict) -> dict:
         by_parent.setdefault(cand.parent, {"video_pairs": [], "audio_pairs": []})["audio_pairs"] = cand.pairs
 
     rows = []
+    settled_cache: dict = {}
     for parent, slots in by_parent.items():
-        activity = is_folder_settled(dropbox, parent, threshold)
+        activity = is_folder_settled(
+            dropbox, parent, threshold,
+            dropbox_root=api.config.dropbox_root, cache=settled_cache,
+        )
         v_pairs = slots["video_pairs"]
         a_pairs = slots["audio_pairs"]
         total = len(v_pairs) + len(a_pairs)

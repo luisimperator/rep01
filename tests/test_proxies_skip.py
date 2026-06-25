@@ -120,6 +120,7 @@ def _bare_scanner(delete_on: bool, min_age_days: int = 30):
     )
     scanner.dropbox = _FakeDropbox()
     scanner._deleted_proxy_dirs = set()
+    scanner._settled_prproj_cache = {}
     return scanner
 
 
@@ -132,7 +133,7 @@ def test_settled_proxies_folder_deleted_once_for_all_siblings(monkeypatch):
 
     monkeypatch.setattr(
         scanner_mod, "_is_folder_settled",
-        lambda dbx, parent, min_age: SimpleNamespace(
+        lambda dbx, parent, min_age, **kw: SimpleNamespace(
             settled=True, days_since_newest=42.0, threshold_days=min_age,
         ),
     )
@@ -155,7 +156,7 @@ def test_hot_proxies_folder_is_deferred(monkeypatch):
 
     monkeypatch.setattr(
         scanner_mod, "_is_folder_settled",
-        lambda dbx, parent, min_age: SimpleNamespace(
+        lambda dbx, parent, min_age, **kw: SimpleNamespace(
             settled=False, days_since_newest=2.0, threshold_days=min_age,
         ),
     )
