@@ -1329,9 +1329,13 @@ def reorganize_existing(
 
     ready: list = []
     deferred: list = []
+    settled_cache: dict = {}
 
     for cand in candidates:
-        activity = is_folder_settled(dropbox, cand.parent, threshold)
+        activity = is_folder_settled(
+            dropbox, cand.parent, threshold,
+            dropbox_root=root, cache=settled_cache,
+        )
         cand.activity = activity
         if not activity.settled:
             cand.skip_reason = (

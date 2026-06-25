@@ -71,6 +71,15 @@ class Scanner:
         # In-process memoisation of feito.txt reads within a single scan call,
         # backed by a persistent DB cache across scans.
         self._feito_memo: dict[str, set[str]] = {}
+        # Proxies/ folders already deleted (or confirmed gone) — every file
+        # inside a deleted folder still shows up as its own scan entry, so
+        # without this memo each sibling would re-issue the settled check +
+        # delete call against a folder that no longer exists.
+        self._deleted_proxy_dirs: set[str] = set()
+        # Per-scan memo of .prproj lookups (folder -> newest project mtime or
+        # None) so sibling media folders sharing an edit ancestor don't each
+        # re-list the whole chain during the settled check.
+        self._settled_prproj_cache: dict = {}
 
     # ------------------------------------------------------------------ public
 
@@ -82,6 +91,10 @@ class Scanner:
         """
         stats = self._empty_stats()
         self._feito_memo.clear()
+        # Per-scan memo: a Proxies/ folder recreated by a new edit session
+        # must be re-evaluated on later scans once it ages past the gate.
+        self._deleted_proxy_dirs.clear()
+        self._settled_prproj_cache.clear()
 
         state = self.db.get_scan_state(self.config.dropbox_root)
         logger.info(
@@ -298,33 +311,57 @@ class Scanner:
             logger.debug(f"Skipping (under /assets/): {path}")
             return 'skipped_excluded'
 
-        # Throwaway files: Adobe Premiere preview cache and Sony-style
-        # camera proxies. Both are regenerable/redundant — transcoding
-        # them wastes bandwidth + CPU. Always skip; optionally delete
-        # from Dropbox when scanner.delete_throwaway_files is on
-        # (Dropbox version history covers the delete for ~30 days).
+        # Throwaway files: Adobe Premiere preview cache and camera/NLE
+        # proxies (anything under a `Proxies/` folder). Both are
+        # regenerable/redundant — transcoding them wastes bandwidth + CPU.
+        # Always skip; optionally delete from Dropbox when
+        # scanner.delete_throwaway_files is on (Dropbox version history
+        # covers the delete for ~30 days). Proxies are deleted as a WHOLE
+        # FOLDER (one files_delete_v2 on the Proxies/ root) — per-file
+        # deletes left empty Proxies trees behind and missed files that
+        # don't follow the Sony `*_Proxy.*` naming.
         #
         # SAFETY: when deleting, gate behind the same folder-age check
         # that reorganize uses (is_folder_settled / legacy_reorganize_min_age_days).
         # If the editor was active in the folder recently, deleting the
         # Premiere previews would interrupt an in-flight render and force
         # Premiere to regenerate them — disruptive. Same for proxies during
-        # an active offline edit. The skip itself is always safe and runs
-        # regardless of folder age.
+        # an active offline edit ("delete Proxies folders older than X
+        # days"). The skip itself is always safe and runs regardless of
+        # folder age.
         is_preview = _path_is_premiere_preview(path)
-        is_proxy = _path_is_camera_proxy(path)
+        is_proxy_folder = _path_is_in_proxies_folder(path)
+        is_proxy_file = _path_is_proxy_filename(path)
+        is_proxy = is_proxy_folder or is_proxy_file
         if is_preview or is_proxy:
-            kind = "Premiere preview" if is_preview else "camera proxy"
+            kind = "Premiere preview" if is_preview else "camera/NLE proxy"
+            # Whole-folder delete only when inside a proxy folder; a loose
+            # _Proxy.* file (or a preview) is handled file-by-file.
+            proxy_root = _proxies_folder_root(path) if is_proxy_folder else None
+            if proxy_root is not None and proxy_root in self._deleted_proxy_dirs:
+                logger.debug(
+                    f"Skipping (throwaway {kind}, Proxies folder already "
+                    f"deleted this scan): {path}"
+                )
+                return 'skipped_excluded'
             if (
                 getattr(self.config.scanner, "delete_throwaway_files", False)
                 and not dry_run
             ):
-                parent = str(PurePosixPath(path).parent)
+                # For proxies, both the age check and the delete target the
+                # Proxies/ folder itself — its newest entry is exactly "how
+                # old the proxies are". Previews stay file-by-file.
+                target = proxy_root or path
+                age_scope = proxy_root or str(PurePosixPath(path).parent)
                 min_age = int(getattr(
                     self.config, "legacy_reorganize_min_age_days", 0
                 ) or 0)
                 try:
-                    settled = _is_folder_settled(self.dropbox, parent, min_age)
+                    settled = _is_folder_settled(
+                        self.dropbox, age_scope, min_age,
+                        dropbox_root=getattr(self.config, "dropbox_root", None),
+                        cache=self._settled_prproj_cache,
+                    )
                 except Exception as e:
                     logger.warning(
                         f"Skipping (throwaway {kind}, folder-age check failed): "
@@ -346,20 +383,22 @@ class Scanner:
                     return 'skipped_excluded'
 
                 try:
-                    deleted = self.dropbox.delete_file(path)
+                    deleted = self.dropbox.delete_file(target)
                 except Exception as e:
                     logger.warning(
-                        f"Skipping (throwaway {kind}, delete failed): {path}: {e}"
+                        f"Skipping (throwaway {kind}, delete failed): {target}: {e}"
                     )
                 else:
+                    if proxy_root is not None:
+                        self._deleted_proxy_dirs.add(proxy_root)
                     if deleted:
                         logger.info(
-                            f"Deleted throwaway {kind} from Dropbox: {path} "
+                            f"Deleted throwaway {kind} from Dropbox: {target} "
                             f"(recoverable via version history for ~30 days)"
                         )
                     else:
                         logger.debug(
-                            f"Throwaway {kind} already gone from Dropbox: {path}"
+                            f"Throwaway {kind} already gone from Dropbox: {target}"
                         )
             else:
                 logger.debug(f"Skipping (throwaway {kind}): {path}")
@@ -705,5 +744,7 @@ def _cursor_preview(cursor: str | None) -> str:
 # scanner keep working without churn.
 from .utils import path_has_assets_segment as _path_has_assets_segment  # noqa: E402
 from .utils import path_is_premiere_preview as _path_is_premiere_preview  # noqa: E402
-from .utils import path_is_camera_proxy as _path_is_camera_proxy  # noqa: E402
+from .utils import path_is_in_proxies_folder as _path_is_in_proxies_folder  # noqa: E402
+from .utils import path_is_proxy_filename as _path_is_proxy_filename  # noqa: E402
+from .utils import proxies_folder_root as _proxies_folder_root  # noqa: E402
 from .reorganize import is_folder_settled as _is_folder_settled  # noqa: E402

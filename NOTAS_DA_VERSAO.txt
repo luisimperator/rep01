@@ -2,6 +2,104 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 8.0.0
+Data: 25/06/2026
+--------------------------------------------------------------------------------
+
+Proxies: pega tambem pasta "proxy" (singular) e arquivos *_Proxy.*
+
+  [FIX] O filtro de proxies so reconhecia pastas "Proxies/" (plural). Pastas
+        no singular "proxy/" (ex.: .../video/cam 03/proxy/C0462_Proxy.mov, que
+        apareciam no log da HEAVY7 baixando e dando retry) passavam batido e
+        eram baixadas/transcodadas. Agora "proxy" e "Proxies" (qualquer caixa)
+        contam igual.
+  [FEATURE] Volta a reconhecer o sufixo Sony *_Proxy.* (FX3 / A7S III) por
+            NOME de arquivo, pra pegar proxy largado FORA de uma pasta de
+            proxy (ao lado dos originais). Esses sao pulados/apagados arquivo
+            por arquivo; dentro de uma pasta proxy/Proxies continua sendo a
+            pasta inteira num delete so. Vale pro downloader (nao gasta banda)
+            e pro scanner (skip + delete opcional, com a mesma trava do .prproj).
+
+--------------------------------------------------------------------------------
+
+Reorganize e deleção agora seguem o PROJETO do Premiere, não "arquivo mexido"
+
+  [FIX] O conceito de "pasta ativa" estava errado. A trava de idade
+        (legacy_reorganize_min_age_days, padrão 60d) olhava se QUALQUER
+        arquivo da pasta tinha sido modificado nos últimos 60 dias — e usava
+        a data de UPLOAD do Dropbox (server_modified). Resultado: re-subir um
+        material velho (gravação de 2021) pro Dropbox "zerava o relógio", a
+        pasta parecia ativa e o daemon NUNCA fechava (h265 ficava no /h265,
+        h264 não era apagado) nem deletava Proxies. Era o que travava as
+        pastas recentes na HEAVY7 mesmo com material antigo.
+  [FEATURE] Agora o sinal é o projeto do Premiere (.prproj). O daemon sobe da
+            pasta da mídia até a pasta-de-entrega mais próxima que tenha um
+            .prproj e usa a data REAL de salvamento dele (client_modified):
+            projeto salvo há MENOS de 60 dias = em edição → segura; há mais de
+            60 dias → libera (fecha, troca o h265 no lugar, apaga o /h264 e a
+            pasta Proxies/). Se não existir .prproj em lugar nenhum (até o
+            dropbox_root), cai pra data REAL de gravação do próprio material.
+  [FIX] Passa a usar client_modified (a data real do arquivo em disco), nunca
+        server_modified (a hora em que o byte chegou no Dropbox). Re-sincronizar
+        um acervo antigo não congela mais o reorganize.
+  [NOTE] Vale para os DOIS caminhos com a mesma regra: o reorganize
+         (h264→h265 + deleção do backup /h264) E a deleção das pastas
+         Proxies/. Continua tudo recuperável no histórico do Dropbox (~30d) e
+         a pasta Proxies/ ainda é apagada INTEIRA num delete só.
+
+================================================================================
+
+Versão: 7.8.0
+Data: 10/06/2026
+--------------------------------------------------------------------------------
+
+Proxies nunca mais: pula tudo dentro de Proxies/ e pode apagar a pasta inteira
+
+  [FEATURE] Qualquer arquivo dentro de uma pasta Proxies/ agora é descartável
+            (antes só os com sufixo _Proxy estilo Sony — os proxies do
+            Premiere/DaVinci passavam batido e eram baixados e transcodados,
+            como os C8547_Proxy.mov da HEAVY7). O downloader também pula
+            jobs de proxy que já estavam na fila (enfileirados por scanner
+            antigo) — zero banda gasta.
+  [FEATURE] A pasta Proxies/ é apagada INTEIRA num delete só (em vez de
+            arquivo por arquivo, que deixava a árvore vazia pra trás).
+            LIGADO POR PADRÃO, respeitando a mesma trava de idade do
+            reorganize (legacy_reorganize_min_age_days, padrão 60d): só
+            apaga pasta sem NENHUMA atividade há mais de N dias — edição
+            ativa nunca é tocada. Recuperável no histórico do Dropbox por
+            ~30 dias. Vale também pros previews do Premiere.
+  [FEATURE] Novo toggle no dashboard (Settings): "Delete Premiere previews
+            + Proxies/ folders from Dropbox" — serve pra DESLIGAR por
+            máquina se um dia precisar (sem editar arquivo).
+
+Fim do loop infinito de download em arquivo que sumiu do Dropbox (404)
+
+  [FIX] Quando uma pasta era movida/renomeada/apagada no Dropbox depois do
+        scan, os jobs ficavam num loop eterno: 404 → retry com backoff →
+        FAILED → auto-revive ressuscitava → 404 de novo (HEAVY7: 22 jobs
+        girando pra sempre, log inundado). Agora o not_found é confirmado
+        com 1 consulta de metadata e o job vai pra SKIPPED_NOT_FOUND
+        (terminal — o auto-revive não toca). Se o arquivo voltar, o scanner
+        recria o job normalmente (rev nova).
+  [FIX] O retry interno do download_partial repetia o 404 com backoff
+        2+4+8+16s (8 chamadas inúteis por tentativa, no preflight HEVC).
+        Not-found agora curto-circuita na hora.
+
+Fim do loop infinito de transcode em arquivo com trecho corrompido
+
+  [FIX] Fonte com bitstream quebrado no meio fazia o decoder QSV/NVENC
+        desistir em silêncio: ffmpeg saía com código 0 mas o output parava
+        sempre no MESMO segundo (HEAVY7: 4178.7s → 2157.4s em TODA
+        tentativa, ~35 min de GPU por volta, pra sempre). Agora:
+          1. Truncou com decode de hardware → retenta UMA vez com decode
+             por software (decode sw + encoder de hardware igual), que
+             atravessa a região corrompida na maioria dos casos;
+          2. Truncou MESMO com decode de software → o fonte está quebrado
+             de verdade → SKIPPED_CORRUPT (terminal) + incidente automático
+             com o tail do ffmpeg.log.
+
+--------------------------------------------------------------------------------
+
 Versao: 7.6.3
 Data: 09/06/2026
 --------------------------------------------------------------------------------

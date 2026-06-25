@@ -774,6 +774,11 @@ _SETTINGS_KNOBS: dict[str, dict] = {
         "yaml_key": "low_bitrate_skip_mbps_per_megapixel",
         "label": "Skip files with input bitrate below N Mbps per megapixel (0 = disable)",
     },
+    "delete_throwaway_files": {
+        "type": "bool",
+        "yaml_key": "scanner.delete_throwaway_files",
+        "label": "Delete throwaway media from Dropbox: Premiere previews + whole Proxies/ folders (waits for the reorganize age gate)",
+    },
     "cleanup_dot_underscore": {
         "type": "bool",
         "yaml_key": "cleanup_dot_underscore",
@@ -925,6 +930,7 @@ def _settings_payload(api: ApiServer) -> dict:
             "audio_workers": cfg.concurrency.audio_workers,
             "preserve_chroma_422": cfg.preserve_chroma_422,
             "low_bitrate_skip_mbps_per_megapixel": cfg.low_bitrate_skip_mbps_per_megapixel,
+            "delete_throwaway_files": cfg.scanner.delete_throwaway_files,
             "cleanup_dot_underscore": cfg.cleanup_dot_underscore,
             "cleanup_dot_underscore_delete_after_seconds": cfg.cleanup_dot_underscore_delete_after_seconds,
             "dropbox_root": cfg.dropbox_root,
@@ -1230,8 +1236,12 @@ def _reorganize_preview(api: ApiServer, body: dict) -> dict:
         by_parent.setdefault(cand.parent, {"video_pairs": [], "audio_pairs": []})["audio_pairs"] = cand.pairs
 
     rows = []
+    settled_cache: dict = {}
     for parent, slots in by_parent.items():
-        activity = is_folder_settled(dropbox, parent, threshold)
+        activity = is_folder_settled(
+            dropbox, parent, threshold,
+            dropbox_root=api.config.dropbox_root, cache=settled_cache,
+        )
         v_pairs = slots["video_pairs"]
         a_pairs = slots["audio_pairs"]
         total = len(v_pairs) + len(a_pairs)

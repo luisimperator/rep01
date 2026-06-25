@@ -99,6 +99,12 @@ class DropboxFileInfo:
     rev: str
     server_modified: datetime
     content_hash: str | None = None
+    # The mtime the uploading client stamped — i.e. the file's REAL on-disk
+    # date (camera capture time, or when Premiere last saved a .prproj). The
+    # Dropbox desktop sync client preserves it. Distinct from server_modified,
+    # which is just when the bytes landed on Dropbox (an old archive re-synced
+    # today has a recent server_modified but its original client_modified).
+    client_modified: datetime | None = None
 
     @classmethod
     def from_metadata(cls, metadata: FileMetadata) -> DropboxFileInfo:
@@ -110,6 +116,7 @@ class DropboxFileInfo:
             rev=metadata.rev,
             server_modified=metadata.server_modified,
             content_hash=metadata.content_hash,
+            client_modified=getattr(metadata, "client_modified", None),
         )
 
 
@@ -363,6 +370,15 @@ class DropboxClient:
                         f"retrying in {delay:.1f}s: {e}"
                     )
                     time.sleep(delay)
+            except DropboxNotFoundError:
+                # Permanent: the path is gone. Some operations (e.g.
+                # download_partial) probe-and-convert the ApiError inside
+                # their own closure, so the not-found arrives here already
+                # wrapped — without this re-raise it would fall into the
+                # generic handler below and burn the full 2+4+8+16s backoff
+                # on a 404 that can never succeed (the HEAVY7 preflight
+                # retry storm).
+                raise
             except Exception as e:
                 last_error = e
                 if attempt < self.max_retries - 1:

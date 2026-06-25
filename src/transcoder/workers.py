@@ -22,7 +22,11 @@ from typing import TYPE_CHECKING, Callable
 from .database import Database, Job, JobState
 from .disk_budget import DiskBudget
 from .dispatcher import JobDispatcher
-from .dropbox_client import DropboxClient, DropboxRevChangedError
+from .dropbox_client import (
+    DropboxClient,
+    DropboxNotFoundError,
+    DropboxRevChangedError,
+)
 from .encoder_detect import EncoderType, select_best_encoder
 from .ffmpeg_builder import FFmpegCommand, FFmpegCommandBuilder
 from .prober import ProbeError, ProbeResult, probe_video, validate_output
@@ -44,6 +48,16 @@ logger = logging.getLogger(__name__)
 
 # How long worker.queue.get() blocks before re-checking stop_event.
 _QUEUE_GET_TIMEOUT_SEC = 5.0
+
+# Error-message marker: the transcode output came up short (duration
+# mismatch) even though the input was SOFTWARE-decoded and ffmpeg exited 0.
+# Software decode is the most error-tolerant path we have, so a truncation
+# there means the source bitstream itself ends/breaks at that timestamp —
+# re-running can only re-produce the same bytes. TranscodeWorker
+# _handle_failure treats this prefix as terminal (SKIPPED_CORRUPT) instead
+# of burning GPU-hours on identical retries (HEAVY7: 4178.7s source died at
+# exactly 2157.4s on every attempt, ~35 min of QSV time per lap, forever).
+TRUNCATED_DESPITE_SW_DECODE = "Output truncated despite software decode:"
 
 
 class WorkerStop(Exception):
@@ -150,7 +164,11 @@ class DownloadWorker(BaseWorker):
         # in NEW state. Catch them here BEFORE wasting bandwidth on the
         # download — dispatcher feeds whatever's in NEW, regardless of
         # which scanner version queued it.
-        from .utils import path_has_assets_segment
+        from .utils import (
+            path_has_assets_segment,
+            path_is_in_proxies_folder,
+            path_is_proxy_filename,
+        )
         if path_has_assets_segment(job.dropbox_path):
             logger.info(
                 f"[{self.name}] Skipping (under /assets/): {job.dropbox_path}"
@@ -158,6 +176,20 @@ class DownloadWorker(BaseWorker):
             self.db.update_job_state(
                 job.id, JobState.SKIPPED_EXCLUDED,
                 error_message="path under /assets/ — project resources never transcoded",
+            )
+            return
+
+        # Same defensive gate for camera/NLE proxies: jobs queued before the
+        # Proxies/ rule (or by an older scanner) must not burn bandwidth on
+        # regenerable proxy files. The scanner handles the optional folder
+        # delete; here we only refuse to download.
+        if path_is_in_proxies_folder(job.dropbox_path) or path_is_proxy_filename(job.dropbox_path):
+            logger.info(
+                f"[{self.name}] Skipping (camera/NLE proxy): {job.dropbox_path}"
+            )
+            self.db.update_job_state(
+                job.id, JobState.SKIPPED_EXCLUDED,
+                error_message="camera/NLE proxy (proxy folder or _Proxy filename) — never transcoded",
             )
             return
 
@@ -237,6 +269,10 @@ class DownloadWorker(BaseWorker):
                 f"{job.id}; resumes from the partial next window"
             )
             self.db.update_job_state(job.id, JobState.NEW)
+            if self.disk_budget is not None:
+                self.disk_budget.release(job.id)
+        except DropboxNotFoundError as e:
+            self._handle_not_found(job, e)
             if self.disk_budget is not None:
                 self.disk_budget.release(job.id)
         except Exception as e:
@@ -435,6 +471,10 @@ class DownloadWorker(BaseWorker):
                     job.dropbox_path, head_path, 0, chunk_bytes,
                 )
                 detected = probe_codec_from_file(head_path, self.config.ffprobe_path)
+            except DropboxNotFoundError:
+                # Source is gone — don't waste the tail probe + full download
+                # on the same 404. process_job terminal-skips the job.
+                raise
             except Exception as e:
                 logger.debug(f"[{self.name}] preflight head probe error: {e}")
 
@@ -445,6 +485,8 @@ class DownloadWorker(BaseWorker):
                         job.dropbox_path, tail_path, tail_start, chunk_bytes,
                     )
                     detected = probe_codec_from_file(tail_path, self.config.ffprobe_path)
+                except DropboxNotFoundError:
+                    raise
                 except Exception as e:
                     logger.debug(f"[{self.name}] preflight tail probe error: {e}")
 
@@ -549,6 +591,50 @@ class DownloadWorker(BaseWorker):
                     waited += 0.5
 
         return callback
+
+    def _handle_not_found(self, job: Job, error: Exception) -> None:
+        """The source path 404'd on Dropbox.
+
+        Files vanish from under queued jobs when the editors move/rename a
+        folder (or delete it) after the scan. A 404 is permanent for THIS
+        path — retrying re-runs the same doomed lookup, and the FAILED
+        auto-revive (v6.7.8) then resurrects the job forever (the HEAVY7
+        loop: 22 jobs cycling 404 → RETRY_WAIT → FAILED → revive).
+
+        One direct metadata lookup re-confirms the miss so a transient
+        glitch can't terminal-skip a live file; then the job goes to
+        SKIPPED_NOT_FOUND (terminal — auto-revive only touches FAILED).
+        If the file ever comes back, a move gives it a new rev, so the
+        scanner re-queues it as a fresh job (terminal states are excluded
+        from the unique active-path index).
+        """
+        still_missing = False
+        try:
+            still_missing = self.dropbox.get_metadata(job.dropbox_path) is None
+        except Exception as meta_err:
+            # Couldn't confirm (auth hiccup, network, rate limit) — keep the
+            # normal retry path rather than risk skipping a live file.
+            logger.debug(
+                f"[{self.name}] not-found confirmation probe failed "
+                f"(treating as transient): {meta_err}"
+            )
+
+        if not still_missing:
+            logger.error(f"[{self.name}] Download failed: {error}")
+            self._handle_failure(job, str(error))
+            return
+
+        logger.warning(
+            f"[{self.name}] Source gone from Dropbox — marking job {job.id} "
+            f"SKIPPED_NOT_FOUND (file moved/renamed/deleted after scan; the "
+            f"scanner re-queues it if it reappears): {job.dropbox_path}"
+        )
+        self.db.update_job_state(
+            job.id,
+            JobState.SKIPPED_NOT_FOUND,
+            error_message=str(error)[:500],
+        )
+        self._cleanup_staging_on_failure(job)
 
     def _handle_failure(self, job: Job, error: str) -> None:
         """Handle job failure with retry logic."""
@@ -807,6 +893,7 @@ class TranscodeWorker(BaseWorker):
         REGISTRY.update(self.name, encoder=encoder.value)
 
         # Run FFmpeg
+        audio_fallback_used = False
         success = self._run_ffmpeg(cmd, job)
 
         if not success and probe_result.video_info.has_audio:
@@ -815,6 +902,7 @@ class TranscodeWorker(BaseWorker):
             # `-an` and the substitution would be a no-op, just wasting
             # another failed launch).
             logger.warning(f"[{self.name}] Retrying with audio re-encode")
+            audio_fallback_used = True
             cmd = self.command_builder.build_audio_fallback_command(
                 input_path,
                 output_path,
@@ -841,9 +929,11 @@ class TranscodeWorker(BaseWorker):
                 encoder,
             )
             logger.info(f"[{self.name}] {cmd.description}")
+            audio_fallback_used = False
             success = self._run_ffmpeg(cmd, job)
             if not success and probe_result.video_info.has_audio:
                 logger.warning(f"[{self.name}] CPU retry with audio re-encode")
+                audio_fallback_used = True
                 cmd = self.command_builder.build_audio_fallback_command(
                     input_path,
                     output_path,
@@ -895,9 +985,58 @@ class TranscodeWorker(BaseWorker):
             self.config.ffprobe_path,
         )
 
+        duration_truncated = bool(error) and error.startswith("Duration mismatch")
+        if not is_valid and duration_truncated and "-hwaccel" in cmd.args:
+            # ffmpeg exited 0 but the output stops short of the source: the
+            # QSV/NVENC decoder hit a broken spot in the bitstream and bailed
+            # quietly. Deterministic — an identical retry truncates at the
+            # exact same timestamp. Software decode powers through most of
+            # these (error concealment), so re-run once in hybrid mode
+            # (sw decode + same HW encoder) before declaring the source
+            # corrupt.
+            logger.warning(
+                f"[{self.name}] Output truncated with hardware decode "
+                f"({error}) — retrying once with software decode"
+            )
+            if output_path.exists():
+                output_path.unlink()
+            build = (
+                self.command_builder.build_audio_fallback_command
+                if audio_fallback_used
+                else self.command_builder.build_transcode_command
+            )
+            cmd = build(
+                input_path,
+                output_path,
+                probe_result.video_info,
+                encoder,
+                force_sw_decode=True,
+            )
+            logger.info(f"[{self.name}] {cmd.description}")
+            logger.info(f"[{self.name}] ffmpeg cmd: {cmd.as_string()}")
+            # Refresh updated_at so the watchdog's transcode timeout clock
+            # restarts for the (slower) sw-decode pass.
+            self.db.update_job_state(job.id, JobState.TRANSCODING)
+            if not self._run_ffmpeg(cmd, job):
+                raise ValueError("FFmpeg transcode failed")
+            if cmd.temp_output_path.exists():
+                cmd.temp_output_path.replace(output_path)
+            is_valid, error = validate_output(
+                output_path,
+                probe_result.video_info.duration_sec,
+                self.config.ffprobe_path,
+            )
+            duration_truncated = bool(error) and error.startswith("Duration mismatch")
+
         if not is_valid:
             if output_path.exists():
                 output_path.unlink()
+            if duration_truncated:
+                # The input was software-decoded (natively — CPU/hybrid — or
+                # via the retry above) and the output STILL stops short: the
+                # source bitstream itself ends there. Marker prefix sends
+                # this to SKIPPED_CORRUPT in _handle_failure (terminal).
+                raise ValueError(f"{TRUNCATED_DESPITE_SW_DECODE} {error}")
             raise ValueError(f"Output validation failed: {error}")
 
         # Probe output for stats
@@ -1103,17 +1242,43 @@ class TranscodeWorker(BaseWorker):
 
     def _handle_failure(self, job: Job, error: str) -> None:
         """Handle job failure with retry logic."""
-        # ffprobe couldn't read the local file. The downloader already
-        # verified that local_size == dropbox_size before handing it off,
-        # so the bytes on Dropbox are themselves unreadable — re-downloading
-        # would copy the same broken bytes again. Send straight to
-        # SKIPPED_CORRUPT (terminal) so the auto-revive (v6.7.8) doesn't
-        # keep churning it every 10 minutes.
-        if error.startswith("Probe failed:"):
+        # Terminal corrupt-source shapes — retrying re-reads the same broken
+        # bytes, so send straight to SKIPPED_CORRUPT instead of letting the
+        # auto-revive (v6.7.8) churn them every 10 minutes:
+        #  - "Probe failed:": ffprobe can't read the local file at all. The
+        #    downloader already verified local_size == dropbox_size, so the
+        #    bytes on Dropbox are themselves unreadable.
+        #  - TRUNCATED_DESPITE_SW_DECODE: ffmpeg exited 0 but the output is
+        #    shorter than the source even with software decode — the
+        #    bitstream breaks at that timestamp on every attempt.
+        terminal_corrupt = error.startswith("Probe failed:") or error.startswith(
+            TRUNCATED_DESPITE_SW_DECODE
+        )
+        if terminal_corrupt:
             logger.warning(
                 f"[{self.name}] Marking job {job.id} as SKIPPED_CORRUPT "
-                f"(ffprobe can't read source, re-download won't help): {error}"
+                f"(source is unreadable/broken, retrying can't help): {error}"
             )
+            if (
+                self.incident_reporter is not None
+                and error.startswith(TRUNCATED_DESPITE_SW_DECODE)
+            ):
+                # GPU-hours were burned to discover this — surface it.
+                tail = ""
+                if self._last_ffmpeg_log:
+                    tail = self._tail_ffmpeg_log(self._last_ffmpeg_log, lines=30)
+                self.incident_reporter.report(
+                    kind="corrupt-skip",
+                    summary=f"Output truncated even with software decode — "
+                            f"skipping {Path(job.dropbox_path).name} as corrupt",
+                    log_tail=tail,
+                    context={
+                        "job_id": job.id,
+                        "dropbox_path": job.dropbox_path,
+                        "error": error,
+                        "worker": self.name,
+                    },
+                )
             self.db.update_job_state(
                 job.id,
                 JobState.SKIPPED_CORRUPT,
@@ -1437,17 +1602,21 @@ class UploadWorker(BaseWorker):
 
         parent = str(PurePosixPath(just_finished_job.dropbox_path).parent)
 
-        # Gate 1: user activity (existing semantic)
+        # Gate 1: is the edit still active? Driven by the Premiere project's
+        # real save time (.prproj), falling back to the footage's real date.
         activity = is_folder_settled(
             self.dropbox, parent, self.config.legacy_reorganize_min_age_days,
+            dropbox_root=self.config.dropbox_root,
         )
         if not activity.settled:
             days = (f"{activity.days_since_newest:.1f}"
                     if activity.days_since_newest is not None else "?")
+            what = (".prproj saved" if getattr(activity, "source", "") == "prproj"
+                    else "footage")
             logger.info(
-                f"[{self.name}] Reorganize deferred ({parent}): folder activity "
-                f"{days}d old (< threshold {activity.threshold_days}d). "
-                f"Will retry after the next upload in this folder."
+                f"[{self.name}] Reorganize deferred ({parent}): {what} "
+                f"{days}d ago (< threshold {activity.threshold_days}d — project "
+                f"still active). Will retry after the next upload in this folder."
             )
             return
 

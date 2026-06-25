@@ -31,44 +31,165 @@ class FolderActivity:
     newest_modified: datetime | None
     days_since_newest: float | None
     threshold_days: int
+    # Which signal decided this: "prproj" (an Adobe Premiere project drove it),
+    # "media" (no project found — fell back to the footage's real date),
+    # "empty" (nothing to protect), or "disabled" (min_age_days <= 0).
+    source: str = "media"
+
+
+# Extensions whose mtime means "an edit is in progress here". A Premiere
+# project's last-save time is the truth about whether a folder of footage is
+# still being worked on — far better than "was any file in the folder touched",
+# which a bulk re-upload of finished, years-old footage trips falsely.
+_EDIT_PROJECT_EXTS = (".prproj",)
+
+# Daemon-written files that are never "user activity".
+_NON_ACTIVITY_NAMES = {"h265 feito.txt", "mp3 feito.txt"}
+
+# How many ancestor levels to walk up looking for the nearest .prproj before
+# giving up and using the media-date fallback. Bounds Dropbox calls on a
+# pathological tree; real edit folders sit a few levels above the media.
+_PROJECT_SEARCH_MAX_DEPTH = 10
+
+
+def _to_naive_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def _is_project_file(name: str) -> bool:
+    low = name.lower()
+    return any(low.endswith(ext) for ext in _EDIT_PROJECT_EXTS)
+
+
+def _real_modified(entry: DropboxFileInfo) -> datetime | None:
+    """The file's real on-disk date (client_modified), falling back to the
+    Dropbox upload time only if the client date is missing."""
+    return _to_naive_utc(entry.client_modified or entry.server_modified)
+
+
+def _newest_prproj_modified(
+    dropbox: DropboxClient,
+    folder: str,
+    cache: dict | None = None,
+) -> datetime | None:
+    """Newest .prproj real save-time directly in `folder`, or None if none."""
+    if cache is not None and folder in cache:
+        return cache[folder]
+    newest: datetime | None = None
+    try:
+        for entry in dropbox.list_folder(folder, recursive=False):
+            if not _is_project_file(entry.name):
+                continue
+            modified = _real_modified(entry)
+            if modified is not None and (newest is None or modified > newest):
+                newest = modified
+    except DropboxNotFoundError:
+        newest = None
+    if cache is not None:
+        cache[folder] = newest
+    return newest
+
+
+def _ancestor_chain(start: str, dropbox_root: str | None, max_depth: int) -> list[str]:
+    """`start` then each parent, up to and including dropbox_root (or '/'),
+    never above it, capped at max_depth."""
+    ceiling = PurePosixPath("/" + dropbox_root.strip("/")) if dropbox_root else PurePosixPath("/")
+
+    def under(x: PurePosixPath) -> bool:
+        return x == ceiling or ceiling in x.parents
+
+    chain: list[str] = []
+    p = PurePosixPath(start)
+    for anc in [p, *p.parents]:
+        if not under(anc):
+            break
+        chain.append(str(anc))
+        if anc == ceiling or len(chain) >= max_depth:
+            break
+    return chain
 
 
 def is_folder_settled(
     dropbox: DropboxClient,
     parent: str,
     min_age_days: int,
+    *,
+    dropbox_root: str | None = None,
+    cache: dict | None = None,
 ) -> FolderActivity:
     """
-    Check whether `parent` has had user activity in the last `min_age_days`.
+    Decide whether `parent` belongs to an edit that is DONE — so its H.265
+    outputs may be swapped in and the H.264 backups deleted.
 
-    "Activity" = any file directly in `parent` (non-recursive — files in
-    /h264 and /h265 subfolders don't count, since those are the daemon's
-    own outputs/backups). Returns settled=True when the newest such file is
-    older than the threshold (or when the folder has no files at all).
+    The signal is the Adobe Premiere project (.prproj), NOT "was any file in
+    the folder touched recently":
+
+      1. Walk up from `parent` to the nearest ancestor holding a .prproj and
+         use that project's real last-save time (client_modified). A project
+         saved within `min_age_days` is still being edited -> NOT settled.
+      2. If no .prproj exists anywhere up to `dropbox_root`, fall back to the
+         real capture date (client_modified) of the media directly in `parent`.
+
+    Crucially this uses client_modified (the real on-disk date), never
+    server_modified (the Dropbox upload time): a folder of years-old footage
+    that was merely re-synced to Dropbox last week must still read as settled,
+    and re-syncing must never reset the clock and freeze reorganization.
+
+    `cache` (caller-owned, scoped to a single pass) memoises per-folder .prproj
+    lookups so sibling media folders sharing an ancestor don't re-list it.
 
     A min_age_days of 0 short-circuits to settled=True.
     """
     if min_age_days <= 0:
-        return FolderActivity(True, None, None, min_age_days)
+        return FolderActivity(True, None, None, min_age_days, source="disabled")
 
-    threshold = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=min_age_days)
-    newest: datetime | None = None
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    threshold = now - timedelta(days=min_age_days)
 
+    # One pass over `parent`: capture both its own .prproj (if any) and the
+    # newest real media date, so the no-project path never lists it twice.
+    parent_prproj: datetime | None = None
+    media_newest: datetime | None = None
     for entry in dropbox.list_folder(parent, recursive=False):
-        if entry.name.lower() == "h265 feito.txt":
-            # Daemon-written journal, not user activity.
+        modified = _real_modified(entry)
+        if modified is None:
             continue
-        modified = entry.server_modified
-        if modified.tzinfo is not None:
-            modified = modified.astimezone(timezone.utc).replace(tzinfo=None)
-        if newest is None or modified > newest:
-            newest = modified
+        if _is_project_file(entry.name):
+            if parent_prproj is None or modified > parent_prproj:
+                parent_prproj = modified
+            continue
+        if entry.name.lower() in _NON_ACTIVITY_NAMES:
+            continue
+        if media_newest is None or modified > media_newest:
+            media_newest = modified
+    if cache is not None:
+        cache[parent] = parent_prproj
 
-    if newest is None:
-        return FolderActivity(True, None, None, min_age_days)
+    prproj = parent_prproj
+    if prproj is None:
+        # Nearest .prproj strictly above `parent`, up to dropbox_root.
+        ancestors = _ancestor_chain(
+            str(PurePosixPath(parent).parent), dropbox_root, _PROJECT_SEARCH_MAX_DEPTH,
+        )
+        for folder in ancestors:
+            found = _newest_prproj_modified(dropbox, folder, cache)
+            if found is not None:
+                prproj = found
+                break
 
-    days_since = (datetime.now(timezone.utc).replace(tzinfo=None) - newest).total_seconds() / 86400.0
-    return FolderActivity(newest < threshold, newest, days_since, min_age_days)
+    if prproj is not None:
+        days = (now - prproj).total_seconds() / 86400.0
+        return FolderActivity(prproj < threshold, prproj, days, min_age_days, source="prproj")
+
+    # No project anywhere — fall back to the footage's real date.
+    if media_newest is None:
+        return FolderActivity(True, None, None, min_age_days, source="empty")
+    days_since = (now - media_newest).total_seconds() / 86400.0
+    return FolderActivity(media_newest < threshold, media_newest, days_since, min_age_days, source="media")
 
 
 @dataclass
