@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from transcoder.database import JobState  # noqa: E402
 from transcoder.utils import (  # noqa: E402
     path_is_in_proxies_folder,
+    path_is_proxy_filename,
     proxies_folder_root,
 )
 
@@ -59,6 +60,88 @@ def test_proxies_folder_root_resolution():
     assert proxies_folder_root("/HD/a/video/c.mov") is None
 
 
+# --- singular proxy/ folder + Sony _Proxy.* filename (v8.0.0) --------------------
+
+def test_singular_proxy_folder_matches():
+    # The HEAVY7 log case: /video/cam 03/proxy/C0462_Proxy.mov (singular folder).
+    assert path_is_in_proxies_folder("/HD/x/video/cam 03/proxy/C0462_Proxy.mov")
+    assert path_is_in_proxies_folder("/HD/x/PROXY/clip.mov")
+    assert proxies_folder_root("/HD/x/video/cam 03/proxy/C0462_Proxy.mov") == "/HD/x/video/cam 03/proxy"
+
+
+def test_proxy_filename_suffix_matches():
+    # Sony proxy dropped next to originals (no proxy folder).
+    assert path_is_proxy_filename("/HD/x/video/C0462_Proxy.mov")
+    assert path_is_proxy_filename("/HD/x/C0462_PROXY.MP4")
+    # Needs the "_" separator — a real clip just containing "proxy" must not match.
+    assert not path_is_proxy_filename("/HD/x/approxy.mov")
+    assert not path_is_proxy_filename("/HD/x/C0462.MP4")
+    assert not path_is_proxy_filename("")
+
+
+def test_download_worker_skips_loose_proxy_filename():
+    import threading
+
+    from transcoder.workers import DownloadWorker
+
+    worker = object.__new__(DownloadWorker)
+    threading.Thread.__init__(worker, name="downloader-test", daemon=True)
+    worker.db = _FakeDB()
+
+    # _Proxy file NOT inside a proxy folder — must still be skipped.
+    job = SimpleNamespace(
+        id=1771,
+        dropbox_path="/HeavyDrops/Arbitragem/.../video/cam 03/C0462_Proxy.mov",
+        dropbox_size=25_000_000,
+    )
+    worker.process_job(job)
+
+    assert worker.db.updates, "loose _Proxy file must be parked, not downloaded"
+    _, state, kw = worker.db.updates[-1]
+    assert state == JobState.SKIPPED_EXCLUDED
+    assert "proxy" in kw.get("error_message", "").lower()
+
+
+def test_singular_proxy_folder_deleted_whole(monkeypatch):
+    import transcoder.scanner as scanner_mod
+
+    monkeypatch.setattr(
+        scanner_mod, "_is_folder_settled",
+        lambda dbx, parent, min_age, **kw: SimpleNamespace(
+            settled=True, days_since_newest=99.0, threshold_days=min_age,
+        ),
+    )
+    scanner = _bare_scanner(delete_on=True)
+
+    result = scanner._process_file(
+        _entry("/HD/x/video/cam 03/proxy/C0462_Proxy.mov"), False, None,
+    )
+
+    assert result == "skipped_excluded"
+    # Deletes the whole singular proxy/ folder, not the single file.
+    assert scanner.dropbox.deleted == ["/HD/x/video/cam 03/proxy"]
+
+
+def test_loose_proxy_file_deleted_file_by_file(monkeypatch):
+    import transcoder.scanner as scanner_mod
+
+    monkeypatch.setattr(
+        scanner_mod, "_is_folder_settled",
+        lambda dbx, parent, min_age, **kw: SimpleNamespace(
+            settled=True, days_since_newest=99.0, threshold_days=min_age,
+        ),
+    )
+    scanner = _bare_scanner(delete_on=True)
+
+    # _Proxy file with no proxy folder → delete just the file, not the parent.
+    result = scanner._process_file(
+        _entry("/HD/x/video/cam 03/C0462_Proxy.mov"), False, None,
+    )
+
+    assert result == "skipped_excluded"
+    assert scanner.dropbox.deleted == ["/HD/x/video/cam 03/C0462_Proxy.mov"]
+
+
 # --- download worker defensive skip ----------------------------------------------
 
 class _FakeDB:
@@ -89,7 +172,7 @@ def test_download_worker_skips_queued_proxy_job():
     assert worker.db.updates, "job must be parked, not downloaded"
     job_id, state, kw = worker.db.updates[-1]
     assert state == JobState.SKIPPED_EXCLUDED
-    assert "Proxies" in kw.get("error_message", "")
+    assert "proxy" in kw.get("error_message", "").lower()
 
 
 # --- scanner: whole-folder delete -------------------------------------------------

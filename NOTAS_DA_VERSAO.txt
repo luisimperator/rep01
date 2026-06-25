@@ -2,8 +2,24 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
-Versão: 7.9.0
+Versão: 8.0.0
 Data: 25/06/2026
+--------------------------------------------------------------------------------
+
+Proxies: pega tambem pasta "proxy" (singular) e arquivos *_Proxy.*
+
+  [FIX] O filtro de proxies so reconhecia pastas "Proxies/" (plural). Pastas
+        no singular "proxy/" (ex.: .../video/cam 03/proxy/C0462_Proxy.mov, que
+        apareciam no log da HEAVY7 baixando e dando retry) passavam batido e
+        eram baixadas/transcodadas. Agora "proxy" e "Proxies" (qualquer caixa)
+        contam igual.
+  [FEATURE] Volta a reconhecer o sufixo Sony *_Proxy.* (FX3 / A7S III) por
+            NOME de arquivo, pra pegar proxy largado FORA de uma pasta de
+            proxy (ao lado dos originais). Esses sao pulados/apagados arquivo
+            por arquivo; dentro de uma pasta proxy/Proxies continua sendo a
+            pasta inteira num delete so. Vale pro downloader (nao gasta banda)
+            e pro scanner (skip + delete opcional, com a mesma trava do .prproj).
+
 --------------------------------------------------------------------------------
 
 Reorganize e deleção agora seguem o PROJETO do Premiere, não "arquivo mexido"

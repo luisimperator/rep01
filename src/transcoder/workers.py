@@ -164,7 +164,11 @@ class DownloadWorker(BaseWorker):
         # in NEW state. Catch them here BEFORE wasting bandwidth on the
         # download — dispatcher feeds whatever's in NEW, regardless of
         # which scanner version queued it.
-        from .utils import path_has_assets_segment, path_is_in_proxies_folder
+        from .utils import (
+            path_has_assets_segment,
+            path_is_in_proxies_folder,
+            path_is_proxy_filename,
+        )
         if path_has_assets_segment(job.dropbox_path):
             logger.info(
                 f"[{self.name}] Skipping (under /assets/): {job.dropbox_path}"
@@ -179,13 +183,13 @@ class DownloadWorker(BaseWorker):
         # Proxies/ rule (or by an older scanner) must not burn bandwidth on
         # regenerable proxy files. The scanner handles the optional folder
         # delete; here we only refuse to download.
-        if path_is_in_proxies_folder(job.dropbox_path):
+        if path_is_in_proxies_folder(job.dropbox_path) or path_is_proxy_filename(job.dropbox_path):
             logger.info(
-                f"[{self.name}] Skipping (under Proxies/): {job.dropbox_path}"
+                f"[{self.name}] Skipping (camera/NLE proxy): {job.dropbox_path}"
             )
             self.db.update_job_state(
                 job.id, JobState.SKIPPED_EXCLUDED,
-                error_message="file under a Proxies/ folder — proxies are never transcoded",
+                error_message="camera/NLE proxy (proxy folder or _Proxy filename) — never transcoded",
             )
             return
 

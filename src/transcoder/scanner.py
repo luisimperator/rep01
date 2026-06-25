@@ -330,10 +330,14 @@ class Scanner:
         # days"). The skip itself is always safe and runs regardless of
         # folder age.
         is_preview = _path_is_premiere_preview(path)
-        is_proxy = _path_is_in_proxies_folder(path)
+        is_proxy_folder = _path_is_in_proxies_folder(path)
+        is_proxy_file = _path_is_proxy_filename(path)
+        is_proxy = is_proxy_folder or is_proxy_file
         if is_preview or is_proxy:
             kind = "Premiere preview" if is_preview else "camera/NLE proxy"
-            proxy_root = _proxies_folder_root(path) if is_proxy else None
+            # Whole-folder delete only when inside a proxy folder; a loose
+            # _Proxy.* file (or a preview) is handled file-by-file.
+            proxy_root = _proxies_folder_root(path) if is_proxy_folder else None
             if proxy_root is not None and proxy_root in self._deleted_proxy_dirs:
                 logger.debug(
                     f"Skipping (throwaway {kind}, Proxies folder already "
@@ -741,5 +745,6 @@ def _cursor_preview(cursor: str | None) -> str:
 from .utils import path_has_assets_segment as _path_has_assets_segment  # noqa: E402
 from .utils import path_is_premiere_preview as _path_is_premiere_preview  # noqa: E402
 from .utils import path_is_in_proxies_folder as _path_is_in_proxies_folder  # noqa: E402
+from .utils import path_is_proxy_filename as _path_is_proxy_filename  # noqa: E402
 from .utils import proxies_folder_root as _proxies_folder_root  # noqa: E402
 from .reorganize import is_folder_settled as _is_folder_settled  # noqa: E402
