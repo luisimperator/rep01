@@ -133,6 +133,33 @@ class BaseWorker(threading.Thread):
         """Check if worker should stop."""
         return self.stop_event.is_set()
 
+    def abort_job(self, job_id: int, reason: str = "") -> bool:
+        """Kill this worker's in-flight process if it is working `job_id`.
+
+        Called by the watchdog (from its own thread) when the job exceeds its
+        stage timeout. Killing the process unblocks this worker's thread, so
+        its normal failure path runs the cleanup — retry increment, state
+        flip, disk-budget release — exactly as if the process had died on its
+        own. Returns True only when a kill was actually delivered; False when
+        this worker doesn't own the job or has nothing killable (the watchdog
+        then handles the job in the DB itself).
+        """
+        job = self._current_job
+        if job is None or job.id != job_id:
+            return False
+        if not self._abort_current():
+            return False
+        logger.warning(
+            f"[{self.name}] watchdog killed in-flight work for job {job_id}: "
+            f"{reason}"
+        )
+        return True
+
+    def _abort_current(self) -> bool:
+        """Subclass hook: kill whatever process/stream the worker is blocked
+        on right now. Return True if a kill was delivered."""
+        return False
+
 
 class DownloadWorker(BaseWorker):
     """Worker that downloads files from Dropbox."""
@@ -156,9 +183,18 @@ class DownloadWorker(BaseWorker):
         self.scanner = scanner
         self.disk_budget = disk_budget
         self.claims = claims
+        # Set by the watchdog (via abort_job) to break out of an in-flight
+        # transfer; checked in the download progress callback. Cleared at the
+        # start of every job so one abort never bleeds into the next.
+        self._abort_download = threading.Event()
+
+    def _abort_current(self) -> bool:
+        self._abort_download.set()
+        return True
 
     def process_job(self, job: Job) -> None:
         """Download the file for the given job."""
+        self._abort_download.clear()
         # Defensive: even though scanner skips /assets/ paths since v6.2.2,
         # jobs created BEFORE that update may still be sitting in the DB
         # in NEW state. Catch them here BEFORE wasting bandwidth on the
@@ -547,6 +583,14 @@ class DownloadWorker(BaseWorker):
         def callback(downloaded: int, total: int) -> None:
             if self.should_stop():
                 raise WorkerStop("Worker stopping")
+            # Watchdog decided this download exceeded its timeout. Raising
+            # here lands in the generic failure path: retry increment,
+            # RETRY_WAIT, reservation released; the partial is kept on disk
+            # so the retry resumes instead of restarting.
+            if self._abort_download.is_set():
+                raise RuntimeError(
+                    "download aborted by watchdog (stage timeout exceeded)"
+                )
             # Night mode (or a manual pause) — stop downloading too, not just
             # transcoding. The partial is kept, so it resumes next window.
             if self.dispatcher.is_paused():
@@ -1228,6 +1272,16 @@ class TranscodeWorker(BaseWorker):
             except Exception as e:
                 logger.warning(f"Error killing FFmpeg: {e}")
 
+    def _abort_current(self) -> bool:
+        """Watchdog kill hook: terminate the in-flight ffmpeg. The blocked
+        _run_ffmpeg wait sees the process exit, the job takes the normal
+        failure path (retry increment, RETRY_WAIT/FAILED, disk release)."""
+        proc = self._ffmpeg_process
+        if proc is None or proc.poll() is not None:
+            return False
+        self._kill_ffmpeg()
+        return True
+
     def _cleanup_staging(self, job: Job) -> None:
         """Clean up staging directory for job."""
         if job.local_input_path:
@@ -1342,6 +1396,21 @@ class AudioTranscoder(BaseWorker):
     ):
         super().__init__(f"audio-{worker_id}", config, db, stop_event, dispatcher)
         self._ffmpeg_process: subprocess.Popen | None = None
+
+    def _abort_current(self) -> bool:
+        """Watchdog kill hook — same semantics as TranscodeWorker's."""
+        proc = self._ffmpeg_process
+        if proc is None or proc.poll() is not None:
+            return False
+        try:
+            proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        except Exception as e:
+            logger.warning(f"[{self.name}] Error killing FFmpeg: {e}")
+        return True
 
     def process_job(self, job: Job) -> None:
         logger.info(f"[{self.name}] Audio transcoding: {job.dropbox_path}")

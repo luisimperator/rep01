@@ -212,6 +212,16 @@ class DropboxClient:
     # per-chunk retry cost modest on a flaky link while cutting round-trips.
     CHUNK_SIZE = 16 * 1024 * 1024  # 16MB chunks for upload
     DOWNLOAD_CHUNK_SIZE = 8 * 1024 * 1024  # 8MB chunks for download (stream read buffer)
+    # Each download is fetched as a sequence of bounded byte-range GETs rather
+    # than one long stream. Dropbox (and intervening firewalls/proxies) tend to
+    # drop a single download connection after ~10GB / a few minutes, surfacing
+    # as urllib3 IncompleteRead. Capping each request well under that ceiling
+    # means no single connection lives long enough to be cut, and any break that
+    # does happen is retried in-place from the bytes already on disk — no job
+    # failure, no watchdog backoff cycle. 2GB keeps the request count modest
+    # (~26 GETs for a 52GB file) while staying comfortably below the cliff.
+    DOWNLOAD_SEGMENT_SIZE = 2 * 1024 * 1024 * 1024  # 2GB per ranged request
+    DOWNLOAD_SEGMENT_MAX_RETRIES = 6  # consecutive broken-connection retries before giving up
 
     def __init__(
         self,
@@ -725,38 +735,78 @@ class DropboxClient:
                     f"({resume_offset / total_size * 100:.1f}%)"
                 )
 
-        # Temp link supports Range headers; SDK files_download does not.
-        link_result = self._retry_operation(
-            lambda: self._dbx.files_get_temporary_link(norm_path),
-            f"get_temporary_link({dropbox_path})",
-        )
-        url = link_result.link
-
-        headers = {}
-        if resume_offset > 0:
-            headers['Range'] = f'bytes={resume_offset}-'
-
-        resp = requests.get(url, headers=headers, stream=True, timeout=120)
-        if resume_offset > 0 and resp.status_code not in (200, 206):
-            logger.warning(
-                f"Server returned {resp.status_code} on resume attempt; "
-                f"restarting from zero"
+        # Temp link supports Range headers; SDK files_download does not. The
+        # link is valid for ~4h; refresh it on demand if the server starts
+        # rejecting it mid-download (401/403/410).
+        def _fresh_link() -> str:
+            link_result = self._retry_operation(
+                lambda: self._dbx.files_get_temporary_link(norm_path),
+                f"get_temporary_link({dropbox_path})",
             )
-            resume_offset = 0
-            resp.close()
-            resp = requests.get(url, stream=True, timeout=120)
-        if resp.status_code not in (200, 206):
-            resp.close()
-            raise DropboxClientError(
-                f"Download HTTP {resp.status_code} for {dropbox_path}"
-            )
+            return link_result.link
 
+        url = _fresh_link()
         bytes_downloaded = resume_offset
-        try:
-            mode = 'ab' if resume_offset > 0 else 'wb'
-            with open(local_path, mode) as f:
-                for chunk in resp.iter_content(chunk_size=self.DOWNLOAD_CHUNK_SIZE):
-                    if chunk:
+        mode = 'ab' if resume_offset > 0 else 'wb'
+
+        # Fetch the file as a sequence of bounded byte-range requests so no
+        # single connection lives long enough to hit the ~10GB drop ceiling.
+        # A connection that breaks mid-segment is retried from the bytes
+        # already flushed to disk, so progress is never lost and the job never
+        # fails out to the watchdog.
+        with open(local_path, mode) as f:
+            attempt = 0
+            while bytes_downloaded < total_size:
+                seg_start = bytes_downloaded
+                seg_end = min(seg_start + self.DOWNLOAD_SEGMENT_SIZE, total_size) - 1
+                headers = {'Range': f'bytes={seg_start}-{seg_end}'}
+
+                try:
+                    resp = requests.get(url, headers=headers, stream=True, timeout=120)
+                except requests.exceptions.RequestException as e:
+                    attempt += 1
+                    if attempt > self.DOWNLOAD_SEGMENT_MAX_RETRIES:
+                        raise DropboxClientError(
+                            f"Download failed for {dropbox_path} at "
+                            f"{bytes_downloaded / (1024**3):.1f}/"
+                            f"{total_size / (1024**3):.1f} GB: {e}"
+                        ) from e
+                    time.sleep(min(2 ** attempt, 30))
+                    continue
+
+                # Link expired / rejected: refresh and retry the same range.
+                if resp.status_code in (401, 403, 410):
+                    resp.close()
+                    attempt += 1
+                    if attempt > self.DOWNLOAD_SEGMENT_MAX_RETRIES:
+                        raise DropboxClientError(
+                            f"Download link kept being rejected ({resp.status_code}) "
+                            f"for {dropbox_path}"
+                        )
+                    url = _fresh_link()
+                    continue
+
+                # Server ignored Range and is streaming from byte 0. Only safe
+                # at the very start; mid-file it would corrupt the append.
+                if resp.status_code == 200:
+                    if seg_start == 0:
+                        seg_end = total_size - 1
+                    else:
+                        resp.close()
+                        raise DropboxClientError(
+                            f"Server ignored Range (HTTP 200) at offset "
+                            f"{seg_start} for {dropbox_path}"
+                        )
+                elif resp.status_code != 206:
+                    resp.close()
+                    raise DropboxClientError(
+                        f"Download HTTP {resp.status_code} for {dropbox_path}"
+                    )
+
+                try:
+                    for chunk in resp.iter_content(chunk_size=self.DOWNLOAD_CHUNK_SIZE):
+                        if not chunk:
+                            continue
                         f.write(chunk)
                         bytes_downloaded += len(chunk)
 
@@ -766,8 +816,7 @@ class DropboxClient:
 
                         # Periodic rev check (fast-fail on a mid-download
                         # overwrite). check_interval <= 0 disables it entirely;
-                        # the final rev/size checks after the loop still guard
-                        # correctness either way.
+                        # the final size check below still guards correctness.
                         if check_interval > 0 and \
                                 bytes_downloaded - last_check_bytes >= check_interval:
                             current_metadata = self._dbx.files_get_metadata(norm_path)
@@ -778,8 +827,34 @@ class DropboxClient:
                                         f"{bytes_downloaded / (1024*1024):.1f} MB"
                                     )
                             last_check_bytes = bytes_downloaded
-        finally:
-            resp.close()
+                except DropboxRevChangedError:
+                    resp.close()
+                    raise
+                except requests.exceptions.RequestException as e:
+                    # Connection dropped mid-segment (the IncompleteRead case).
+                    # Flush what we have and resume from the new on-disk offset.
+                    resp.close()
+                    f.flush()
+                    attempt += 1
+                    if attempt > self.DOWNLOAD_SEGMENT_MAX_RETRIES:
+                        raise DropboxClientError(
+                            f"Download stalled for {dropbox_path} after {attempt} "
+                            f"reconnects at {bytes_downloaded / (1024**3):.1f}/"
+                            f"{total_size / (1024**3):.1f} GB: {e}"
+                        ) from e
+                    logger.info(
+                        f"Download connection broke at "
+                        f"{bytes_downloaded / (1024**3):.1f}/"
+                        f"{total_size / (1024**3):.1f} GB for {dropbox_path}; "
+                        f"reconnecting (attempt {attempt})"
+                    )
+                    time.sleep(min(2 ** attempt, 15))
+                    continue
+                else:
+                    # Segment streamed cleanly — reset the retry budget so the
+                    # cap only ever counts *consecutive* failures.
+                    resp.close()
+                    attempt = 0
 
         if bytes_downloaded < total_size:
             raise DropboxClientError(

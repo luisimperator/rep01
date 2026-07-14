@@ -63,8 +63,10 @@ class TestResumeFromPartial:
 
         assert rev == "r1"
         assert dest.read_bytes() == b"x" * 32
+        # Downloads are now fetched as bounded byte ranges; a fresh download
+        # still starts at byte 0, capped at the file's last byte.
         call_args = mock_get.call_args
-        assert 'Range' not in call_args.kwargs.get('headers', {})
+        assert call_args.kwargs['headers']['Range'] == 'bytes=0-31'
 
     def test_resume_sends_range_header(self, tmp_path):
         client = _make_client()
@@ -91,7 +93,9 @@ class TestResumeFromPartial:
                 )
 
         call_args = mock_get.call_args
-        assert call_args.kwargs['headers']['Range'] == 'bytes=100-'
+        # Resume now requests a bounded range (start to the file's last byte)
+        # instead of an open-ended bytes=100- stream.
+        assert call_args.kwargs['headers']['Range'] == 'bytes=100-199'
         content = dest.read_bytes()
         assert content == b"A" * 100 + b"B" * 100
 
@@ -110,6 +114,56 @@ class TestResumeFromPartial:
 
         assert rev == "r1"
         client._dbx.files_get_temporary_link.assert_not_called()
+
+
+class TestSegmentedReconnect:
+    """A connection dropped mid-download (IncompleteRead) is retried in-place."""
+
+    def test_reconnects_after_broken_connection(self, tmp_path):
+        import requests as _requests
+        client = _make_client()
+        dest = tmp_path / "video.mp4.partial"
+        total = 50
+
+        md = _fake_metadata(rev="r1", size=total)
+        client._dbx.files_get_metadata.return_value = md
+
+        link_result = MagicMock()
+        link_result.link = "https://cdn.example.com/file"
+        client._dbx.files_get_temporary_link.return_value = link_result
+
+        # First GET writes 20 bytes, then the connection breaks like Dropbox's
+        # ~10GB IncompleteRead (surfaced by requests as ChunkedEncodingError).
+        resp1 = MagicMock()
+        resp1.status_code = 206
+        resp1.close = MagicMock()
+
+        def _iter_then_break(chunk_size):
+            yield b"A" * 20
+            raise _requests.exceptions.ChunkedEncodingError(
+                "Connection broken: IncompleteRead(20 bytes read, 30 more expected)"
+            )
+
+        resp1.iter_content.side_effect = _iter_then_break
+
+        # Second GET resumes from byte 20 and finishes the file cleanly.
+        resp2 = MagicMock()
+        resp2.status_code = 206
+        resp2.iter_content.return_value = [b"B" * 30]
+        resp2.close = MagicMock()
+
+        with patch("requests.get", side_effect=[resp1, resp2]) as mock_get:
+            with patch("transcoder.dropbox_client.FileMetadata", type(md)):
+                with patch("time.sleep"):
+                    rev = client.download_file_with_rev_check(
+                        "/test.mp4", dest, expected_rev="r1"
+                    )
+
+        assert rev == "r1"
+        # No bytes lost across the break, no duplication.
+        assert dest.read_bytes() == b"A" * 20 + b"B" * 30
+        # The retry resumed from exactly where the connection died.
+        assert mock_get.call_args_list[1].kwargs['headers']['Range'] == 'bytes=20-49'
 
 
 class TestRevCheckDuringResume:

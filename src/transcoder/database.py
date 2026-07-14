@@ -93,6 +93,11 @@ class Job:
     # Lets the dispatcher route into the right worker pool without competing for
     # the same encoder.
     kind: str = "video"
+    # When the job last CHANGED state — unlike updated_at, this is immune to
+    # the jobs_updated_at trigger and progress writes, so the watchdog can
+    # measure true time-in-state. None on rows read mid-migration; callers
+    # fall back to updated_at.
+    state_changed_at: datetime | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Job:
@@ -104,6 +109,10 @@ class Job:
             kind = row['kind'] or "video"
         except (IndexError, KeyError):
             kind = "video"
+        try:
+            state_changed_at = _parse_datetime(row['state_changed_at'])
+        except (IndexError, KeyError):
+            state_changed_at = None
         return cls(
             id=row['id'],
             dropbox_path=row['dropbox_path'],
@@ -126,6 +135,8 @@ class Job:
             transcode_end=_parse_datetime(row['transcode_end']),
             created_at=_parse_datetime(row['created_at']) or datetime.now(timezone.utc),
             updated_at=_parse_datetime(row['updated_at']) or datetime.now(timezone.utc),
+            kind=kind,
+            state_changed_at=state_changed_at,
         )
 
 
@@ -203,6 +214,13 @@ CREATE TABLE IF NOT EXISTS jobs (
     kind TEXT NOT NULL DEFAULT 'video',
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    -- Timeout clock for the watchdog. The jobs_updated_at trigger refreshes
+    -- updated_at on EVERY row update (progress writes, retry bumps, ...), so
+    -- updated_at cannot measure how long a job has sat in its current state —
+    -- a near-frozen transcode that trickles row updates resets it forever
+    -- (the 6-day zombie of v7.9). state_changed_at is written ONLY by state
+    -- transitions (update_job_state / recover / reset) and nothing else.
+    state_changed_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(dropbox_path, dropbox_rev)
 );
 
@@ -393,6 +411,17 @@ class Database:
             # Older DBs predate the audio pipeline. Backfill 'video' for every
             # existing row so dispatcher routing is unambiguous.
             conn.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'video'")
+        if 'state_changed_at' not in existing:
+            # Watchdog timeout clock (see SCHEMA comment). ADD COLUMN can't
+            # take a non-constant default in SQLite, so add then backfill from
+            # updated_at — the closest available approximation for old rows.
+            # (The backfill UPDATE fires the jobs_updated_at trigger once,
+            # refreshing updated_at across existing rows; cosmetic only.)
+            conn.execute("ALTER TABLE jobs ADD COLUMN state_changed_at TEXT")
+            conn.execute(
+                "UPDATE jobs SET state_changed_at = updated_at "
+                "WHERE state_changed_at IS NULL"
+            )
         # Refresh idx_jobs_active_path so newer SKIPPED_* states (added in
         # later versions like SKIPPED_LOW_BITRATE) are treated as terminal
         # by the unique-active-path constraint. SQLite re-creates indexes
@@ -590,7 +619,10 @@ class Database:
         Returns:
             True if job was updated.
         """
-        fields = ['state = ?']
+        # Every call to this method is a state transition — stamp the
+        # watchdog's timeout clock. (Non-transition row updates — progress,
+        # retry bumps — go through other methods and leave this untouched.)
+        fields = ['state = ?', "state_changed_at = datetime('now')"]
         values: list[Any] = [state.value]
 
         if error_message is not None:
@@ -650,7 +682,8 @@ class Database:
         with self.transaction() as conn:
             placeholders = ','.join('?' * len(ACTIVE_STATES))
             cursor = conn.execute(
-                f"UPDATE jobs SET state = ? WHERE state IN ({placeholders})",
+                f"UPDATE jobs SET state = ?, state_changed_at = datetime('now') "
+                f"WHERE state IN ({placeholders})",
                 [JobState.RETRY_WAIT.value] + [s.value for s in ACTIVE_STATES],
             )
             return cursor.rowcount
@@ -669,7 +702,10 @@ class Database:
         """
         with self.transaction() as conn:
             params: list = [JobState.RETRY_WAIT.value, JobState.FAILED.value]
-            sql = "UPDATE jobs SET state = ?, retry_count = 0 WHERE state = ?"
+            sql = (
+                "UPDATE jobs SET state = ?, retry_count = 0, "
+                "state_changed_at = datetime('now') WHERE state = ?"
+            )
             if path_prefix:
                 prefix = path_prefix.rstrip('/')
                 sql += " AND (dropbox_path = ? OR dropbox_path LIKE ?)"
