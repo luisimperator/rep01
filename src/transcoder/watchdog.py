@@ -36,6 +36,8 @@ class Watchdog(threading.Thread):
         db: Database,
         stop_event: threading.Event,
         check_interval: int = 60,
+        workers: list | None = None,
+        disk_budget=None,
     ):
         """
         Initialize watchdog.
@@ -45,12 +47,24 @@ class Watchdog(threading.Thread):
             db: Database instance.
             stop_event: Event to signal shutdown.
             check_interval: Seconds between checks.
+            workers: Pipeline workers (anything exposing abort_job). On a
+                timeout the watchdog first kills the offending job's in-flight
+                process through its worker, so the stuck thread unblocks and
+                runs its own cleanup, instead of just flipping DB state under
+                a still-running ffmpeg.
+            disk_budget: DiskBudget, so orphaned timeouts release their
+                staging reservation instead of deadlocking the budget.
         """
         super().__init__(name="watchdog", daemon=True)
         self.config = config
         self.db = db
         self.stop_event = stop_event
         self.check_interval = check_interval
+        self.workers = workers if workers is not None else []
+        self.disk_budget = disk_budget
+        # job_id -> soft-kill attempts. After 2 ticks where the kill didn't
+        # unstick the worker, the watchdog takes over the DB transition itself.
+        self._kill_attempts: dict[int, int] = {}
         # Failed-revive cooldown: when the download pipeline goes idle we
         # promote every FAILED job back to RETRY_WAIT to give it another
         # shot. Cooldown prevents thrashing if the same jobs immediately
@@ -69,6 +83,7 @@ class Watchdog(threading.Thread):
                 self._check_timeouts()
                 self._check_retry_ready()
                 self._check_failed_revive()
+                self._check_stale_reservations()
             except Exception as e:
                 logger.error(f"Watchdog error: {e}")
 
@@ -83,24 +98,46 @@ class Watchdog(threading.Thread):
     def _check_timeouts(self) -> None:
         """Check for jobs that have exceeded timeout."""
         now = datetime.now(timezone.utc)
+        active_ids: set[int] = set()
 
         # Check downloading jobs
         for job in self.db.get_jobs_by_state(JobState.DOWNLOADING, limit=100):
+            active_ids.add(job.id)
             if self._is_job_timed_out(job, self.config.watchdog.download_timeout_sec, now):
                 logger.warning(f"Job {job.id} download timeout, requeueing")
                 self._handle_timeout(job, "Download timeout")
 
         # Check transcoding jobs
         for job in self.db.get_jobs_by_state(JobState.TRANSCODING, limit=100):
+            active_ids.add(job.id)
             if self._is_job_timed_out(job, self.config.watchdog.transcode_timeout_sec, now):
                 logger.warning(f"Job {job.id} transcode timeout, requeueing")
                 self._handle_timeout(job, "Transcode timeout")
 
         # Check uploading jobs
         for job in self.db.get_jobs_by_state(JobState.UPLOADING, limit=100):
+            active_ids.add(job.id)
             if self._is_job_timed_out(job, self.config.watchdog.upload_timeout_sec, now):
                 logger.warning(f"Job {job.id} upload timeout, requeueing")
                 self._handle_timeout(job, "Upload timeout")
+
+        # Kill-attempt counters for jobs that left the active states (the
+        # worker's cleanup ran, or an operator intervened) are done with.
+        self._kill_attempts = {
+            jid: n for jid, n in self._kill_attempts.items() if jid in active_ids
+        }
+
+    @staticmethod
+    def _state_clock(job: Job) -> datetime | None:
+        """Timestamp the job entered its current state.
+
+        Prefer state_changed_at: updated_at is refreshed by the
+        jobs_updated_at trigger on EVERY row update (progress, retry bumps),
+        so a near-frozen ffmpeg that trickles updates resets updated_at
+        forever and its job never times out (the 6-day zombie transcode).
+        Fall back to updated_at only for rows read mid-migration.
+        """
+        return job.state_changed_at or job.updated_at
 
     def _is_job_timed_out(
         self,
@@ -109,15 +146,32 @@ class Watchdog(threading.Thread):
         now: datetime,
     ) -> bool:
         """Check if job has exceeded timeout."""
-        # Use updated_at as the state entry time
-        if not job.updated_at:
+        entered = self._state_clock(job)
+        if not entered:
             return False
 
-        elapsed = (now - job.updated_at).total_seconds()
+        elapsed = (now - entered).total_seconds()
         return elapsed > timeout_sec
 
     def _handle_timeout(self, job: Job, reason: str) -> None:
-        """Handle a timed-out job."""
+        """Handle a timed-out job.
+
+        First try to kill the in-flight process (ffmpeg / download stream)
+        through the worker that owns the job. The kill unblocks the stuck
+        worker thread, whose own failure path then runs the full cleanup —
+        retry increment, RETRY_WAIT/FAILED, disk-budget release, staging rm —
+        with no state race against the watchdog.
+
+        Only when no worker owns the job (orphaned state after a crash), or
+        the kill failed to unstick it after 2 ticks, does the watchdog take
+        over: flip the DB state and reclaim the staging reservation itself.
+        """
+        attempts = self._kill_attempts.get(job.id, 0)
+        if attempts < 2 and self._abort_in_flight(job, reason):
+            self._kill_attempts[job.id] = attempts + 1
+            return
+
+        self._kill_attempts.pop(job.id, None)
         retry_count, should_fail = self.db.increment_retry(
             job.id,
             self.config.watchdog.max_retries,
@@ -137,6 +191,51 @@ class Watchdog(threading.Thread):
                 error_message=f"{reason} (retry {retry_count})",
             )
 
+        # The owning worker is gone (or hopelessly stuck) — nobody else will
+        # ever release this job's staging reservation. Reclaim it here or the
+        # budget stays exhausted and every downloader stalls forever.
+        if self.disk_budget is not None:
+            self.disk_budget.release(job.id)
+
+    def _abort_in_flight(self, job: Job, reason: str) -> bool:
+        """Ask each pipeline worker to kill its in-flight process for `job`.
+
+        Returns True when a worker owned the job AND actually delivered a
+        kill (ffmpeg terminated / download stream aborted).
+        """
+        for worker in self.workers:
+            abort = getattr(worker, "abort_job", None)
+            if abort is None:
+                continue
+            try:
+                if abort(job.id, reason):
+                    return True
+            except Exception:
+                logger.exception(
+                    "abort_job(%s) failed on worker %s", job.id, worker
+                )
+        return False
+
+    def _check_stale_reservations(self) -> None:
+        """Reclaim disk reservations whose jobs are no longer active.
+
+        Startup already prunes these, but a daemon that runs for weeks needs
+        the same self-healing continuously: one leaked reservation (worker
+        crash, kill -9, code bug) otherwise pins the budget until the next
+        restart — the 3-day 'staging budget exhausted' deadlock of v7.9.
+        """
+        try:
+            pruned = self.db.prune_stale_disk_reservations(ACTIVE_STATES)
+        except Exception:
+            logger.exception("prune_stale_disk_reservations failed")
+            return
+        if pruned:
+            logger.warning(
+                "watchdog: reclaimed %d stale disk reservation(s) held by "
+                "non-active jobs — staging budget was leaking",
+                pruned,
+            )
+
     def _check_retry_ready(self) -> None:
         """Check for RETRY_WAIT jobs ready to be retried."""
         now = datetime.now(timezone.utc)
@@ -145,8 +244,9 @@ class Watchdog(threading.Thread):
             # Calculate backoff delay
             delay = min(300, 5 * (2 ** job.retry_count))
 
-            if job.updated_at:
-                elapsed = (now - job.updated_at).total_seconds()
+            entered = self._state_clock(job)
+            if entered:
+                elapsed = (now - entered).total_seconds()
                 if elapsed >= delay:
                     logger.info(f"Job {job.id} ready for retry after {elapsed:.0f}s backoff")
                     self.db.update_job_state(job.id, JobState.NEW)

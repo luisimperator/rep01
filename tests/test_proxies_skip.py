@@ -87,6 +87,7 @@ def test_download_worker_skips_loose_proxy_filename():
     worker = object.__new__(DownloadWorker)
     threading.Thread.__init__(worker, name="downloader-test", daemon=True)
     worker.db = _FakeDB()
+    worker._abort_download = threading.Event()
 
     # _Proxy file NOT inside a proxy folder — must still be skipped.
     job = SimpleNamespace(
@@ -161,6 +162,7 @@ def test_download_worker_skips_queued_proxy_job():
     # Workers are Thread subclasses; the name property needs Thread.__init__.
     threading.Thread.__init__(worker, name="downloader-test", daemon=True)
     worker.db = _FakeDB()
+    worker._abort_download = threading.Event()
 
     job = SimpleNamespace(
         id=1553,

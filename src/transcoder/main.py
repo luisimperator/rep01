@@ -537,8 +537,17 @@ class Daemon:
             worker.start()
             self.workers.append(worker)
 
-        # Watchdog
-        watchdog = Watchdog(self.config, self.db, self.stop_event)
+        # Watchdog. Gets the pipeline workers so a stage timeout kills the
+        # offending job's in-flight process (ffmpeg / download stream) instead
+        # of flipping DB state under a still-running zombie, and the disk
+        # budget so orphaned timeouts release their staging reservation.
+        watchdog = Watchdog(
+            self.config,
+            self.db,
+            self.stop_event,
+            workers=list(self.workers),
+            disk_budget=self.disk_budget,
+        )
         watchdog.start()
         self.workers.append(watchdog)
 

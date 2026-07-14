@@ -2,6 +2,42 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 8.1.0
+Data: 14/07/2026
+--------------------------------------------------------------------------------
+
+Watchdog agora MATA processo travado (fim do transcode-zumbi de 6 dias)
+
+  [FIX] O relógio de timeout do watchdog usava updated_at — mas um trigger
+        do SQLite atualiza updated_at em QUALQUER escrita na linha do job
+        (progresso, retry). Um ffmpeg quase congelado que pinga progresso
+        resetava o próprio cronômetro pra sempre: na HEAVY7, dois transcodes
+        rodaram 6+ dias sem nunca estourar o timeout de 24h. Novo carimbo
+        state_changed_at é escrito SÓ na transição de estado (com migração
+        automática do banco) e passa a ser o relógio do timeout e do backoff.
+  [FEATURE] Timeout agora mata o processo em voo de verdade: o watchdog
+        pede ao worker dono do job pra terminar o ffmpeg (ou abortar o
+        stream de download), a thread destrava e o caminho normal de falha
+        faz a limpeza (retry, RETRY_WAIT/FAILED, libera reserva de disco,
+        apaga staging). Job órfão (sem worker) ou kill que não destravou em
+        2 tentativas: o watchdog assume, requeueia e libera a reserva ele
+        mesmo.
+  [FIX] Reservas do disk budget órfãs eram limpas SÓ no boot; um vazamento
+        (crash de worker, kill -9) travava o budget até o próximo restart —
+        os 3 dias de "staging budget exhausted" com 1.82 TB reservado e ZERO
+        trabalho feito. O watchdog agora reconcilia as reservas a cada
+        ciclo (60s): reserva de job não-ativo é reclamada sozinha.
+  [FIX] Job.from_row não repassava a coluna kind — todo job lido do banco
+        virava "video" e a fila de áudio (WAV→MP3) nunca era alimentada
+        pelo dispatcher. Áudio volta a rotear certo.
+  [FIX] Download em faixas de 2 GB (byte-range) em vez de um stream único:
+        a conexão do Dropbox caía consistentemente perto dos ~10 GB
+        (IncompleteRead) e cada queda custava um ciclo inteiro de retry.
+        Agora nenhuma conexão vive o bastante pra cair, e uma quebra no
+        meio reconecta na hora do byte exato, sem falhar o job.
+
+--------------------------------------------------------------------------------
+
 Versão: 8.0.0
 Data: 25/06/2026
 --------------------------------------------------------------------------------
