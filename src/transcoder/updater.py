@@ -1,12 +1,14 @@
 """
-Notify-only update checker backed by GitHub Releases.
+Update checker (and optional self-updater) backed by GitHub Releases.
 
-On daemon startup a background thread queries the configured repo's
-``/releases/latest`` endpoint, compares the published tag to the installed
-package version, and persists the result to the ``settings`` table. The HTTP
-API surfaces the flag so the GUI (or a curl check) can tell the user a new
-release is available. The daemon never self-updates — running ``hd update``
-applies it (``git pull`` + ``pip install -e .`` + daemon restart).
+The daemon runs an :class:`AutoUpdater` thread that periodically queries the
+configured repo's ``/releases/latest`` endpoint, compares the published tag
+to the installed package version, and persists the result to the ``settings``
+table (the HTTP API surfaces it to the dashboard). With ``updater.auto_apply``
+enabled, a newer release is also APPLIED in place — ``git pull --ff-only``
+plus ``pip install -e .`` when the manifest changed — and the daemon is asked
+to restart itself so the new code actually loads. With ``auto_apply`` off it
+degrades to the old notify-only behavior (``hd update`` applies manually).
 """
 
 from __future__ import annotations
@@ -146,21 +148,6 @@ def check_for_update(
         )
 
 
-def check_for_update_async(
-    db: Database,
-    github_repo: str,
-    timeout_sec: float = 5.0,
-) -> threading.Thread:
-    """Fire-and-forget the update check so daemon startup doesn't block on network."""
-    t = threading.Thread(
-        target=lambda: check_for_update(db, github_repo, timeout_sec),
-        name="updater",
-        daemon=True,
-    )
-    t.start()
-    return t
-
-
 def read_status(db: Database) -> UpdateStatus:
     """Load the last persisted update status (for the HTTP API)."""
     latest = db.get_setting(_SETTING_LATEST)
@@ -218,6 +205,135 @@ def apply_update(
 
     log_fn("update applied. Restart the daemon to pick up the new version.")
     return 0
+
+
+# ------------------------------------------------------------------ auto-update
+
+def detect_install_dir() -> Path | None:
+    """Locate the git checkout this package runs from, or None.
+
+    Editable installs (the bootstrap's ``pip install -e .``) import straight
+    from the checkout, so walking up from this file finds ``.git`` +
+    ``pyproject.toml``. A site-packages install finds neither — auto-apply
+    then stays off (there is no checkout to ``git pull``).
+    """
+    for parent in Path(__file__).resolve().parents:
+        if (parent / ".git").exists() and (parent / "pyproject.toml").exists():
+            return parent
+    return None
+
+
+def _checkout_version(install_dir: Path) -> str:
+    """Read the version currently on disk in the checkout's pyproject.toml."""
+    try:
+        text = (Path(install_dir) / "pyproject.toml").read_text(encoding="utf-8")
+        m = re.search(r'^version\s*=\s*"([^"]+)"', text, re.MULTILINE)
+        if m:
+            return m.group(1)
+    except OSError:
+        pass
+    return "0.0.0"
+
+
+class AutoUpdater(threading.Thread):
+    """Periodic release check that can apply updates and restart the daemon.
+
+    Every ``interval_sec`` (first check right at startup) the thread refreshes
+    the persisted update status. When ``auto_apply`` is on and a newer release
+    exists, it applies the update in place and calls ``request_restart`` — the
+    running process keeps executing the OLD code (Python has it in memory), so
+    only a restart loads the new version.
+
+    A tag whose apply fails (or that doesn't actually move the checkout's
+    version past the running one) is remembered and not retried, so a broken
+    checkout can't put the daemon in a pull/restart loop; publishing a newer
+    release resets the latch.
+    """
+
+    def __init__(
+        self,
+        db: Database,
+        github_repo: str,
+        stop_event: threading.Event,
+        *,
+        timeout_sec: float = 5.0,
+        interval_sec: float = 1800.0,
+        auto_apply: bool = False,
+        install_dir: Path | None = None,
+        request_restart: Callable[[str], None] | None = None,
+        check_fn: Callable[..., UpdateStatus] | None = None,
+        apply_fn: Callable[..., int] | None = None,
+    ) -> None:
+        super().__init__(name="updater", daemon=True)
+        self.db = db
+        self.github_repo = github_repo
+        self.stop_event = stop_event
+        self.timeout_sec = timeout_sec
+        self.interval_sec = interval_sec
+        self.auto_apply = auto_apply
+        self.install_dir = Path(install_dir) if install_dir else None
+        self.request_restart = request_restart
+        self._check_fn = check_fn or check_for_update
+        self._apply_fn = apply_fn or apply_update
+        # Version this process is actually RUNNING. installed_version() reads
+        # dist-info, which pip rewrites during apply — capture it now so the
+        # newer-than comparison stays anchored to the code in memory.
+        self._running_version = installed_version()
+        self._skip_tag: str | None = None
+
+    def run(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                self._tick()
+            except Exception:
+                logger.warning("update check crashed", exc_info=True)
+            self.stop_event.wait(self.interval_sec)
+
+    def _tick(self) -> None:
+        status = self._check_fn(self.db, self.github_repo, self.timeout_sec)
+        if not (status.update_available and status.latest_tag):
+            return
+        tag = status.latest_tag
+        if not self.auto_apply or self.request_restart is None:
+            return
+        if tag == self._skip_tag:
+            return
+        if self.install_dir is None:
+            logger.warning(
+                "auto-update: %s available but this install is not a git "
+                "checkout; apply it manually with `hd update`", tag,
+            )
+            self._skip_tag = tag
+            return
+
+        logger.info(
+            "auto-update: applying %s (running %s)", tag, self._running_version
+        )
+        rc = self._apply_fn(self.install_dir, log_fn=logger.info)
+        if rc != 0:
+            self._skip_tag = tag
+            logger.error(
+                "auto-update: apply of %s failed (rc=%d); leaving the daemon "
+                "as-is. Will only retry when a newer release is published.",
+                tag, rc,
+            )
+            return
+
+        on_disk = _checkout_version(self.install_dir)
+        if _normalize_version(on_disk) <= _normalize_version(self._running_version):
+            self._skip_tag = tag
+            logger.warning(
+                "auto-update: pulled %s but the checkout still holds %s "
+                "(running %s); not restarting.", tag, on_disk,
+                self._running_version,
+            )
+            return
+
+        logger.info(
+            "auto-update: %s applied (checkout now %s); restarting daemon "
+            "to load it", tag, on_disk,
+        )
+        self.request_restart(f"auto-update to {tag}")
 
 
 # ---------------------------------------------------------------------- helpers
