@@ -1,0 +1,76 @@
+name: Publish Release
+
+# Publica uma GitHub Release para uma versão do HeavyDrops Transcoder.
+# O updater do daemon consulta /releases/latest e compara a tag com a
+# versão instalada — sem release publicada ele loga HTTP 404 a cada checagem.
+#
+# Dois gatilhos:
+#   - workflow_dispatch: informe a tag (ex.: v8.1.0); a tag é criada no
+#     commit atual do branch escolhido se ainda não existir.
+#   - push de tag v*: publica a release para a tag empurrada.
+#
+# As notas vêm da seção correspondente do NOTAS_DA_VERSAO.txt; se a seção
+# não existir, cai para as notas geradas automaticamente pelo GitHub.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag da release (ex.: v8.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract release notes from NOTAS_DA_VERSAO.txt
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          python3 - "${TAG#v}" <<'EOF'
+          import re
+          import sys
+
+          ver = sys.argv[1]
+          raw = open("NOTAS_DA_VERSAO.txt", encoding="utf-8").read()
+          m = re.search(
+              rf"^Versão: {re.escape(ver)}\n(.*?)(?=^Versão: |\Z)",
+              raw,
+              re.S | re.M,
+          )
+          notes = m.group(1) if m else ""
+          notes = re.sub(r"^Data: .*\n", "", notes)
+          notes = re.sub(r"^-{10,}\n", "", notes, flags=re.M)
+          notes = re.sub(r"^={10,}\n?", "", notes, flags=re.M)
+          notes = notes.strip()
+          open("release_notes.txt", "w", encoding="utf-8").write(notes + "\n")
+          print(f"Notas para {ver}: {len(notes)} chars")
+          EOF
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG já existe; nada a fazer."
+            exit 0
+          fi
+          if [ -s release_notes.txt ] && grep -q '[^[:space:]]' release_notes.txt; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "HeavyDrops Transcoder $TAG" \
+              --notes-file release_notes.txt
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "HeavyDrops Transcoder $TAG" \
+              --generate-notes
+          fi
