@@ -2,6 +2,39 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 8.2.0
+Data: 15/07/2026
+--------------------------------------------------------------------------------
+
+Auto-update: mergear no main atualiza TODA máquina sozinha
+
+  [FEATURE] O updater deixou de ser só aviso. Agora ele checa as releases do
+        GitHub a cada 30 minutos (configurável) e, quando sai versão nova,
+        aplica sozinho: git pull + pip install (só quando o manifest mudou)
+        e reinicia o daemon pra carregar o código novo. O restart é limpo —
+        os jobs em voo são requeuados no boot e os downloads já feitos são
+        reaproveitados (mesma recuperação comprovada na subida da 8.1.0).
+  [FEATURE] Restart automático via Task Scheduler: um helper destacado
+        espera o processo antigo morrer e roda schtasks /Run na task
+        HeavyDropsDaemon; o exit code dedicado (42) faz o RestartOnFailure
+        da task servir de plano B se o helper falhar. Nada de comando
+        manual em nenhuma máquina.
+  [FEATURE] Publicação de release também ficou automática (workflow do
+        Actions): todo merge no main lê a versão do pyproject.toml e, se a
+        release v<versão> ainda não existe, cria a tag e publica com as
+        notas desta seção. Ou seja: mergear um bump de versão no main =
+        release publicada = todas as máquinas atualizadas em até ~30 min.
+  [CONFIG] updater.auto_apply (padrão true) desliga o modo automático se
+        quiser voltar ao aviso-no-dashboard + `hd update` manual;
+        updater.check_interval_sec ajusta a cadência da checagem;
+        updater.windows_task_name muda o nome da task usada no restart.
+  [GUARD] Sem loop de update: release cujo apply falhou (ou que não
+        avançou a versão do checkout) fica marcada e não é tentada de novo
+        até sair uma release mais nova; instalação que não é checkout git
+        nunca tenta aplicar (só avisa).
+
+--------------------------------------------------------------------------------
+
 Versão: 8.1.0
 Data: 14/07/2026
 --------------------------------------------------------------------------------

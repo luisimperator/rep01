@@ -229,10 +229,10 @@ class ApiSettings(BaseModel):
 
 
 class UpdaterSettings(BaseModel):
-    """Notify-only update check against GitHub Releases."""
+    """Update check against GitHub Releases, with optional self-update."""
     enabled: bool = Field(
         default=True,
-        description="When true, the daemon checks GitHub Releases on startup"
+        description="When true, the daemon checks GitHub Releases periodically"
     )
     github_repo: str = Field(
         default="luisimperator/rep01",
@@ -243,6 +243,27 @@ class UpdaterSettings(BaseModel):
         ge=1.0,
         le=60.0,
         description="Network timeout for the release check; failure is non-fatal"
+    )
+    check_interval_sec: float = Field(
+        default=1800.0,
+        ge=300.0,
+        le=86400.0,
+        description="Seconds between release checks (first check at startup)"
+    )
+    auto_apply: bool = Field(
+        default=True,
+        description=(
+            "When a newer release is published, pull it (git + pip) and "
+            "restart the daemon automatically; false = notify-only (dashboard "
+            "badge + manual `hd update`)"
+        )
+    )
+    windows_task_name: str = Field(
+        default="HeavyDropsDaemon",
+        description=(
+            "Scheduled-task name used to relaunch the daemon after a "
+            "self-update restart on Windows"
+        )
     )
 
 
@@ -1123,6 +1144,9 @@ def save_example_config(path: Path) -> None:
             'enabled': True,
             'github_repo': 'luisimperator/rep01',
             'check_timeout_sec': 5.0,
+            'check_interval_sec': 1800,
+            'auto_apply': True,
+            'windows_task_name': 'HeavyDropsDaemon',
         },
         'dropbox_api': {
             'rate_per_min': 600,

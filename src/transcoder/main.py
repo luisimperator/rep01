@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -46,7 +47,7 @@ from .encoder_detect import (
 )
 from .rate_limit import TokenBucket
 from .scanner import Scanner
-from .updater import apply_update, check_for_update_async, installed_version
+from .updater import AutoUpdater, apply_update, detect_install_dir, installed_version
 from .watchdog import HealthChecker, Watchdog
 from .workers import AudioTranscoder, DownloadWorker, TranscodeWorker, UploadWorker
 from .inventory import (
@@ -59,6 +60,12 @@ from .inventory import (
 
 console = Console()
 logger = logging.getLogger(__name__)
+
+# Exit code used when the daemon shuts down ON PURPOSE to be relaunched by
+# its supervisor (auto-update restart). Nonzero so Task Scheduler's
+# RestartOnFailure / systemd's Restart=on-failure treat the run as one to
+# restart, not a clean stop.
+RESTART_EXIT_CODE = 42
 
 
 def setup_logging(verbose: bool = False, log_file: Path | None = None) -> None:
@@ -171,6 +178,8 @@ class Daemon:
         self.census_worker: CensusWorker | None = None
         self.deep_scan: DeepScanWorker | None = None
         self.incident_reporter = None  # IncidentReporter | None, set in setup()
+        self.auto_updater = None  # AutoUpdater | None, set in setup()
+        self.restart_requested = False
         self.stop_event = threading.Event()
         self.scan_trigger = threading.Event()
         self.started_at = time.time()
@@ -336,13 +345,29 @@ class Daemon:
         except Exception as e:
             logger.warning(f"could not run ffmpeg sanity transcode: {e}")
 
-        # Fire-and-forget GitHub release check; the HTTP API surfaces the result
-        # once it lands in the settings table.
+        # Periodic GitHub release check; the HTTP API surfaces the result once
+        # it lands in the settings table. With auto_apply on it also pulls a
+        # newer release in place and restarts the daemon to load it.
         if self.config.updater.enabled:
-            check_for_update_async(
+            upd = self.config.updater
+            install_dir = detect_install_dir()
+            self.auto_updater = AutoUpdater(
                 self.db,
-                self.config.updater.github_repo,
-                timeout_sec=self.config.updater.check_timeout_sec,
+                upd.github_repo,
+                self.stop_event,
+                timeout_sec=upd.check_timeout_sec,
+                interval_sec=upd.check_interval_sec,
+                auto_apply=upd.auto_apply,
+                install_dir=install_dir,
+                request_restart=self.request_restart,
+            )
+            self.auto_updater.start()
+            self.workers.append(self.auto_updater)
+            logger.info(
+                "updater: check every %ds, auto_apply=%s (install dir: %s)",
+                int(upd.check_interval_sec),
+                "ON" if upd.auto_apply else "off",
+                install_dir or "not a git checkout — apply disabled",
             )
 
         # Auto-incident reporter: opens GitHub Issues on transcode/scan
@@ -677,6 +702,18 @@ class Daemon:
                     logger.info("scan-now triggered via API")
                     break
 
+    def request_restart(self, reason: str) -> None:
+        """Shut down gracefully and get relaunched by the service supervisor.
+
+        Used by the auto-updater after pulling a new release: the running
+        process keeps the old code in memory, so a restart is the only way to
+        load it. In-flight jobs are safe — startup recovery requeues them and
+        reuses already-downloaded staging files.
+        """
+        logger.info(f"daemon restart requested: {reason}")
+        self.restart_requested = True
+        self.stop_event.set()
+
     def stop(self) -> None:
         """Signal all workers to stop."""
         logger.info("Stopping daemon...")
@@ -708,6 +745,65 @@ class Daemon:
             self.run_scan_loop()
         finally:
             self.stop()
+
+        if self.restart_requested:
+            self._exit_for_restart()
+
+    def _exit_for_restart(self) -> None:
+        """Exit so the service supervisor relaunches us with the new code.
+
+        On Windows a detached helper waits for this pid to die and then runs
+        ``schtasks /Run`` on the daemon's scheduled task for an immediate
+        relaunch; the nonzero exit code is the belt-and-braces fallback — the
+        task's RestartOnFailure (and systemd's Restart=on-failure on Linux)
+        relaunches a failed run on its own. Double starts are harmless: the
+        task ignores new instances while running and the daemon holds a
+        lockfile.
+        """
+        # Don't leave in-flight ffmpeg grinding as orphans across the restart
+        # gap; startup recovery requeues their jobs anyway.
+        try:
+            from .api import _kill_all_ffmpeg
+            _kill_all_ffmpeg()
+        except Exception:
+            logger.warning("could not kill in-flight ffmpeg before restart",
+                           exc_info=True)
+
+        if sys.platform == "win32":
+            task = self.config.updater.windows_task_name
+            script = (
+                f"$p = Get-Process -Id {os.getpid()} -ErrorAction SilentlyContinue; "
+                "if ($p) { $p.WaitForExit() }; "
+                "Start-Sleep -Seconds 3; "
+                f"schtasks /Run /TN \"{task}\""
+            )
+            flags = (
+                getattr(subprocess, "DETACHED_PROCESS", 0)
+                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            )
+            try:
+                subprocess.Popen(
+                    ["powershell", "-NoProfile", "-WindowStyle", "Hidden",
+                     "-Command", script],
+                    creationflags=flags,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    close_fds=True,
+                )
+                logger.info(
+                    "restart helper armed: schtasks /Run /TN %s after exit", task
+                )
+            except Exception:
+                logger.warning(
+                    "could not arm the restart helper; relying on the task's "
+                    "RestartOnFailure (~5 min)", exc_info=True,
+                )
+
+        logger.info("exiting with code %d for supervisor restart",
+                    RESTART_EXIT_CODE)
+        sys.exit(RESTART_EXIT_CODE)
 
 
 # Click CLI

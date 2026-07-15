@@ -102,10 +102,19 @@ api:
   enabled: true
   bind: 127.0.0.1
   port: 9123
+# Auto-update: the daemon checks GitHub Releases every check_interval_sec.
+# With auto_apply on, a newer release is pulled in place (git + pip when the
+# manifest changed) and the daemon restarts itself via the Windows scheduled
+# task — merging to main is all it takes to update every machine. Set
+# auto_apply: false for the old notify-only behavior (dashboard badge +
+# manual `hd update`).
 updater:
   enabled: true
   github_repo: luisimperator/rep01
   check_timeout_sec: 5.0
+  check_interval_sec: 1800
+  auto_apply: true
+  windows_task_name: HeavyDropsDaemon
 # Remote health telemetry: publish a status snapshot (recent log tail, job
 # counts, disk free, any new crash.log) to GitHub on a timer so the daemon can
 # be watched without copying logs by hand. Off by default. github_token is
