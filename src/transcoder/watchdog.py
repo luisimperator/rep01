@@ -103,9 +103,10 @@ class Watchdog(threading.Thread):
         # Check downloading jobs
         for job in self.db.get_jobs_by_state(JobState.DOWNLOADING, limit=100):
             active_ids.add(job.id)
-            if self._is_job_timed_out(job, self.config.watchdog.download_timeout_sec, now):
-                logger.warning(f"Job {job.id} download timeout, requeueing")
-                self._handle_timeout(job, "Download timeout")
+            timed_out, reason = self._download_timed_out(job, now)
+            if timed_out:
+                logger.warning(f"Job {job.id} {reason}, requeueing")
+                self._handle_timeout(job, reason)
 
         # Check transcoding jobs
         for job in self.db.get_jobs_by_state(JobState.TRANSCODING, limit=100):
@@ -126,6 +127,62 @@ class Watchdog(threading.Thread):
         self._kill_attempts = {
             jid: n for jid, n in self._kill_attempts.items() if jid in active_ids
         }
+
+    def _download_timed_out(self, job: Job, now: datetime) -> tuple[bool, str]:
+        """Decide whether a DOWNLOADING job timed out. Returns (flag, reason).
+
+        Downloads time out on STALL, not duration: total time in state is the
+        wrong measure for 40-100 GB files that need many hours but are
+        streaming along fine — judging by duration killed every healthy
+        long download at the 2h mark and burned a retry per kill. So:
+
+        - live download (a worker owns it): killed only after
+          download_stall_timeout_sec with ZERO new bytes, or past the
+          download_max_duration_sec absolute ceiling (pathological trickle).
+        - orphaned DOWNLOADING row (crash leftover, no worker attached):
+          old total-duration clock via download_timeout_sec — there is no
+          stream to keep waiting for.
+        """
+        wd = self.config.watchdog
+        stall = self._download_stall_seconds(job)
+        if stall is not None:
+            max_duration = float(
+                getattr(wd, "download_max_duration_sec", 86400.0)
+            )
+            if self._is_job_timed_out(job, max_duration, now):
+                return True, (
+                    f"Download exceeded max duration "
+                    f"({int(max_duration)}s with progress too slow to finish)"
+                )
+            stall_timeout = float(
+                getattr(wd, "download_stall_timeout_sec", 900.0)
+            )
+            if stall > stall_timeout:
+                return True, f"Download stalled (no bytes for {int(stall)}s)"
+            return False, ""
+
+        if self._is_job_timed_out(job, wd.download_timeout_sec, now):
+            return True, "Download timeout (orphaned, no live worker)"
+        return False, ""
+
+    def _download_stall_seconds(self, job: Job) -> float | None:
+        """Ask the download workers how long `job`'s transfer has been
+        byteless. None when no live worker owns the download."""
+        for worker in self.workers:
+            fn = getattr(worker, "download_stall_seconds", None)
+            if fn is None:
+                continue
+            try:
+                stall = fn(job.id)
+            except Exception:
+                logger.exception(
+                    "download_stall_seconds(%s) failed on worker %s",
+                    job.id, worker,
+                )
+                continue
+            if stall is not None:
+                return stall
+        return None
 
     @staticmethod
     def _state_clock(job: Job) -> datetime | None:

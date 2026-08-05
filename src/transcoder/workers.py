@@ -187,14 +187,37 @@ class DownloadWorker(BaseWorker):
         # transfer; checked in the download progress callback. Cleared at the
         # start of every job so one abort never bleeds into the next.
         self._abort_download = threading.Event()
+        # (job_id, bytes_downloaded, monotonic_ts) of the last byte progress.
+        # The watchdog reads it (download_stall_seconds) to kill only STALLED
+        # downloads — total duration is the wrong measure for 40-100 GB files
+        # that need many hours but are streaming along fine.
+        self._progress_marker: tuple[int, int, float] | None = None
 
     def _abort_current(self) -> bool:
         self._abort_download.set()
         return True
 
+    def download_stall_seconds(self, job_id: int) -> float | None:
+        """Seconds since this worker's download of `job_id` last advanced.
+
+        None when this worker isn't currently downloading that job (the
+        watchdog then falls back to its orphan handling). A download that
+        never receives its first byte counts as stalled since job start.
+        """
+        job = self._current_job
+        marker = self._progress_marker
+        if job is None or job.id != job_id:
+            return None
+        if marker is None or marker[0] != job_id:
+            return None
+        return time.monotonic() - marker[2]
+
     def process_job(self, job: Job) -> None:
         """Download the file for the given job."""
         self._abort_download.clear()
+        # Arm the stall clock at job start so a download that never gets its
+        # first byte still times out on the stall threshold.
+        self._progress_marker = (job.id, -1, time.monotonic())
         # Defensive: even though scanner skips /assets/ paths since v6.2.2,
         # jobs created BEFORE that update may still be sitting in the DB
         # in NEW state. Catch them here BEFORE wasting bandwidth on the
@@ -591,6 +614,12 @@ class DownloadWorker(BaseWorker):
                 raise RuntimeError(
                     "download aborted by watchdog (stage timeout exceeded)"
                 )
+            # Feed the watchdog's stall clock: any byte advance counts.
+            # Convoy-throttle keepalive chunks advance it too, so a download
+            # deliberately paused to yield bandwidth is never seen as stalled.
+            marker = self._progress_marker
+            if marker is None or marker[0] != job.id or downloaded > marker[1]:
+                self._progress_marker = (job.id, downloaded, time.monotonic())
             # Night mode (or a manual pause) — stop downloading too, not just
             # transcoding. The partial is kept, so it resumes next window.
             if self.dispatcher.is_paused():

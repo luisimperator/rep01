@@ -62,8 +62,16 @@ concurrency:
   transcode_workers: 2
   upload_workers: 2
   audio_workers: 2
+# Downloads time out on STALL, not duration: a 40-100 GB file that needs many
+# hours but is streaming fine lives as long as it takes. stall = zero new
+# bytes for download_stall_timeout_sec; download_max_duration_sec is the
+# absolute per-attempt ceiling (partial kept, retry resumes from the byte);
+# download_timeout_sec only applies to orphaned DOWNLOADING rows left behind
+# by a crash (no live worker attached).
 watchdog:
   download_timeout_sec: 7200
+  download_stall_timeout_sec: 900
+  download_max_duration_sec: 86400
   transcode_timeout_sec: 86400
   upload_timeout_sec: 7200
   max_retries: 10
