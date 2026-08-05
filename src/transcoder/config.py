@@ -345,7 +345,32 @@ class WatchdogSettings(BaseModel):
     download_timeout_sec: int = Field(
         default=7200,
         ge=300,
-        description="Download timeout (seconds)"
+        description=(
+            "Timeout for ORPHANED downloads only — a job stuck in "
+            "DOWNLOADING with no live worker attached (crash leftover). "
+            "In-flight downloads are judged by stall, not duration: see "
+            "download_stall_timeout_sec"
+        )
+    )
+    download_stall_timeout_sec: float = Field(
+        default=900.0,
+        ge=60.0,
+        description=(
+            "Kill an in-flight download only after this long with ZERO new "
+            "bytes. Duration is the wrong measure for 40-100 GB files that "
+            "need many hours but are streaming fine; a healthy download "
+            "lives as long as it takes"
+        )
+    )
+    download_max_duration_sec: float = Field(
+        default=86400.0,
+        ge=3600.0,
+        description=(
+            "Absolute ceiling for a single download attempt even with "
+            "progress — safety net against a pathological trickle (bytes "
+            "dripping too slowly to ever finish). The partial is kept, so "
+            "the retry resumes from the exact byte"
+        )
     )
     transcode_timeout_sec: int = Field(
         default=86400,
@@ -1117,6 +1142,8 @@ def save_example_config(path: Path) -> None:
         },
         'watchdog': {
             'download_timeout_sec': 7200,
+            'download_stall_timeout_sec': 900,
+            'download_max_duration_sec': 86400,
             'transcode_timeout_sec': 86400,
             'upload_timeout_sec': 7200,
             'max_retries': 10,

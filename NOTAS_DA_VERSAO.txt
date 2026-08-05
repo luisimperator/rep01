@@ -2,6 +2,34 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 8.2.1
+Data: 05/08/2026
+--------------------------------------------------------------------------------
+
+Watchdog não mata mais download saudável de arquivo gigante
+
+  [FIX] O timeout de download media DURAÇÃO total (2h) — errado pra brutos
+        de 40-100 GB que precisam de várias horas mas estão baixando
+        normalmente: o watchdog matava o download saudável na marca das 2h,
+        queimava um retry por kill (arquivo monstro em banda lenta podia
+        estourar os 10 retries e ir pra FAILED sem ter nada de errado) e
+        poluía o log de WARNING. Agora o download em voo é julgado por
+        ESTAGNAÇÃO: só morre depois de download_stall_timeout_sec (padrão
+        15 min) sem receber byte NENHUM. Download progredindo vive o tempo
+        que precisar. Os chunks de keepalive do convoy throttle contam como
+        progresso, então download pausado de propósito não é confundido
+        com travado.
+  [GUARD] Teto absoluto download_max_duration_sec (padrão 24h) por
+        tentativa, contra gotejamento patológico (bytes pingando devagar
+        demais pra terminar um dia). O parcial é mantido e o retry retoma
+        do byte exato.
+  [CONFIG] download_timeout_sec (2h) passa a valer SÓ pra download órfão —
+        job preso em DOWNLOADING sem worker vivo (sobra de crash), onde não
+        existe stream pra esperar. Transcode e upload seguem com timeout de
+        duração total, que lá faz sentido.
+
+--------------------------------------------------------------------------------
+
 Versão: 8.2.0
 Data: 15/07/2026
 --------------------------------------------------------------------------------

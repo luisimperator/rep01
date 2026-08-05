@@ -62,10 +62,13 @@ def _backdate_state_change(db: Database, job_id: int, hours: float) -> None:
 def _make_watchdog(db: Database, workers=None, disk_budget=None) -> Watchdog:
     config = MagicMock()
     config.watchdog.download_timeout_sec = 7200
+    config.watchdog.download_stall_timeout_sec = 900.0
+    config.watchdog.download_max_duration_sec = 86400.0
     config.watchdog.transcode_timeout_sec = 86400
     config.watchdog.upload_timeout_sec = 7200
     config.watchdog.max_retries = 10
     config.watchdog.failed_revive_cooldown_sec = 600.0
+    config.dropbox_root = "/videos"
     return Watchdog(
         config, db, threading.Event(),
         workers=workers or [], disk_budget=disk_budget,
@@ -185,6 +188,95 @@ class TestKillOnTimeout:
 
         wd._handle_timeout(job, "Upload timeout")
         assert _get_job(db, job_id).state == JobState.RETRY_WAIT
+
+
+class _FakeDownloader:
+    """Worker double exposing the watchdog's download-stall protocol."""
+
+    def __init__(self, job_id: int, stall_sec: float):
+        self._job_id = job_id
+        self._stall_sec = stall_sec
+        self.aborted: list[tuple[int, str]] = []
+
+    def download_stall_seconds(self, job_id: int):
+        return self._stall_sec if job_id == self._job_id else None
+
+    def abort_job(self, job_id: int, reason: str = "") -> bool:
+        self.aborted.append((job_id, reason))
+        return True
+
+
+class TestDownloadStallTimeout:
+    """Downloads time out on STALL, not total duration (v8.2.0 regression:
+    every healthy >2h download of a 40-100 GB file was killed at the 2h
+    mark, burning a retry per kill and risking FAILED on monster files)."""
+
+    def test_progressing_long_download_is_left_alone(self, db):
+        """5h in state — way past the old 7200s — but bytes flowed 30s ago."""
+        job_id = _add_job(db, JobState.DOWNLOADING)
+        _backdate_state_change(db, job_id, hours=5)
+
+        worker = _FakeDownloader(job_id, stall_sec=30.0)
+        wd = _make_watchdog(db, workers=[worker])
+        wd._check_timeouts()
+
+        assert worker.aborted == []
+        assert _get_job(db, job_id).state == JobState.DOWNLOADING
+
+    def test_stalled_download_is_killed(self, db):
+        job_id = _add_job(db, JobState.DOWNLOADING)
+        _backdate_state_change(db, job_id, hours=1)
+
+        worker = _FakeDownloader(job_id, stall_sec=1200.0)  # > 900s threshold
+        wd = _make_watchdog(db, workers=[worker])
+        wd._check_timeouts()
+
+        assert len(worker.aborted) == 1
+        assert "stalled" in worker.aborted[0][1]
+
+    def test_max_duration_ceiling_kills_pathological_trickle(self, db):
+        """Progressing, but 25h on one attempt — bytes dripping too slowly
+        to ever finish. The ceiling reclaims it; the partial resumes."""
+        job_id = _add_job(db, JobState.DOWNLOADING)
+        _backdate_state_change(db, job_id, hours=25)
+
+        worker = _FakeDownloader(job_id, stall_sec=30.0)
+        wd = _make_watchdog(db, workers=[worker])
+        wd._check_timeouts()
+
+        assert len(worker.aborted) == 1
+        assert "max duration" in worker.aborted[0][1]
+
+    def test_orphaned_download_still_times_out_on_duration(self, db):
+        """No live worker owns the row (crash leftover): the old
+        total-duration clock applies — nothing to keep waiting for."""
+        job_id = _add_job(db, JobState.DOWNLOADING)
+        _backdate_state_change(db, job_id, hours=3)  # > 7200s
+
+        wd = _make_watchdog(db, workers=[])
+        wd._check_timeouts()
+
+        job = _get_job(db, job_id)
+        assert job.state == JobState.RETRY_WAIT
+        assert "orphaned" in (job.error_message or "")
+
+    def test_worker_reports_stall_only_for_its_own_job(self):
+        import time as _time
+        from transcoder.workers import DownloadWorker
+
+        worker = object.__new__(DownloadWorker)
+        job = MagicMock()
+        job.id = 7
+        worker._current_job = job
+        worker._progress_marker = (7, 1024, _time.monotonic() - 120.0)
+
+        stall = worker.download_stall_seconds(7)
+        assert stall is not None and 119.0 < stall < 125.0
+        assert worker.download_stall_seconds(8) is None
+
+        # Marker left over from a previous job never counts for the new one.
+        worker._progress_marker = (6, 1024, _time.monotonic() - 999.0)
+        assert worker.download_stall_seconds(7) is None
 
 
 class TestStaleReservationReconcile:
