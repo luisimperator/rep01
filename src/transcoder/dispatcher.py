@@ -82,6 +82,9 @@ class JobDispatcher(threading.Thread):
         # Pause flag: when set, the dispatcher keeps running but stops refilling
         # queues. Workers drain whatever is already in flight and then idle.
         self._paused = threading.Event()
+        # Timed pause: monotonic deadline after which the dispatcher's own
+        # loop resumes automatically. None = plain pause (manual resume only).
+        self._pause_until: float | None = None
 
         # Convoy mode: when transcode_q is empty AND ≥2 download workers are
         # actively pulling bytes, all 4 workers split the WAN four ways and
@@ -117,16 +120,42 @@ class JobDispatcher(threading.Thread):
             self._active_set.discard(job_id)
             self._active_folders.pop(job_id, None)
 
-    def pause(self) -> None:
-        """Stop enqueuing new jobs. Workers drain what's already in queues."""
+    def pause(self, duration_sec: float | None = None) -> None:
+        """Stop enqueuing new jobs. Workers drain what's already in queues.
+
+        With duration_sec the pause undoes itself: the dispatcher's own loop
+        resumes once the deadline passes, so a "pause for 3h" from the
+        dashboard can't be forgotten and leave the machine idle for days.
+        A plain pause() (no duration) clears any pending deadline and stays
+        paused until an explicit resume().
+        """
+        self._pause_until = (
+            time.monotonic() + duration_sec if duration_sec else None
+        )
         self._paused.set()
 
     def resume(self) -> None:
         """Resume enqueueing new jobs."""
+        self._pause_until = None
         self._paused.clear()
 
     def is_paused(self) -> bool:
         return self._paused.is_set()
+
+    def pause_remaining_sec(self) -> float | None:
+        """Seconds until a timed pause auto-resumes; None when the pause is
+        manual (or the pipeline isn't paused at all)."""
+        until = self._pause_until
+        if until is None or not self._paused.is_set():
+            return None
+        return max(0.0, until - time.monotonic())
+
+    def _expire_timed_pause(self) -> None:
+        """Auto-resume when a timed pause's deadline has passed."""
+        until = self._pause_until
+        if until is not None and self._paused.is_set() and time.monotonic() >= until:
+            logger.info("dispatcher: timed pause expired — resuming pipeline")
+            self.resume()
 
     # -- convoy mode -----------------------------------------------------
 
@@ -244,6 +273,7 @@ class JobDispatcher(threading.Thread):
         )
         while not self.stop_event.is_set():
             try:
+                self._expire_timed_pause()
                 if not self._paused.is_set():
                     # Download queue is the entry point — that's where folder
                     # priority matters. Once a job is past download, the
