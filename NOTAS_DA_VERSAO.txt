@@ -2,6 +2,30 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 8.3.0
+Data: 06/08/2026
+--------------------------------------------------------------------------------
+
+Botão "Pause 3h" no dashboard — pausa que volta sozinha
+
+  [FEATURE] Novo botão ao lado do Pause: pausa o pipeline por 3 horas e
+        VOLTA SOZINHO quando o prazo vence — pra liberar a máquina/banda
+        num intervalo sem risco de esquecer o daemon pausado por dias.
+        Enquanto a pausa temporizada está ativa, o botão Pause vira
+        "Resume (auto in 2h 59m)" com contagem regressiva ao vivo, e o
+        botão vira "Pause +3h" (clicar de novo reinicia a janela de 3h a
+        partir de agora).
+  [API] POST /api/pause aceita ?hours=N e/ou ?seconds=N (auto-resume);
+        sem parâmetro continua sendo a pausa manual de sempre, que só
+        volta com /api/resume. O /api/status expõe pause_remaining_sec.
+  [DETALHE] Pause manual clicado durante uma pausa temporizada cancela o
+        timer (intenção mais forte vence: fica pausado até mandar voltar).
+        O auto-resume é do próprio loop do dispatcher — sobrevive sem
+        thread extra e some junto com a pausa num restart (o boot já
+        volta despausado, como sempre foi).
+
+--------------------------------------------------------------------------------
+
 Versão: 8.2.1
 Data: 05/08/2026
 --------------------------------------------------------------------------------

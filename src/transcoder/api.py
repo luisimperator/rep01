@@ -303,8 +303,15 @@ def _build_handler(api: ApiServer):
             if not self._is_authorized(route, qs):
                 return self._send_unauthorized()
             if route == "/api/pause":
-                api.dispatcher.pause()
-                return self._send_json({"ok": True, "paused": True})
+                # Optional timed pause: /api/pause?hours=3 (or seconds=N)
+                # auto-resumes when the deadline passes; no params = plain
+                # pause until an explicit /api/resume.
+                api.dispatcher.pause(_pause_duration_sec(qs))
+                return self._send_json({
+                    "ok": True,
+                    "paused": True,
+                    "pause_remaining_sec": api.dispatcher.pause_remaining_sec(),
+                })
             if route == "/api/resume":
                 api.dispatcher.resume()
                 return self._send_json({"ok": True, "paused": False})
@@ -479,6 +486,22 @@ def _split(path: str) -> tuple[str, dict[str, list[str]]]:
     return parsed.path, parse_qs(parsed.query)
 
 
+def _pause_duration_sec(qs: dict[str, list[str]]) -> float | None:
+    """Duration for a timed pause from the query string, or None.
+
+    Accepts ``hours`` and/or ``seconds`` (summed). Invalid or non-positive
+    values fall back to None — a plain, manual pause — never an error.
+    """
+    total = 0.0
+    for key, factor in (("hours", 3600.0), ("seconds", 1.0)):
+        for raw in qs.get(key, []):
+            try:
+                total += float(raw) * factor
+            except (TypeError, ValueError):
+                pass
+    return total if total > 0 else None
+
+
 # ---------------------------------------------------------------- payload util
 
 def _status_payload(api: ApiServer) -> dict:
@@ -522,6 +545,7 @@ def _status_payload(api: ApiServer) -> dict:
         },
         "dispatcher": {
             "paused": api.dispatcher.is_paused(),
+            "pause_remaining_sec": api.dispatcher.pause_remaining_sec(),
             "download": depths["download"],
             "transcode": depths["transcode"],
             "upload": depths["upload"],

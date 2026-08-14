@@ -260,6 +260,7 @@
 <div class="row" style="margin-bottom: 1em;">
   <button onclick="post('/api/scan-now')">Scan now</button>
   <button id="pause-btn" onclick="togglePause()">Pause</button>
+  <button id="pause3h-btn" onclick="post('/api/pause?hours=3')">Pause 3h</button>
   <button onclick="post('/api/retry-failed')">Retry FAILED</button>
   <button onclick="sweepDotUnderscoreNow()">Sweep ._ now</button>
   <button class="danger" onclick="killFfmpeg()">Kill all ffmpeg</button>
@@ -472,9 +473,15 @@ function renderStatus(s) {
          s.disk.budget_enabled ? `cap ${fmtBytes(s.disk.max_staging_bytes)}` : 'budget off'),
     card('Disk free', fmtBytes(s.disk.free_bytes)),
   ].join('');
-  // pause button label reflects state
-  document.getElementById('pause-btn').textContent = s.dispatcher.paused ? 'Resume' : 'Pause';
+  // pause button label reflects state; a timed pause shows its countdown
+  const pauseRem = s.dispatcher.pause_remaining_sec;
+  document.getElementById('pause-btn').textContent = s.dispatcher.paused
+    ? (pauseRem != null ? `Resume (auto in ${fmtDuration(pauseRem)})` : 'Resume')
+    : 'Pause';
   document.getElementById('pause-btn').dataset.paused = s.dispatcher.paused ? '1' : '0';
+  // while paused, the 3h button restarts the 3h window from now
+  document.getElementById('pause3h-btn').textContent =
+    s.dispatcher.paused ? 'Pause +3h' : 'Pause 3h';
 }
 
 function renderScan(scan) {
