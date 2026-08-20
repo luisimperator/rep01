@@ -48,6 +48,7 @@ from .encoder_detect import (
 from .rate_limit import TokenBucket
 from .scanner import Scanner
 from .updater import AutoUpdater, apply_update, detect_install_dir, installed_version
+from .utils import SUBPROCESS_FLAGS
 from .watchdog import HealthChecker, Watchdog
 from .workers import AudioTranscoder, DownloadWorker, TranscodeWorker, UploadWorker
 from .inventory import (
@@ -739,6 +740,10 @@ class Daemon:
             console.print("[red]Another instance is already running[/red]")
             sys.exit(1)
 
+        # First thing after winning the lock: make sure the keepalive task
+        # exists, so even a crash later in setup() gets auto-revived.
+        self._ensure_keepalive_task()
+
         try:
             self.setup()
             self.start_workers()
@@ -754,11 +759,12 @@ class Daemon:
 
         On Windows a detached helper waits for this pid to die and then runs
         ``schtasks /Run`` on the daemon's scheduled task for an immediate
-        relaunch; the nonzero exit code is the belt-and-braces fallback — the
-        task's RestartOnFailure (and systemd's Restart=on-failure on Linux)
-        relaunches a failed run on its own. Double starts are harmless: the
-        task ignores new instances while running and the daemon holds a
-        lockfile.
+        relaunch. The keepalive task (see _ensure_keepalive_task) is the real
+        safety net: Task Scheduler treats a self-exited process as "completed"
+        regardless of exit code, so RestartOnFailure never fires for an
+        application exit — v8.3.0 relied on it and stayed down. Double starts
+        are harmless: the task ignores new instances while running and the
+        daemon holds a lockfile.
         """
         # Don't leave in-flight ffmpeg grinding as orphans across the restart
         # gap; startup recovery requeues their jobs anyway.
@@ -777,10 +783,13 @@ class Daemon:
                 "Start-Sleep -Seconds 3; "
                 f"schtasks /Run /TN \"{task}\""
             )
+            # DETACHED_PROCESS must NOT be combined with CREATE_NO_WINDOW:
+            # the pair is an invalid CreateProcess combination and the spawn
+            # fails outright — exactly how v8.3.0's helper died unarmed.
+            # DETACHED_PROCESS alone already means "no console".
             flags = (
                 getattr(subprocess, "DETACHED_PROCESS", 0)
                 | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                | getattr(subprocess, "CREATE_NO_WINDOW", 0)
             )
             try:
                 subprocess.Popen(
@@ -797,13 +806,58 @@ class Daemon:
                 )
             except Exception:
                 logger.warning(
-                    "could not arm the restart helper; relying on the task's "
-                    "RestartOnFailure (~5 min)", exc_info=True,
+                    "could not arm the restart helper; the keepalive task "
+                    "revives the daemon within 30 min", exc_info=True,
                 )
 
         logger.info("exiting with code %d for supervisor restart",
                     RESTART_EXIT_CODE)
-        sys.exit(RESTART_EXIT_CODE)
+        # Hard exit: sys.exit() only ends the main thread and any lingering
+        # non-daemon thread would keep a half-dead process holding the task
+        # slot (Task Scheduler then thinks it's still running and never
+        # relaunches). os._exit guarantees the process actually dies.
+        logging.shutdown()
+        os._exit(RESTART_EXIT_CODE)
+
+    def _ensure_keepalive_task(self) -> None:
+        """Register the Windows keepalive task that revives a dead daemon.
+
+        A second scheduled task ("<task>Keepalive") runs every 30 min and
+        just does ``schtasks /Run`` on the daemon's task: a no-op while the
+        daemon is alive (IgnoreNew + lockfile), a guaranteed revival within
+        30 min when it's down — auto-update restarts, crashes, whatever.
+        This is the net that actually works: Task Scheduler's own
+        RestartOnFailure ignores application exit codes (a self-exited
+        process counts as "completed"), which left v8.3.0 down after its
+        update restart. Idempotent (/F) — re-registered on every boot.
+        """
+        if sys.platform != "win32":
+            return
+        task = self.config.updater.windows_task_name
+        keepalive = f"{task}Keepalive"
+        cmd = [
+            "schtasks", "/Create", "/F",
+            "/SC", "MINUTE", "/MO", "30",
+            "/TN", keepalive,
+            "/TR", f'schtasks /Run /TN "{task}"',
+        ]
+        try:
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=60,
+                **SUBPROCESS_FLAGS,
+            )
+            if r.returncode == 0:
+                logger.info(
+                    "keepalive task '%s' registered: revives the daemon "
+                    "within 30 min whenever it's down", keepalive,
+                )
+            else:
+                logger.warning(
+                    "could not register keepalive task '%s': %s",
+                    keepalive, (r.stderr or r.stdout or "").strip(),
+                )
+        except Exception:
+            logger.warning("keepalive task registration failed", exc_info=True)
 
 
 # Click CLI
