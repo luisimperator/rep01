@@ -126,12 +126,21 @@ class JobDispatcher(threading.Thread):
         With duration_sec the pause undoes itself: the dispatcher's own loop
         resumes once the deadline passes, so a "pause for 3h" from the
         dashboard can't be forgotten and leave the machine idle for days.
-        A plain pause() (no duration) clears any pending deadline and stays
-        paused until an explicit resume().
+        Timed pauses STACK: while a timed pause is armed, another one
+        extends the existing deadline (3h + 3h = 6h) instead of restarting
+        the window. On a manual (untimed) pause it arms a fresh deadline
+        from now. A plain pause() (no duration) clears any pending deadline
+        and stays paused until an explicit resume().
         """
-        self._pause_until = (
-            time.monotonic() + duration_sec if duration_sec else None
-        )
+        if duration_sec:
+            base = (
+                self._pause_until
+                if self._paused.is_set() and self._pause_until is not None
+                else time.monotonic()
+            )
+            self._pause_until = base + duration_sec
+        else:
+            self._pause_until = None
         self._paused.set()
 
     def resume(self) -> None:
