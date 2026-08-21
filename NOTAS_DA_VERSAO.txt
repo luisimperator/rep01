@@ -2,6 +2,27 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 8.3.2
+Data: 21/08/2026
+--------------------------------------------------------------------------------
+
+Pause 3h agora SOMA em vez de reiniciar a janela
+
+  [FEATURE] Clicar "Pause +3h" com uma pausa temporizada já armada soma
+        3 horas no relógio que está correndo: 3h -> 6h -> 9h. Antes cada
+        clique reiniciava a janela de 3h do zero, então não tinha como
+        pedir uma pausa mais longa pelo dashboard.
+  [FEATURE] "Pause +3h" em cima de uma pausa manual (botão Pause normal)
+        arma o relógio de 3h a partir de agora — a pausa vira temporizada
+        e volta sozinha.
+  [FIX] Deadline antigo não vaza: pausar 3h, dar Resume e pausar 3h de
+        novo arma 3h limpas, não 6h.
+  Sem mudança no dashboard nem na API — o mesmo botão e o mesmo endpoint
+  (/api/pause?hours=3) agora somam; o contador "Resume (auto in ...)"
+  já mostra o total somado.
+
+================================================================================
+
 Versão: 8.3.1
 Data: 14/08/2026
 --------------------------------------------------------------------------------

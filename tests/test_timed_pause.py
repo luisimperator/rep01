@@ -59,6 +59,38 @@ class TestTimedPause:
         d._expire_timed_pause()
         assert d.is_paused()
 
+    def test_timed_pauses_stack(self):
+        """Clicking Pause 3h while already timed-paused ADDS 3h (3h -> 6h),
+        instead of restarting the 3h window."""
+        d = _dispatcher()
+        d.pause(3 * 3600)
+        d.pause(3 * 3600)
+        rem = d.pause_remaining_sec()
+        assert rem is not None and 6 * 3600 - 5 < rem <= 6 * 3600
+
+        d.pause(3 * 3600)
+        rem = d.pause_remaining_sec()
+        assert rem is not None and 9 * 3600 - 5 < rem <= 9 * 3600
+
+    def test_timed_pause_on_manual_pause_arms_from_now(self):
+        """A timed pause on top of a manual (untimed) pause has no deadline
+        to extend — it arms a fresh one from now."""
+        d = _dispatcher()
+        d.pause()
+        d.pause(3 * 3600)
+        rem = d.pause_remaining_sec()
+        assert rem is not None and 3 * 3600 - 5 < rem <= 3 * 3600
+
+    def test_timed_pause_after_resume_starts_fresh(self):
+        """A stale deadline from an earlier pause must not leak into a new
+        one: pause 3h, resume, pause 3h again -> 3h, not 6h."""
+        d = _dispatcher()
+        d.pause(3 * 3600)
+        d.resume()
+        d.pause(3 * 3600)
+        rem = d.pause_remaining_sec()
+        assert rem is not None and 3 * 3600 - 5 < rem <= 3 * 3600
+
     def test_resume_clears_timer(self):
         d = _dispatcher()
         d.pause(3600)
