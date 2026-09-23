@@ -536,6 +536,29 @@ class Daemon:
             worker.start()
             self.workers.append(worker)
 
+        # Fast-lane transcoder (v8.4.0): one extra worker that only ever takes
+        # priority (Podfactory) jobs, so they never queue behind an hour-long
+        # backlog encode. Pausing/night mode still stops it like the others.
+        prio = self.config.priority
+        if prio.paths and prio.dedicated_transcoder:
+            worker = TranscodeWorker(
+                "fast",
+                self.config,
+                self.db,
+                self.stop_event,
+                self.dispatcher,
+                encoder=encoder,
+                disk_budget=self.disk_budget,
+                incident_reporter=self.incident_reporter,
+            )
+            worker.priority_only = True
+            worker.start()
+            self.workers.append(worker)
+            logger.info(
+                "fast lane: priority paths %s — dedicated transcoder on, "
+                "proxy_only=%s", prio.paths, prio.proxy_only,
+            )
+
         # Audio transcoders (CPU only, parallel to QSV/NVENC video pool)
         if self.config.audio.enabled:
             for i in range(self.config.concurrency.audio_workers):
@@ -665,6 +688,12 @@ class Daemon:
             # files that arrived AFTER a per-folder reorganize batch already
             # ran (the per-batch hook only fires once per batch). Disabled
             # when the user sets sweep_every_n_scans = 0.
+            #
+            # v8.4.0: runs on its own thread. The sweep walks the WHOLE tree
+            # (~1M entries, ~75 min on HEAVY7); inline it pushed every scan
+            # ~85 min apart, so a new file waited hours for its stability
+            # checks. One sweep at a time — a new one is skipped while the
+            # previous is still walking.
             scans_since_dotu_sweep += 1
             sweep_every = self.config.cleanup_dot_underscore_sweep_every_n_scans
             if (
@@ -673,24 +702,8 @@ class Daemon:
                 and sweep_every > 0
                 and scans_since_dotu_sweep >= sweep_every
             ):
-                scans_since_dotu_sweep = 0
-                try:
-                    from .reorganize import sweep_dot_underscore_under_root
-                    results = sweep_dot_underscore_under_root(
-                        self.dropbox,
-                        self.config.dropbox_root,
-                        self.config.cleanup_dot_underscore_delete_after_seconds,
-                        self.config.dot_underscore_target_folder_names,
-                        max_size_bytes=self.config.dot_underscore_max_size_bytes,
-                    )
-                    if results:
-                        total = sum(results.values())
-                        logger.info(
-                            f"._ sweep: quarantined {total} file(s) across "
-                            f"{len(results)} folder(s)"
-                        )
-                except Exception as e:
-                    logger.warning(f"._ sweep failed: {e}")
+                if self._start_dot_underscore_sweep():
+                    scans_since_dotu_sweep = 0
 
             # Sleep until either stop or scan-now trigger fires
             self.scan_trigger.clear()
@@ -702,6 +715,38 @@ class Daemon:
                 if self.scan_trigger.wait(timeout=min(remaining, 1.0)):
                     logger.info("scan-now triggered via API")
                     break
+
+    def _start_dot_underscore_sweep(self) -> bool:
+        """Launch the ._ sweep in the background. False if one is still running."""
+        prev = getattr(self, "_dotu_sweep_thread", None)
+        if prev is not None and prev.is_alive():
+            return False
+        self._dotu_sweep_thread = threading.Thread(
+            target=self._run_dot_underscore_sweep,
+            name="dotu-sweep",
+            daemon=True,
+        )
+        self._dotu_sweep_thread.start()
+        return True
+
+    def _run_dot_underscore_sweep(self) -> None:
+        try:
+            from .reorganize import sweep_dot_underscore_under_root
+            results = sweep_dot_underscore_under_root(
+                self.dropbox,
+                self.config.dropbox_root,
+                self.config.cleanup_dot_underscore_delete_after_seconds,
+                self.config.dot_underscore_target_folder_names,
+                max_size_bytes=self.config.dot_underscore_max_size_bytes,
+            )
+            if results:
+                total = sum(results.values())
+                logger.info(
+                    f"._ sweep: quarantined {total} file(s) across "
+                    f"{len(results)} folder(s)"
+                )
+        except Exception as e:
+            logger.warning(f"._ sweep failed: {e}")
 
     def request_restart(self, reason: str) -> None:
         """Shut down gracefully and get relaunched by the service supervisor.

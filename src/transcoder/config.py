@@ -6,6 +6,7 @@ Supports YAML configuration files with environment variable overrides.
 
 from __future__ import annotations
 
+import fnmatch
 import os
 from enum import Enum
 from pathlib import Path
@@ -13,6 +14,19 @@ from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, field_validator
+
+
+def path_matches_any(path: str, patterns: list[str]) -> bool:
+    """Case-insensitive fnmatch of a Dropbox path against glob patterns.
+
+    Mirrors the SQLite `LOWER(dropbox_path) GLOB ?` filter the database uses
+    for the same patterns, so the dispatcher's SQL pick and every in-memory
+    check agree on what is a priority file.
+    """
+    if not patterns or not path:
+        return False
+    low = path.lower()
+    return any(fnmatch.fnmatchcase(low, p.lower()) for p in patterns if p)
 
 
 class EncoderPreference(str, Enum):
@@ -322,6 +336,89 @@ class DispatcherSettings(BaseModel):
             "downloads to finish, so workers never sit idle (fixed in v7.2.0; "
             "this tail-idling was the only reason it was ever disabled). Set "
             "False for plain folder-priority interleaving (no concentration)."
+        ),
+    )
+
+
+class PrioritySettings(BaseModel):
+    """Fast lane for folders the editors are cutting RIGHT NOW (v8.4.0).
+
+    Files whose Dropbox path matches `paths` skip the whole backlog: they are
+    rechecked for stability on every scan with a faster profile, jump to the
+    head of every stage queue (ignoring folder priority and the sticky
+    folder), and — when every downloader is busy with backlog work — one
+    backlog download yields its slot (partial kept, resumes later) so the
+    priority file starts within a minute or so.
+
+    With `proxy_only` the H.265 is delivered as an editing proxy: it lands in
+    `<folder>/h265/<name>` and the post-upload reorganize is skipped, so the
+    original H.264 stays exactly where it is — not moved to h264/, not
+    replaced in the main folder, not deleted. Swapping it in later is left to
+    the normal `reorganize-existing` sweep once the project goes cold.
+    """
+    paths: list[str] = Field(
+        default_factory=lambda: ["*/podfactory*/*"],
+        description=(
+            "Case-insensitive glob patterns matched against the full Dropbox "
+            "path of each file. `*` also crosses folder boundaries, so "
+            "'*/podfactory*/*' matches everything under any folder whose name "
+            "starts with 'Podfactory' (Podfactory, Podfactory3, ...). Empty "
+            "list disables the fast lane."
+        ),
+    )
+    proxy_only: bool = Field(
+        default=True,
+        description=(
+            "Deliver priority files as an editing proxy only: keep the H.265 "
+            "in the h265/ subfolder and never run the post-upload reorganize "
+            "(no swap into the main folder, original H.264 never moved or "
+            "deleted)."
+        ),
+    )
+    stability: StabilitySettings = Field(
+        default_factory=lambda: StabilitySettings(
+            poll_interval_sec=300,
+            checks_required=2,
+            min_age_sec=300,
+        ),
+        description=(
+            "Stability profile for priority files: two scans that see the "
+            "same size/rev at least 5 minutes apart. Never stricter than the "
+            "active profile — the looser of the two wins per field."
+        ),
+    )
+    preempt_downloads: bool = Field(
+        default=True,
+        description=(
+            "When a priority file is waiting and every downloader is busy "
+            "with backlog work, make one backlog download yield its slot. "
+            "Its partial stays on disk and it resumes from there later."
+        ),
+    )
+    preempt_cooldown_sec: float = Field(
+        default=60.0,
+        ge=5.0,
+        description=(
+            "Minimum gap between two preemptions, so one waiting priority "
+            "file never knocks out more than one backlog download."
+        ),
+    )
+    throttle_backlog_downloads: bool = Field(
+        default=True,
+        description=(
+            "While a priority file is downloading, hold every backlog "
+            "download (one keepalive chunk per convoy_keepalive_sec keeps its "
+            "connection open) so the priority stream gets the whole link "
+            "instead of a quarter of it."
+        ),
+    )
+    dedicated_transcoder: bool = Field(
+        default=True,
+        description=(
+            "Run one extra transcode worker that only takes priority jobs, so "
+            "a priority file never waits for a long backlog transcode to "
+            "finish (killing one would throw its progress away — ffmpeg "
+            "can't resume). QSV/NVENC handle the extra session fine."
         ),
     )
 
@@ -735,6 +832,10 @@ class Config(BaseModel):
     # Central dispatcher (bounded worker queues fed by a single DB-reading thread)
     dispatcher: DispatcherSettings = Field(default_factory=DispatcherSettings)
 
+    # Fast lane: folders being edited now (Podfactory) jump the backlog and
+    # get their H.265 delivered as a proxy without touching the originals.
+    priority: PrioritySettings = Field(default_factory=PrioritySettings)
+
     # Incremental scanner (cursor persistence, feito-log cache)
     scanner: ScannerSettings = Field(default_factory=ScannerSettings)
 
@@ -1049,6 +1150,10 @@ class Config(BaseModel):
             v = os.path.expandvars(os.path.expanduser(v))
         return Path(v)
 
+    def is_priority_path(self, dropbox_path: str) -> bool:
+        """True when the file falls under a fast-lane pattern (case-insensitive)."""
+        return path_matches_any(dropbox_path, self.priority.paths)
+
     def min_size_bytes(self) -> int:
         """Get minimum size in bytes."""
         return int(self.min_size_gb * 1024 * 1024 * 1024)
@@ -1151,6 +1256,15 @@ def save_example_config(path: Path) -> None:
         'dispatcher': {
             'poll_interval_sec': 2.0,
             'queue_multiplier': 4,
+        },
+        'priority': {
+            'paths': ['*/podfactory*/*'],
+            'proxy_only': True,
+            'stability': {'poll_interval_sec': 300, 'checks_required': 2, 'min_age_sec': 300},
+            'preempt_downloads': True,
+            'preempt_cooldown_sec': 60.0,
+            'throttle_backlog_downloads': True,
+            'dedicated_transcoder': True,
         },
         'scanner': {
             'cursor_checkpoint_entries': 500,

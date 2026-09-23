@@ -20,6 +20,7 @@ from pathlib import PurePosixPath
 from queue import Empty, Full, Queue
 from typing import TYPE_CHECKING
 
+from .config import path_matches_any
 from .database import Database, Job, JobState
 
 if TYPE_CHECKING:
@@ -32,6 +33,68 @@ logger = logging.getLogger(__name__)
 DOWNLOAD_STATES = {JobState.NEW}
 TRANSCODE_STATES = {JobState.DOWNLOADED}
 UPLOAD_STATES = {JobState.UPLOADING}
+
+
+class JobQueue(Queue):
+    """Bounded FIFO where fast-lane jobs jump ahead of the backlog (v8.4.0).
+
+    Priority jobs are kept as a block at the head, FIFO among themselves;
+    everything else queues behind them in arrival order. `priority_count`
+    is how many priority jobs are waiting — the dispatcher reads it to
+    decide whether a backlog download should yield its slot.
+    """
+
+    def __init__(self, maxsize: int = 0, is_priority=None) -> None:
+        super().__init__(maxsize)
+        self._is_priority = is_priority or (lambda _job: False)
+        self.priority_count = 0
+
+    def _put(self, item) -> None:
+        if self._is_priority(item):
+            self.queue.insert(self.priority_count, item)
+            self.priority_count += 1
+        else:
+            self.queue.append(item)
+
+    def _get(self):
+        item = self.queue.popleft()
+        if self.priority_count > 0:
+            self.priority_count -= 1
+        return item
+
+    def get_priority(self, timeout: float):
+        """Like get(timeout=...) but only ever returns a priority job.
+
+        Used by the dedicated fast-lane transcoder, which must never pick up
+        backlog work. A wake-up meant for a backlog item is passed on to the
+        next waiter so regular workers aren't starved of their notify.
+        """
+        deadline = time.monotonic() + timeout
+        with self.not_empty:
+            while self.priority_count == 0:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise Empty
+                self.not_empty.wait(remaining)
+                if self.priority_count == 0 and self._qsize() > 0:
+                    self.not_empty.notify()
+            item = self._get()
+            self.not_full.notify()
+            return item
+
+    def put_overflow(self, item) -> None:
+        """Non-blocking put that may exceed maxsize by up to maxsize.
+
+        A fast-lane job must never wait behind a queue that's full of backlog
+        work, so it may overshoot the bound — at most doubling it, which keeps
+        memory bounded even if a whole folder lands at once.
+        """
+        with self.not_full:
+            if self.maxsize > 0 and self._qsize() >= 2 * self.maxsize:
+                raise Full
+            self._put(item)
+            self.unfinished_tasks += 1
+            self.not_empty.notify()
 
 
 class JobDispatcher(threading.Thread):
@@ -49,18 +112,25 @@ class JobDispatcher(threading.Thread):
         self.stop_event = stop_event
 
         mult = config.dispatcher.queue_multiplier
-        self.download_q: Queue[Job] = Queue(
-            maxsize=max(1, config.concurrency.download_workers) * mult
+        is_prio = self._job_is_priority
+        self.download_q: JobQueue = JobQueue(
+            max(1, config.concurrency.download_workers) * mult, is_prio,
         )
-        self.transcode_q: Queue[Job] = Queue(
-            maxsize=max(1, config.concurrency.transcode_workers) * mult
+        self.transcode_q: JobQueue = JobQueue(
+            max(1, config.concurrency.transcode_workers) * mult, is_prio,
         )
-        self.audio_transcode_q: Queue[Job] = Queue(
-            maxsize=max(1, config.concurrency.audio_workers) * mult
+        self.audio_transcode_q: JobQueue = JobQueue(
+            max(1, config.concurrency.audio_workers) * mult, is_prio,
         )
-        self.upload_q: Queue[Job] = Queue(
-            maxsize=max(1, config.concurrency.upload_workers) * mult
+        self.upload_q: JobQueue = JobQueue(
+            max(1, config.concurrency.upload_workers) * mult, is_prio,
         )
+
+        # Fast lane (v8.4.0): ids of in-flight priority jobs, plus the
+        # preemption clock that limits backlog downloads to one yield per
+        # cooldown window.
+        self._priority_ids: set[int] = set()
+        self._last_preempt_at: float = float("-inf")
 
         self._active_lock = threading.Lock()
         self._active_set: set[int] = set()
@@ -119,6 +189,66 @@ class JobDispatcher(threading.Thread):
         with self._active_lock:
             self._active_set.discard(job_id)
             self._active_folders.pop(job_id, None)
+            self._priority_ids.discard(job_id)
+
+    def _job_is_priority(self, job: Job) -> bool:
+        priority = getattr(self.config, "priority", None)
+        if priority is None:
+            return False
+        return path_matches_any(job.dropbox_path, list(priority.paths or []))
+
+    def should_throttle_for_priority(self, worker_name: str) -> bool:
+        """True when this backlog download should pause for a fast-lane one.
+
+        While any priority file is downloading, backlog downloads step back
+        (the worker holds them with a keepalive chunk every
+        convoy_keepalive_sec) so the priority stream gets the whole link
+        instead of a quarter of it.
+        """
+        priority = getattr(self.config, "priority", None)
+        if priority is None or priority.throttle_backlog_downloads is not True:
+            return False
+        with self._convoy_lock:
+            job_id = self._download_active.get(worker_name)
+            if job_id is None or job_id in self._priority_ids:
+                return False
+            return any(j in self._priority_ids for j in self._download_active.values())
+
+    def should_yield_download(self, worker_name: str) -> bool:
+        """True when this backlog download should give its slot to the fast lane.
+
+        Called from the DownloadWorker progress callback. Fires when a
+        priority job is sitting in the download queue, every downloader is
+        busy, and this worker's current job is NOT itself a priority job.
+        At most one worker yields per `preempt_cooldown_sec`, so a single
+        waiting Podfactory file knocks out exactly one backlog download.
+        The yielding worker keeps its partial and requeues the job, then
+        its next queue.get() pops the priority job from the head.
+        """
+        priority = getattr(self.config, "priority", None)
+        if priority is None or priority.preempt_downloads is not True:
+            return False
+        if self.download_q.priority_count <= 0:
+            return False
+        workers = max(1, self.config.concurrency.download_workers)
+        with self._convoy_lock:
+            job_id = self._download_active.get(worker_name)
+            if job_id is None or job_id in self._priority_ids:
+                return False
+            # An idle downloader will pop the priority job by itself — only
+            # preempt when every slot is taken.
+            if len(self._download_active) < workers:
+                return False
+            now = time.monotonic()
+            if now - self._last_preempt_at < priority.preempt_cooldown_sec:
+                return False
+            self._last_preempt_at = now
+        logger.info(
+            "dispatcher: priority file waiting and all %d downloaders busy — "
+            "%s yields its backlog download (job %s; partial kept, resumes later)",
+            workers, worker_name, job_id,
+        )
+        return True
 
     def pause(self, duration_sec: float | None = None) -> None:
         """Stop enqueuing new jobs. Workers drain what's already in queues.
@@ -311,6 +441,16 @@ class JobDispatcher(threading.Thread):
         kind: str | None = None,
         prioritize_folder: bool = False,
     ) -> None:
+        # Restrict to the current watch_folder so stale jobs queued under a
+        # previous dropbox_root don't tie up worker slots after the user
+        # switches folders.
+        watch_root = getattr(self.config, "dropbox_root", None) or None
+
+        # Fast lane first: priority jobs go straight to the head of the
+        # queue, even past a full queue, ignoring folder priority and the
+        # sticky folder (which they never claim).
+        self._admit_priority(q, states, kind, watch_root)
+
         free = q.maxsize - q.qsize()
         if free <= 0:
             return
@@ -324,10 +464,6 @@ class JobDispatcher(threading.Thread):
             fetch_limit = max(free * 8, 500)
         else:
             fetch_limit = free * (4 if kind else 2)
-        # Restrict to the current watch_folder so stale jobs queued under a
-        # previous dropbox_root don't tie up worker slots after the user
-        # switches folders.
-        watch_root = getattr(self.config, "dropbox_root", None) or None
         candidates = self.db.get_dispatchable_jobs(
             states, limit=fetch_limit, path_prefix=watch_root,
         )
@@ -378,6 +514,8 @@ class JobDispatcher(threading.Thread):
                 except Full:
                     break
                 self._active_set.add(job.id)
+                if self._job_is_priority(job):
+                    self._priority_ids.add(job.id)
                 if prioritize_folder and folder is not None:
                     self._active_folders[job.id] = folder
                     # First job admitted after a sticky release becomes the
@@ -390,6 +528,45 @@ class JobDispatcher(threading.Thread):
                             folder,
                         )
                 free -= 1
+
+    # Fast-lane jobs fetched per refill per stage. A whole Podfactory session
+    # is a few dozen files; anything beyond this is picked up next poll.
+    _PRIORITY_FETCH = 50
+
+    def _admit_priority(
+        self,
+        q: JobQueue,
+        states: set[JobState],
+        kind: str | None,
+        watch_root: str | None,
+    ) -> None:
+        priority = getattr(self.config, "priority", None)
+        globs = list(priority.paths or []) if priority is not None else []
+        if not globs:
+            return
+        jobs = self.db.get_dispatchable_jobs(
+            states, limit=self._PRIORITY_FETCH,
+            path_prefix=watch_root, path_globs=globs,
+        )
+        if not jobs:
+            return
+        with self._active_lock:
+            for job in jobs:
+                if kind is not None and job.kind != kind:
+                    continue
+                if job.id in self._active_set:
+                    continue
+                try:
+                    q.put_overflow(job)
+                except Full:
+                    break
+                self._active_set.add(job.id)
+                self._priority_ids.add(job.id)
+                if q is self.download_q:
+                    logger.info(
+                        "dispatcher: priority job %s queued ahead of the "
+                        "backlog: %s", job.id, job.dropbox_path,
+                    )
 
     def _apply_sticky_folder(self, sorted_candidates: list[Job]) -> list[Job]:
         """Filter candidates down to the current sticky folder.

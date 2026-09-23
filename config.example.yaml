@@ -89,6 +89,29 @@ dispatcher:
   # chunk through every N seconds as a keepalive so the Dropbox download stream
   # doesn't idle-timeout. Lower = safer, higher = leader gets more bandwidth.
   convoy_keepalive_sec: 20.0
+# Fast lane for folders being edited right now. Matching files skip the
+# backlog: rechecked for stability every scan (2 checks, 5 min apart), jump
+# to the head of every queue, and one backlog download yields its slot
+# (partial kept) when all downloaders are busy. With proxy_only the H.265
+# lands in <folder>/h265/<name> and the original H.264 is never moved,
+# replaced or deleted — the editors cut on the proxy while the jumbo file
+# is still syncing.
+priority:
+  # Case-insensitive globs against the full Dropbox path; `*` crosses folders.
+  paths:
+    - "*/podfactory*/*"
+  proxy_only: true
+  stability:
+    poll_interval_sec: 300
+    checks_required: 2
+    min_age_sec: 300
+  preempt_downloads: true
+  preempt_cooldown_sec: 60
+  # Hold backlog downloads while a priority file downloads (full link to it).
+  throttle_backlog_downloads: true
+  # One extra transcoder that only takes priority files, so they never wait
+  # behind an hour-long backlog encode.
+  dedicated_transcoder: true
 scanner:
   cursor_checkpoint_entries: 500
   feito_cache_ttl_sec: 3600
