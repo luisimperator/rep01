@@ -121,11 +121,12 @@ class Scanner:
             _REGISTRY.scan_end()
 
         logger.info(
-            "scan complete: scanned=%d new=%d new_audio=%d waiting=%d skipped_h265_log=%d youtube=%d",
+            "scan complete: scanned=%d new=%d new_audio=%d waiting=%d rechecked=%d skipped_h265_log=%d youtube=%d",
             stats['scanned'],
             stats['new'],
             stats['new_audio'],
             stats['waiting_stable'],
+            stats['rechecked'],
             stats['skipped_h265_log'],
             stats['skipped_youtube'],
         )
@@ -241,6 +242,9 @@ class Scanner:
 
         stability_cfg = self.config.stability_profiles.steady
         entries_seen = state.entries_seen
+        # Paths already stability-checked in this pass, so the WAITING
+        # recheck below never records two checks for one file in one scan.
+        seen: set[str] = set()
 
         for item in self.dropbox.list_folder_delta(state.cursor):
             self._raise_if_stopped()
@@ -265,6 +269,7 @@ class Scanner:
                 self.db.invalidate_feito_cache(str(PurePosixPath(file_info.path).parent))
 
             entries_seen += 1
+            seen.add(file_info.path)
             self._handle_file(file_info, stats, dry_run, stability_cfg)
 
             from .progress import REGISTRY as _REGISTRY
@@ -273,7 +278,102 @@ class Scanner:
                 entries_seen=entries_seen,
             )
 
+        self._recheck_waiting(stats, dry_run, stability_cfg, seen)
         self.db.mark_delta_pass()
+
+    # Per-scan caps on WAITING rechecks (one get_metadata call each). The
+    # fast lane gets its own budget so a big general backlog of waiting
+    # files can never starve a Podfactory file of its second check.
+    _RECHECK_PRIORITY_LIMIT = 200
+    _RECHECK_GENERAL_LIMIT = 300
+
+    def _recheck_waiting(
+        self,
+        stats: dict[str, int],
+        dry_run: bool,
+        stability_cfg: "StabilitySettings",
+        seen: set[str],
+    ) -> None:
+        """Give every WAITING file its next stability check.
+
+        Before v8.4.0 a file that arrived in steady (delta) mode got ONE
+        stability check — then Dropbox never re-delivered it (the delta only
+        carries changes), so with checks_required > 1 it waited forever and
+        never became a job. Now each scan re-reads the metadata of files
+        still on record as waiting and runs them through the normal path:
+        unchanged for long enough → job; changed → the clock restarts;
+        gone from Dropbox → forgotten.
+        """
+        # No age-based purge here on purpose: files stranded WAITING by the
+        # pre-8.4.0 bug can be weeks old, and dropping their checks would
+        # lose them for good (the delta will never deliver them again). The
+        # list drains by itself — every recheck ends in a job, a restart of
+        # the clock, or "gone from Dropbox".
+        paths: list[str] = []
+        globs = list(self.config.priority.paths or [])
+        if globs:
+            paths.extend(self.db.get_pending_stability_paths(
+                self._RECHECK_PRIORITY_LIMIT, path_globs=globs,
+            ))
+        for p in self.db.get_pending_stability_paths(self._RECHECK_GENERAL_LIMIT):
+            if p not in paths:
+                paths.append(p)
+
+        consecutive_failures = 0
+        for path in paths:
+            self._raise_if_stopped()
+            if path in seen:
+                continue
+            try:
+                file_info = self.dropbox.get_metadata(path)
+            except Exception as e:
+                consecutive_failures += 1
+                logger.debug(f"recheck: metadata failed for {path}: {e}")
+                # Each call already retried with backoff; three in a row
+                # means Dropbox/network is down — try again next scan
+                # instead of stalling this one for the whole list.
+                if consecutive_failures >= 3:
+                    logger.warning(
+                        "recheck: Dropbox unreachable, deferring the rest of "
+                        "the waiting-file recheck to the next scan"
+                    )
+                    return
+                continue
+            consecutive_failures = 0
+            stats['rechecked'] += 1
+            if file_info is None:
+                if not dry_run:
+                    self.db.clear_stability_checks(path)
+                continue
+            seen.add(path)
+            waiting_before = stats['waiting_stable']
+            errors_before = stats['errors']
+            self._handle_file(file_info, stats, dry_run, stability_cfg)
+            still_waiting = stats['waiting_stable'] > waiting_before
+            errored = stats['errors'] > errors_before
+            # Anything that is no longer waiting (queued, skipped, excluded,
+            # already had a job) must drop off the recheck list, or it would
+            # cost one metadata call per scan forever. A transient error keeps
+            # its checks so the next scan simply tries again.
+            if not still_waiting and not errored and not dry_run:
+                self.db.clear_stability_checks(path)
+
+    def _effective_stability(
+        self,
+        path: str,
+        cfg: "StabilitySettings",
+    ) -> "StabilitySettings":
+        """Fast-lane files use the looser of their profile and the active one."""
+        if not self.config.is_priority_path(path):
+            return cfg
+        fast = self.config.priority.stability
+        if (fast.checks_required >= cfg.checks_required
+                and fast.min_age_sec >= cfg.min_age_sec):
+            return cfg
+        return cfg.model_copy(update={
+            'checks_required': min(fast.checks_required, cfg.checks_required),
+            'min_age_sec': min(fast.min_age_sec, cfg.min_age_sec),
+        })
 
     # ---------------------------------------------------------------- per-file
 
@@ -453,11 +553,16 @@ class Scanner:
             else:
                 logger.info(f"File modified since last job: {path}")
 
-        stability = self._check_stability(file_info, stability_cfg)
+        stability = self._check_stability(
+            file_info, self._effective_stability(path, stability_cfg),
+        )
         if stability == StabilityResult.STABLE:
             if not dry_run:
                 self._create_new_job(file_info)
-            logger.info(f"New job created: {path}")
+            if self.config.is_priority_path(path):
+                logger.info(f"New job created (priority fast lane): {path}")
+            else:
+                logger.info(f"New job created: {path}")
             return 'new'
         return 'waiting_stable'
 
@@ -642,7 +747,9 @@ class Scanner:
                 if existing_job.state not in {JobState.FAILED, JobState.RETRY_WAIT}:
                     return 'already_queued'
 
-        stability = self._check_stability(file_info, stability_cfg)
+        stability = self._check_stability(
+            file_info, self._effective_stability(path, stability_cfg),
+        )
         if stability == StabilityResult.STABLE:
             if not dry_run:
                 self.db.create_job(
@@ -709,6 +816,7 @@ class Scanner:
             'skipped_h265_log': 0,
             'skipped_youtube': 0,
             'waiting_stable': 0,
+            'rechecked': 0,
             'already_queued': 0,
             'errors': 0,
             'mode': 0,

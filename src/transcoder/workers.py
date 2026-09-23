@@ -77,11 +77,21 @@ class DownloadPaused(Exception):
     pass
 
 
+class DownloadYielded(DownloadPaused):
+    """A backlog download gave its slot to a waiting fast-lane (priority)
+    file. Same handling as a pause — partial kept, job requeued — so it
+    resumes from where it stopped once a slot frees up."""
+    pass
+
+
 class BaseWorker(threading.Thread):
     """Base class for pipeline workers."""
 
     # Subclasses set this to identify which dispatcher queue to consume from.
     stage: str = ""
+    # Fast-lane-only worker: pulls nothing but priority jobs from its queue
+    # (the dedicated Podfactory transcoder, v8.4.0).
+    priority_only: bool = False
 
     def __init__(
         self,
@@ -105,7 +115,10 @@ class BaseWorker(threading.Thread):
 
         while not self.stop_event.is_set():
             try:
-                job = self.queue.get(timeout=_QUEUE_GET_TIMEOUT_SEC)
+                if self.priority_only:
+                    job = self.queue.get_priority(timeout=_QUEUE_GET_TIMEOUT_SEC)
+                else:
+                    job = self.queue.get(timeout=_QUEUE_GET_TIMEOUT_SEC)
             except Empty:
                 continue
 
@@ -320,6 +333,14 @@ class DownloadWorker(BaseWorker):
                 JobState.STABLE_WAIT,
                 error_message=str(e),
             )
+            if self.disk_budget is not None:
+                self.disk_budget.release(job.id)
+        except DownloadYielded:
+            logger.info(
+                f"[{self.name}] Yielded slot to a priority file — requeuing "
+                f"job {job.id}; resumes from the partial later"
+            )
+            self.db.update_job_state(job.id, JobState.NEW)
             if self.disk_budget is not None:
                 self.disk_budget.release(job.id)
         except DownloadPaused:
@@ -624,6 +645,35 @@ class DownloadWorker(BaseWorker):
             # transcoding. The partial is kept, so it resumes next window.
             if self.dispatcher.is_paused():
                 raise DownloadPaused()
+            # Fast lane: a priority file is waiting and every slot is busy —
+            # this backlog download steps aside (partial kept on disk).
+            if self.dispatcher.should_yield_download(self.name):
+                raise DownloadYielded()
+            # A priority file is downloading: hold this backlog stream (one
+            # keepalive chunk per convoy_keepalive_sec so the connection
+            # stays open) and give the fast lane the whole link.
+            if self.dispatcher.should_throttle_for_priority(self.name):
+                now = time.time()
+                if now - last_throttle_log[0] > 300:
+                    logger.info(
+                        f"[{self.name}] Holding backlog download — bandwidth "
+                        f"goes to the priority file downloading now"
+                    )
+                    last_throttle_log[0] = now
+                waited = 0.0
+                keepalive = self.dispatcher.convoy_keepalive_sec
+                while (
+                    waited < keepalive
+                    and self.dispatcher.should_throttle_for_priority(self.name)
+                ):
+                    if self.should_stop():
+                        raise WorkerStop("Worker stopping")
+                    if self.dispatcher.is_paused():
+                        raise DownloadPaused()
+                    if self.dispatcher.should_yield_download(self.name):
+                        raise DownloadYielded()
+                    time.sleep(0.5)
+                    waited += 0.5
 
             REGISTRY.update(self.name, bytes_done=downloaded, bytes_total=total)
 
@@ -754,7 +804,7 @@ class TranscodeWorker(BaseWorker):
 
     def __init__(
         self,
-        worker_id: int,
+        worker_id: int | str,
         config: Config,
         db: Database,
         stop_event: threading.Event,
@@ -1637,7 +1687,19 @@ class UploadWorker(BaseWorker):
             output_size=int(local_size),
         )
 
-        if self.config.legacy_reorganize:
+        proxy_only = (
+            self.config.priority.proxy_only
+            and self.config.is_priority_path(job.dropbox_path)
+        )
+        if proxy_only:
+            # Fast lane delivers an editing proxy: the H.265 stays in h265/
+            # and the original is left exactly where the editors put it —
+            # not moved to h264/, not replaced, not scheduled for deletion.
+            logger.info(
+                f"[{self.name}] Proxy-only (priority folder): H.265 kept at "
+                f"{job.output_path}; original H.264 untouched"
+            )
+        elif self.config.legacy_reorganize:
             try:
                 self._try_reorganize_folder(job)
             except Exception as reorg_err:

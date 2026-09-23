@@ -569,9 +569,14 @@ class Database:
         states: set[JobState],
         limit: int,
         path_prefix: str | None = None,
+        path_globs: list[str] | None = None,
     ) -> list[Job]:
         """
         Get jobs eligible for dispatch into a worker queue.
+
+        `path_globs` (case-insensitive, `*` crosses folders) narrows the pick
+        to fast-lane files; it matches exactly what Config.is_priority_path
+        accepts.
 
         Ordered FIFO by created_at to ensure first-discovered files are processed
         first across long-running scans.
@@ -595,6 +600,12 @@ class Database:
             prefix = path_prefix.rstrip('/')
             sql += " AND (dropbox_path = ? OR dropbox_path LIKE ?)"
             params.extend([prefix, prefix + "/%"])
+        globs = [g.lower() for g in (path_globs or []) if g]
+        if globs:
+            sql += " AND (" + " OR ".join(
+                "LOWER(dropbox_path) GLOB ?" for _ in globs
+            ) + ")"
+            params.extend(globs)
         sql += " ORDER BY created_at ASC LIMIT ?"
         params.append(limit)
         cursor = conn.execute(sql, params)
@@ -842,6 +853,33 @@ class Database:
                 (dropbox_path,),
             )
             return cursor.rowcount
+
+    def get_pending_stability_paths(
+        self,
+        limit: int,
+        path_globs: list[str] | None = None,
+    ) -> list[str]:
+        """Paths with stability checks on record, oldest first sighting first.
+
+        These are files the scanner saw but hasn't turned into a job yet
+        (WAITING). In delta mode Dropbox only re-delivers a file when it
+        CHANGES, so without an explicit recheck a settled file would sit on
+        its first check forever. `path_globs` restricts to fast-lane files.
+        """
+        if limit <= 0:
+            return []
+        conn = self._get_connection()
+        sql = "SELECT dropbox_path, MIN(check_time) AS first_seen FROM stability_checks"
+        params: list = []
+        globs = [g.lower() for g in (path_globs or []) if g]
+        if globs:
+            sql += " WHERE " + " OR ".join(
+                "LOWER(dropbox_path) GLOB ?" for _ in globs
+            )
+            params.extend(globs)
+        sql += " GROUP BY dropbox_path ORDER BY first_seen ASC LIMIT ?"
+        params.append(limit)
+        return [row['dropbox_path'] for row in conn.execute(sql, params).fetchall()]
 
     def cleanup_old_stability_checks(self, days: int = 7) -> int:
         """Remove old stability checks."""

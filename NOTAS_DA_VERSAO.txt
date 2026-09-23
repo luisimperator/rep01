@@ -2,6 +2,47 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 8.4.0
+Data: 23/09/2026
+--------------------------------------------------------------------------------
+
+Fast lane da Podfactory: H.265 de proxy o mais rápido possível
+
+  [FEATURE] Pastas Podfactory (qualquer pasta cujo nome começa com
+        "Podfactory": Podfactory, Podfactory3...) furam a fila inteira:
+        entram na frente de todas as filas (download, transcode, upload),
+        ignoram o sticky folder e a prioridade por tamanho de pasta.
+  [FEATURE] Modo proxy: o H.265 da Podfactory fica em <pasta>/h265/<nome>
+        e o reorganize NÃO roda — o H.264 original fica exatamente onde
+        está, não vai pra h264/, não é substituído na pasta principal e
+        não é apagado. A troca fica pro reorganize-existing quando o
+        projeto esfriar.
+  [FEATURE] Download: se os 4 downloaders estiverem ocupados com backlog,
+        um deles cede a vaga pro arquivo da Podfactory (guarda o parcial e
+        retoma depois, sem rebaixar nada). Enquanto a Podfactory baixa, os
+        downloads de backlog ficam segurados (um chunk de keepalive a cada
+        20s) pra ela pegar o link inteiro em vez de 1/4 dele.
+  [FEATURE] Transcoder dedicado: um transcoder extra que só pega arquivo
+        da Podfactory, então ele nunca espera um ISO de backlog de 1h+
+        terminar.
+  [FEATURE] Estabilidade mais rápida pra Podfactory: 2 checagens com 5 min
+        de intervalo (o resto do acervo segue com 3 checagens / 15 min).
+  [FIX] Bug antigo: no modo delta, arquivo novo recebia UMA checagem de
+        estabilidade e nunca mais era rechecado (o delta do Dropbox só
+        reentrega arquivo que muda) — ficava "waiting" pra sempre e não
+        virava job. Agora todo scan recheca os arquivos em espera
+        (Podfactory primeiro); os que estavam presos há semanas viram job
+        em até 2 scans depois da atualização.
+  [FIX] A varredura de arquivos ._ (que percorre o acervo inteiro, ~75
+        min) rodava no mesmo loop do scan e empurrava cada scan pra ~85 min
+        de distância. Agora roda numa thread própria e o scan volta a
+        rodar a cada 10 min.
+  Tudo configurável na seção `priority:` do config.yaml (padrões já
+  valem sem mexer em nada). Pausa manual / modo noturno continuam
+  parando tudo, inclusive a Podfactory.
+
+================================================================================
+
 Versão: 8.3.2
 Data: 21/08/2026
 --------------------------------------------------------------------------------
