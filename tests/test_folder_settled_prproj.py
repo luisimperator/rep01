@@ -154,3 +154,79 @@ def test_cache_avoids_relisting_shared_ancestors():
     assert r1.source == r2.source == "prproj"
     # The shared delivery folder is listed once, not once per sibling.
     assert dbx.calls.count("/HD/proj") == 1
+
+
+# --- projeto/ subfolder (v8.5.0) ---------------------------------------------------
+# House layout: <recording>/projeto/edit.prproj beside <recording>/video/...
+
+def test_projeto_subfolder_recent_prproj_holds_media():
+    rec = "/HD/2026-09-20 gravacao"
+    dbx = _FakeDbx({
+        f"{rec}/video/cam1": [_file(f"{rec}/video/cam1", "C0001.MP4", client_days_ago=400)],
+        f"{rec}/projeto": [_file(f"{rec}/projeto", "edit.prproj", client_days_ago=5)],
+    })
+    r = is_folder_settled(dbx, f"{rec}/video/cam1", 60, dropbox_root=ROOT)
+    assert r.settled is False
+    assert r.source == "prproj"
+
+
+def test_projeto_subfolder_old_prproj_settles():
+    rec = "/HD/2026-06-01 gravacao"
+    dbx = _FakeDbx({
+        f"{rec}/video/cam1": [_file(f"{rec}/video/cam1", "C0001.MP4", client_days_ago=1)],
+        f"{rec}/projeto": [_file(f"{rec}/projeto", "edit.prproj", client_days_ago=70)],
+    })
+    r = is_folder_settled(dbx, f"{rec}/video/cam1", 60, dropbox_root=ROOT)
+    assert r.settled is True
+    assert r.source == "prproj"
+
+
+def test_projeto_next_to_podcast_iso_folder():
+    ep = "/HD/Podfactory3/ep 12"
+    dbx = _FakeDbx({
+        f"{ep}/Video ISO Files": [_file(f"{ep}/Video ISO Files", "CAM 1.mp4", client_days_ago=90)],
+        f"{ep}/projeto": [_file(f"{ep}/projeto", "ep12.prproj", client_days_ago=2)],
+    })
+    r = is_folder_settled(dbx, f"{ep}/Video ISO Files", 60, dropbox_root=ROOT)
+    assert r.settled is False
+
+
+def test_newest_of_direct_and_projeto_wins():
+    rec = "/HD/rec"
+    dbx = _FakeDbx({
+        rec: [_file(rec, "old.prproj", client_days_ago=200)],
+        f"{rec}/projeto": [_file(f"{rec}/projeto", "new.prproj", client_days_ago=3)],
+        f"{rec}/video": [_file(f"{rec}/video", "a.MP4", client_days_ago=400)],
+    })
+    r = is_folder_settled(dbx, f"{rec}/video", 60, dropbox_root=ROOT)
+    assert r.settled is False
+
+
+def test_auto_save_inside_projeto_is_ignored():
+    rec = "/HD/rec"
+    autosave = f"{rec}/projeto/Adobe Premiere Pro Auto-Save"
+    dbx = _FakeDbx({
+        f"{rec}/projeto": [_file(f"{rec}/projeto", "edit.prproj", client_days_ago=120)],
+        autosave: [_file(autosave, "edit--1.prproj", client_days_ago=1)],
+        f"{rec}/video": [_file(f"{rec}/video", "a.MP4", client_days_ago=400)],
+    })
+    r = is_folder_settled(dbx, f"{rec}/video", 60, dropbox_root=ROOT)
+    assert r.settled is True
+    assert autosave not in dbx.calls
+
+
+def test_missing_projeto_folder_is_not_an_error():
+    from transcoder.dropbox_client import DropboxNotFoundError
+
+    class _RealisticDbx(_FakeDbx):
+        def list_folder(self, path, recursive=False):
+            if path not in self.tree:
+                raise DropboxNotFoundError(path)
+            return super().list_folder(path, recursive)
+
+    dbx = _RealisticDbx({
+        "/HD": [], "/HD/rec": [],
+        "/HD/rec/video": [_file("/HD/rec/video", "a.MP4", client_days_ago=10)],
+    })
+    r = is_folder_settled(dbx, "/HD/rec/video", 60, dropbox_root=ROOT)
+    assert r.source == "media" and r.settled is False

@@ -71,24 +71,60 @@ def _real_modified(entry: DropboxFileInfo) -> datetime | None:
     return _to_naive_utc(entry.client_modified or entry.server_modified)
 
 
-def _newest_prproj_modified(
-    dropbox: DropboxClient,
-    folder: str,
-    cache: dict | None = None,
-) -> datetime | None:
-    """Newest .prproj real save-time directly in `folder`, or None if none."""
-    if cache is not None and folder in cache:
-        return cache[folder]
+# The house layout keeps each recording's Premiere project in a sibling
+# subfolder next to the media folders: <recording>/projeto/edit.prproj beside
+# <recording>/video/... Dropbox paths are case-insensitive, so listing
+# "<folder>/projeto" also finds "Projeto"/"PROJETO". Only files DIRECTLY in it
+# count — the non-recursive listing never descends into
+# "projeto/Adobe Premiere Pro Auto-Save/", whose backups aren't real saves.
+_PROJECT_SUBFOLDER = "projeto"
+
+
+def _newest_of(a: datetime | None, b: datetime | None) -> datetime | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return max(a, b)
+
+
+def _newest_prproj_in_listing(dropbox: DropboxClient, folder: str) -> datetime | None:
+    """Newest .prproj directly in `folder`; None when absent or no project.
+
+    Only a missing folder is swallowed. Any other failure propagates — a
+    project we couldn't read must never make an active edit look settled.
+    """
     newest: datetime | None = None
     try:
         for entry in dropbox.list_folder(folder, recursive=False):
             if not _is_project_file(entry.name):
                 continue
-            modified = _real_modified(entry)
-            if modified is not None and (newest is None or modified > newest):
-                newest = modified
+            newest = _newest_of(newest, _real_modified(entry))
     except DropboxNotFoundError:
-        newest = None
+        return None
+    return newest
+
+
+def _projeto_subfolder(folder: str) -> str:
+    return folder.rstrip("/") + "/" + _PROJECT_SUBFOLDER
+
+
+def _newest_prproj_modified(
+    dropbox: DropboxClient,
+    folder: str,
+    cache: dict | None = None,
+) -> datetime | None:
+    """Newest .prproj real save-time for `folder`, or None if none.
+
+    Looks directly in `folder` AND directly in its `projeto/` subfolder; the
+    newest of the two wins. Cached per folder for the caller's pass.
+    """
+    if cache is not None and folder in cache:
+        return cache[folder]
+    newest = _newest_of(
+        _newest_prproj_in_listing(dropbox, folder),
+        _newest_prproj_in_listing(dropbox, _projeto_subfolder(folder)),
+    )
     if cache is not None:
         cache[folder] = newest
     return newest
@@ -131,6 +167,9 @@ def is_folder_settled(
       1. Walk up from `parent` to the nearest ancestor holding a .prproj and
          use that project's real last-save time (client_modified). A project
          saved within `min_age_days` is still being edited -> NOT settled.
+         At every level both the folder itself and its `projeto/` subfolder
+         count (house layout: <recording>/projeto/ beside <recording>/video/),
+         newest wins; Auto-Save backups inside projeto/ never count.
       2. If no .prproj exists anywhere up to `dropbox_root`, fall back to the
          real capture date (client_modified) of the media directly in `parent`.
 
@@ -166,6 +205,14 @@ def is_folder_settled(
             continue
         if media_newest is None or modified > media_newest:
             media_newest = modified
+    # The project may also live in <parent>/projeto/ (house layout).
+    if cache is not None and parent in cache:
+        parent_prproj = _newest_of(parent_prproj, cache[parent])
+    else:
+        parent_prproj = _newest_of(
+            parent_prproj,
+            _newest_prproj_in_listing(dropbox, _projeto_subfolder(parent)),
+        )
     if cache is not None:
         cache[parent] = parent_prproj
 
@@ -359,26 +406,37 @@ def find_unreorganized_pairs(
     The case of the subfolder names is normalized when matching, but the
     actual move uses the path Dropbox returned.
     """
-    # Index every file by its parent directory and by lowercase basename.
-    # Keys are case-insensitive parent paths so we can match siblings.
+    entries = list(dropbox.list_folder(dropbox_root, recursive=True))
+    return find_unreorganized_pairs_in_entries(entries, layout)
+
+
+def index_entries_by_parent(
+    entries: Iterable[DropboxFileInfo],
+) -> dict[str, dict[str, DropboxFileInfo]]:
+    """{parent_path: {filename: entry}} for one recursive listing."""
     by_parent: dict[str, dict[str, DropboxFileInfo]] = {}
-
-    for entry in dropbox.list_folder(dropbox_root, recursive=True):
+    for entry in entries:
         parent_path = str(PurePosixPath(entry.path).parent)
-        # Normalize but keep original-cased keys so we can reconstruct paths
         by_parent.setdefault(parent_path, {})[entry.name] = entry
+    return by_parent
 
-    # Helper: case-insensitive subfolder lookup.
+
+def find_unreorganized_pairs_in_entries(
+    entries: Iterable[DropboxFileInfo] | dict[str, dict[str, DropboxFileInfo]],
+    layout: ReorganizeLayout = VIDEO_LAYOUT,
+) -> list[FolderCandidate]:
+    """find_unreorganized_pairs over an already-fetched recursive listing
+    (or its index_entries_by_parent), so one tree walk can serve several
+    passes (both layouts, the throwaway sweep, the ._ sweep)."""
+    by_parent = entries if isinstance(entries, dict) else index_entries_by_parent(entries)
+    # Case-insensitive parent lookup, built once: O(1) per subfolder probe
+    # instead of scanning every folder (quadratic on a ~1M-entry tree).
+    by_parent_lower = {p.lower(): files for p, files in by_parent.items()}
+
     def find_subfolder_files(parent: str, sub: str) -> dict[str, DropboxFileInfo]:
-        wanted = parent.rstrip('/') + '/' + sub
-        wanted_lower = wanted.lower()
-        for p, files in by_parent.items():
-            if p.lower() == wanted_lower:
-                return files
-        return {}
+        return by_parent_lower.get((parent.rstrip('/') + '/' + sub).lower(), {})
 
     candidates: list[FolderCandidate] = []
-    seen_parents = set()
     skip_dirs_lower = {layout.backup_subdir.lower(), layout.output_subdir.lower()}
 
     for parent, files in by_parent.items():
@@ -386,32 +444,26 @@ def find_unreorganized_pairs(
         last = PurePosixPath(parent).name.lower()
         if last in skip_dirs_lower:
             continue
-        if parent in seen_parents:
-            continue
-        seen_parents.add(parent)
 
         out_files = find_subfolder_files(parent, layout.output_subdir)
         if not out_files:
             continue
-        backup_files = find_subfolder_files(parent, layout.backup_subdir)
+        out_by_lower = {n.lower(): info for n, info in out_files.items()}
+        backup_lower = {
+            n.lower() for n in find_subfolder_files(parent, layout.backup_subdir)
+        }
 
         pairs: list[PairCandidate] = []
         for name, original in files.items():
             if name.lower() == layout.feito_filename.lower():
                 continue
             # The output file may have a different extension (audio: .wav -> .mp3).
-            expected_output = layout.output_name(name)
-            out_match = None
-            for out_name, out_info in out_files.items():
-                if out_name.lower() == expected_output.lower():
-                    out_match = out_info
-                    break
+            out_match = out_by_lower.get(layout.output_name(name).lower())
             if out_match is None:
                 continue
             # Already-reorganized check: if a file with the same ORIGINAL name
             # exists under the backup subfolder, the swap was already done.
-            already = any(n.lower() == name.lower() for n in backup_files)
-            if already:
+            if name.lower() in backup_lower:
                 continue
             pairs.append(PairCandidate(
                 parent=parent,
@@ -778,18 +830,33 @@ def sweep_dot_underscore_under_root(
     Empty dict if nothing was found. Errors per-folder are logged but
     don't abort the sweep.
     """
-    targets_lower = {n.lower() for n in target_folder_names}
-    seen_parents: set[str] = set()
-    results: dict[str, int] = {}
-
     try:
         entries = list(dropbox.list_folder(dropbox_root, recursive=True))
     except Exception as e:
         logger.warning(f"sweep_dot_underscore: list root failed: {e}")
-        return results
+        return {}
+    return sweep_dot_underscore_in_entries(
+        dropbox, entries, delete_after_seconds, target_folder_names,
+        max_size_bytes=max_size_bytes,
+    )
 
-    # Group entries by parent so we only call cleanup once per matching folder.
+
+def sweep_dot_underscore_in_entries(
+    dropbox: DropboxClient,
+    entries: Iterable[DropboxFileInfo],
+    delete_after_seconds: int,
+    target_folder_names: list[str],
+    max_size_bytes: int = 10240,
+) -> dict[str, int]:
+    """The ._ sweep over an already-fetched recursive listing."""
+    targets_lower = {n.lower() for n in target_folder_names}
+    seen_parents: set[str] = set()
+    results: dict[str, int] = {}
+
+    # Only folders that actually hold a ._ fork are worth a cleanup call.
     for entry in entries:
+        if not entry.name.startswith('._'):
+            continue
         parent = str(PurePosixPath(entry.path).parent)
         if parent in seen_parents:
             continue

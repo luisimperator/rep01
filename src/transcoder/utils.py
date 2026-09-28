@@ -160,23 +160,43 @@ def path_has_assets_segment(path: str) -> bool:
 # These are EPHEMERAL — Premiere regenerates them whenever the timeline
 # changes — so transcoding them is pure waste of bandwidth and CPU.
 _PREMIERE_PREVIEW_FOLDER = "Adobe Premiere Pro Video Previews"
+# Render caches Premiere regenerates on demand — throwaway once the edit is
+# cold. "Adobe Premiere Pro Auto-Save" is deliberately NOT here: those are
+# the project's backups and are never deleted.
+_PREMIERE_PREVIEW_FOLDERS = frozenset(
+    name.lower() for name in (
+        _PREMIERE_PREVIEW_FOLDER,
+        "Adobe Premiere Pro Audio Previews",
+    )
+)
 
 
 def path_is_premiere_preview(path: str) -> bool:
-    """True when the path lives under an Adobe Premiere Pro preview cache.
+    """True when the path lives under an Adobe Premiere Pro preview cache
+    (video or audio previews).
 
-    Matches the literal folder name Premiere uses; case-insensitive. Walks
+    Matches the literal folder names Premiere uses; case-insensitive. Walks
     all path segments so deep nesting (`*.PRV/Rendered - <uuid>.mov`) is
     still caught.
     """
+    return premiere_preview_root(path) is not None
+
+
+def premiere_preview_root(path: str) -> str | None:
+    """Outermost Premiere preview-cache folder containing `path`, or None.
+
+    `/a/Adobe Premiere Pro Video Previews/x.PRV/r.mov` →
+    `/a/Adobe Premiere Pro Video Previews`. Lets the daily sweep delete the
+    whole cache in one call.
+    """
     if not path:
-        return False
+        return None
     from pathlib import PurePosixPath
-    target = _PREMIERE_PREVIEW_FOLDER.lower()
-    for seg in PurePosixPath(path).parts:
-        if seg.lower() == target:
-            return True
-    return False
+    parts = PurePosixPath(path).parts
+    for i, seg in enumerate(parts):
+        if seg.lower() in _PREMIERE_PREVIEW_FOLDERS:
+            return str(PurePosixPath(*parts[: i + 1]))
+    return None
 
 
 # Cameras (Sony FX3/A7S III: `<original>_Proxy.<ext>`) and NLEs (Premiere

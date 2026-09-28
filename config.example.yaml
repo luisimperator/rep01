@@ -100,6 +100,11 @@ priority:
   # Case-insensitive globs against the full Dropbox path; `*` crosses folders.
   paths:
     - "*/podfactory*/*"
+    - "*/talks by leo/arquivo talks by leo/*"
+  # Merge the built-in fast-lane folders into this list, so folders added by
+  # future releases show up even with a custom list here. Empty `paths`
+  # still turns the fast lane off.
+  include_default_paths: true
   proxy_only: true
   stability:
     poll_interval_sec: 300
@@ -112,6 +117,21 @@ priority:
   # One extra transcoder that only takes priority files, so they never wait
   # behind an hour-long backlog encode.
   dedicated_transcoder: true
+# Daily sweep of projects that went cold. One tree walk that, for every
+# folder whose Premiere project is settled (legacy_reorganize_min_age_days,
+# .prproj found in the folder, its ancestors, or their projeto/ subfolder):
+#   - swaps pending H.265 / MP3 pairs into place (fast-lane folders too;
+#     the h264/ and wav/ backups keep their usual delayed cleanup),
+#   - deletes Proxies/ trees and Premiere Video/Audio Previews caches
+#     (only when scanner.delete_throwaway_files is on; Auto-Save is never
+#     touched),
+#   - quarantines ._ resource forks.
+# Stops when the pipeline is paused. Dashboard: "Cold projects" → Run now.
+cold_sweep:
+  enabled: true
+  daily_run_at: "03:00"
+  # Runs late (e.g. daemon was down at 03:00) only within this many hours.
+  catch_up_hours: 6
 scanner:
   cursor_checkpoint_entries: 500
   feito_cache_ttl_sec: 3600

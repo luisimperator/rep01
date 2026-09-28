@@ -294,6 +294,8 @@ def _build_handler(api: ApiServer):
                 return self._send_json(_lighthouse_payload(api))
             if route == "/api/deep-scan/status":
                 return self._send_json(_deep_scan_status_payload(api))
+            if route == "/api/cold-sweep":
+                return self._send_json(_cold_sweep_status_payload(api))
             if route == "/healthz":
                 return self._send_text("ok")
             self.send_error(404, "not found")
@@ -369,6 +371,12 @@ def _build_handler(api: ApiServer):
             if route == "/api/reorganize/run":
                 body = self._read_json_body() or {}
                 return self._send_json(_reorganize_run(api, body))
+            if route == "/api/cold-sweep/run":
+                worker = getattr(getattr(api, "daemon", None), "cold_sweep", None)
+                if worker is None:
+                    return self._send_json({"ok": False, "error": "cold sweep disabled in config"})
+                ok, err = worker.trigger_now()
+                return self._send_json({"ok": ok, "triggered": ok, "error": err or None})
             if route == "/api/census-now":
                 worker = getattr(getattr(api, "daemon", None), "census_worker", None)
                 if worker is None:
@@ -1904,6 +1912,13 @@ def _lighthouse_payload(api: ApiServer) -> dict:
         "pending_bytes": pending_bytes,
         "uptime_sec": uptime_sec,
     }
+
+
+def _cold_sweep_status_payload(api: ApiServer) -> dict:
+    worker = getattr(getattr(api, "daemon", None), "cold_sweep", None)
+    if worker is None:
+        return {"ok": True, "enabled": False}
+    return {"ok": True, **worker.status()}
 
 
 def _deep_scan_status_payload(api: ApiServer) -> dict:

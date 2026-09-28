@@ -232,6 +232,14 @@ class Daemon:
         recovered = self.db.recover_active_jobs()
         if recovered:
             logger.info(f"Recovered {recovered} interrupted jobs")
+        # v8.5.0: fast-lane folders lost their size/bitrate floors — revive
+        # the ones skipped under the old rules.
+        revived = self.db.requeue_priority_skips(list(self.config.priority.paths or []))
+        if revived:
+            logger.info(
+                f"fast lane: requeued {revived} job(s) previously skipped "
+                f"as too small / low bitrate"
+            )
 
         # Kill any orphan ffmpeg.exe left behind by a previous daemon instance
         # that was terminated abruptly (Task Scheduler restart, manual kill,
@@ -610,6 +618,17 @@ class Daemon:
             )
             self.census_worker.start()
             self.workers.append(self.census_worker)
+        # Daily sweep of projects that went cold (v8.5.0): deferred swaps +
+        # Proxies/ and Premiere preview caches, one tree walk at 03:00.
+        self.cold_sweep = None
+        if self.config.cold_sweep.enabled and self.dropbox is not None:
+            from .cold_sweep import ColdSweepWorker
+            self.cold_sweep = ColdSweepWorker(
+                self.config, self.db, self.dropbox, self.stop_event,
+                dispatcher=self.dispatcher,
+            )
+            self.cold_sweep.start()
+            self.workers.append(self.cold_sweep)
         self.deep_scan = DeepScanWorker(
             self.config, self.db, self.dropbox, self.stop_event,
             dispatcher=self.dispatcher,

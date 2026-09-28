@@ -269,14 +269,16 @@ def _is_pod(job) -> bool:
 
 
 class TestJobQueue:
-    def test_priority_jumps_ahead_fifo_among_themselves(self):
+    def test_priority_jumps_ahead_newest_recording_first(self):
+        # v8.5.0: inside the fast lane the newest recording goes first
+        # (8.4.0 kept arrival order). created_at stands in for the date here.
         q = JobQueue(10, _is_pod)
         q.put_nowait(_job(1, f"{BACKLOG}/a.mp4"))
         q.put_nowait(_job(2, f"{BACKLOG}/b.mp4"))
         q.put_nowait(_job(3, f"{POD}/1.mp4"))
         q.put_nowait(_job(4, f"{POD}/2.mp4"))
         assert q.priority_count == 2
-        assert [q.get_nowait().id for _ in range(4)] == [3, 4, 1, 2]
+        assert [q.get_nowait().id for _ in range(4)] == [4, 3, 1, 2]
         assert q.priority_count == 0
 
     def test_get_priority_never_returns_backlog(self):
@@ -312,7 +314,7 @@ class TestJobQueue:
         q.put_overflow(_job(5, f"{POD}/2.mp4"))
         with pytest.raises(Full):
             q.put_overflow(_job(6, f"{POD}/3.mp4"))
-        assert q.get_nowait().id == 4
+        assert q.get_nowait().id == 5          # newest recording first
 
 
 # ------------------------------------------------------------ dispatcher refill

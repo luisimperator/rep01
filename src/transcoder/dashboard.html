@@ -298,6 +298,11 @@
   <div id="reorg-body" style="margin-top: 1em;"></div>
 </details>
 
+<details class="panel" id="cold-panel">
+  <summary style="cursor:pointer; color: var(--muted); margin-bottom: .8em;"><strong style="color:var(--text)">Cold projects</strong> — daily sweep: swaps deferred H.265 and deletes Proxies/previews once the project is settled</summary>
+  <div id="cold-body" style="margin-top: 1em;">loading…</div>
+</details>
+
 <details class="panel" id="reduction-panel">
   <summary style="cursor:pointer; color: var(--muted); margin-bottom: .8em;"><strong style="color:var(--text)">Reduction map</strong> — colored tree of folders: red = lots to compress, yellow = some, green = done</summary>
   <div id="reduction-body" style="margin-top: 1em;"></div>
@@ -1711,6 +1716,64 @@ async function refreshDeepScanStatus() {
     if (elStart) elStart.disabled = false;
   }
 }
+
+// ---------- Cold projects (daily sweep) ----------
+function coldTime(ts) {
+  return ts ? new Date(ts * 1000).toLocaleString() : '—';
+}
+function coldList(items, fmt) {
+  if (!items || !items.length) return '<div style="color:var(--muted)">none</div>';
+  return '<ul style="margin:.3em 0 .6em 1.2em; padding:0">' +
+    items.slice(0, 50).map(i => `<li class="path">${fmt(i)}</li>`).join('') +
+    (items.length > 50 ? `<li style="color:var(--muted)">… ${items.length - 50} more</li>` : '') +
+    '</ul>';
+}
+async function refreshColdSweep() {
+  const el = document.getElementById('cold-body');
+  if (!el) return;
+  const s = await safeFetch('/api/cold-sweep');
+  if (s._error) { el.textContent = 'unavailable: ' + s._error; return; }
+  if (!s.enabled) { el.innerHTML = '<div style="color:var(--muted)">Disabled in config (cold_sweep.enabled).</div>'; return; }
+  const r = s.running || s.last;
+  const running = !!s.running;
+  let html = `<div class="row" style="gap:.6em; align-items:center; margin-bottom:.6em">
+      <button id="cold-run-btn" onclick="coldSweepNow()" ${running ? 'disabled' : ''}>${running ? 'Running…' : 'Run now'}</button>
+      <span style="color:var(--muted)">Daily at ${escapeHtml(s.daily_run_at)} · threshold = reorganize wait setting</span>
+    </div>`;
+  if (!r) {
+    html += '<div style="color:var(--muted)">No sweep has run yet.</div>';
+  } else {
+    const status = running ? 'running' : r.status + (r.abort_reason ? ` (${escapeHtml(r.abort_reason)})` : '');
+    html += `<div style="margin-bottom:.6em"><strong>${running ? 'Current' : 'Last'} pass</strong> (${escapeHtml(r.trigger)}):
+        ${escapeHtml(status)} · started ${coldTime(r.started_at)} · finished ${coldTime(r.finished_at)}
+        ${r.error ? `<div style="color:var(--err)">${escapeHtml(r.error)}</div>` : ''}</div>
+      <div class="grid" style="margin-bottom:.6em">
+        ${card('Pairs swapped', r.swapped_pairs)}
+        ${card('Swap failures', r.failed_pairs, r.failed_pairs ? 'err' : '')}
+        ${card('Folders deleted', r.deleted_count)}
+        ${card('Deferred (still hot)', r.deferred_count)}
+      </div>
+      <details><summary>Swapped folders (${r.swapped_folders.length})</summary>${coldList(r.swapped_folders, p => escapeHtml(p))}</details>
+      <details><summary>Deleted Proxies / previews (${r.deleted_count})</summary>${coldList(r.deleted, d => `${escapeHtml(d.path)} <span style="color:var(--muted)">(${escapeHtml(d.kind)})</span>`)}</details>
+      <details><summary>Deferred (${r.deferred_count})</summary>${coldList(r.deferred, d => `${escapeHtml(d.path)} <span style="color:var(--muted)">— ${escapeHtml(d.what)}: ${escapeHtml(d.reason)}</span>`)}</details>`;
+  }
+  el.innerHTML = html;
+}
+async function coldSweepNow() {
+  try {
+    const r = await fetchJSON('/api/cold-sweep/run', { method: 'POST' });
+    if (r.ok) toast('Cold sweep started. It walks the whole tree — can take over an hour.', 'ok');
+    else toast('Cold sweep: ' + (r.error || 'not started'), 'err');
+    refreshColdSweep();
+  } catch (e) { toast('Trigger failed: ' + e.message, 'err'); }
+}
+document.getElementById('cold-panel').addEventListener('toggle', (ev) => {
+  if (ev.target.open) refreshColdSweep();
+});
+setInterval(() => {
+  const p = document.getElementById('cold-panel');
+  if (p && p.open) refreshColdSweep();
+}, 15000);
 
 // Lazy-load the tree the first time the panel is expanded so the
 // dashboard tick stays cheap.

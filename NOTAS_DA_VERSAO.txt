@@ -2,6 +2,55 @@
                     HEAVYDROPS TRANSCODER - NOTAS DA VERSÃO
 ================================================================================
 
+Versão: 8.5.0
+Data: 28/09/2026
+--------------------------------------------------------------------------------
+
+Varredura diária dos projetos frios, pasta projeto/, Talks by Leo na fast
+lane e fast lane pela data da gravação
+
+  [FEATURE] Varredura diária (padrão 03:00, numa thread própria): uma
+        listagem só da árvore e, pra cada pasta com projeto já parado
+        (legacy_reorganize_min_age_days):
+        - troca os pares H.265/MP3 que ficaram adiados (vídeo e áudio),
+          inclusive os das pastas da fast lane. O backup em h264/ e wav/
+          continua com a limpeza atrasada de sempre.
+        - apaga Proxies/ e caches de preview do Premiere que o scan viu
+          "quentes" e nunca mais revisitou (só com delete_throwaway_files).
+        - faz a limpeza de ._ na mesma passada.
+        Pula pasta com job em andamento, para se o pipeline pausar e, se o
+        daemon estava fora às 03:00, roda na volta dentro de 6h. Nada
+        dentro de Proxies/ é trocado (inclui Proxies/H265 Prod/).
+        Dashboard: painel "Cold projects" com "Run now" e o resultado da
+        última passada (pares trocados, pastas apagadas, adiadas).
+  [FIX] Projeto na subpasta projeto/: o teste de "pasta parada" agora
+        olha também os .prproj de <pasta>/projeto/ em cada nível (a
+        pasta e cada ancestral), e o mais novo vence. Antes, gravação com
+        o projeto em projeto/ caía na data da mídia e, 60 dias depois de
+        gravar, tinha a troca feita e os Proxies apagados mesmo com
+        editor trabalhando. Auto-Save não conta.
+  [FEATURE] Adobe Premiere Pro Audio Previews agora também é cache
+        descartável (mesma regra de pasta parada). Auto-Save nunca é
+        apagado.
+  [FEATURE] Talks by Leo na fast lane: */talks by leo/arquivo talks by leo/*.
+        Máquina que já tinha priority.paths no config.yaml recebe os
+        padrões novos automaticamente (include_default_paths). Lista
+        vazia continua desligando a fast lane.
+  [FEATURE] Fast lane pela data da gravação, da mais nova pra mais antiga:
+        o job guarda a data real do arquivo (coluna nova, migração
+        automática; jobs antigos usam a data de descoberta). Vale em
+        todas as etapas e na preempção — um download de sessão antiga
+        cede a vaga pra gravação de hoje se não houver backlog pra ceder
+        antes. As ISOs de uma sessão saem juntas. O backlog fora da fast
+        lane segue igual.
+  [FEATURE] Fast lane sem mínimo de tamanho nem de bitrate: toda ISO ganha
+        seu h265/<nome> (a timeline do AutoPós aponta pra todas, intro
+        curta inclusive). HEVC continua sendo pulado. Jobs de pastas da
+        fast lane já marcados como pequenos/bitrate baixo voltam pra fila
+        no boot.
+
+================================================================================
+
 Versão: 8.4.0
 Data: 23/09/2026
 --------------------------------------------------------------------------------
