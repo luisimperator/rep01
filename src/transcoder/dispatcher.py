@@ -35,6 +35,27 @@ TRANSCODE_STATES = {JobState.DOWNLOADED}
 UPLOAD_STATES = {JobState.UPLOADING}
 
 
+def _timestamp(value) -> float:
+    if value is None:
+        return 0.0
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return value.timestamp()
+    except Exception:
+        return 0.0
+
+
+def recency_key(job) -> tuple:
+    """Fast-lane sort key: newest recording first, then path.
+
+    Smaller key = earlier in line. Uses the job's real recording date
+    (source_modified), falling back to discovery time for old rows.
+    """
+    when = getattr(job, "source_modified", None) or getattr(job, "created_at", None)
+    return (-_timestamp(when), getattr(job, "dropbox_path", "") or "")
+
+
 class JobQueue(Queue):
     """Bounded FIFO where fast-lane jobs jump ahead of the backlog (v8.4.0).
 
@@ -51,10 +72,26 @@ class JobQueue(Queue):
 
     def _put(self, item) -> None:
         if self._is_priority(item):
-            self.queue.insert(self.priority_count, item)
+            # Keep the priority block sorted newest recording first (path as
+            # tie-break, so a session's ISOs stay together); stable for equal
+            # keys, so same-date files keep arrival order.
+            key = recency_key(item)
+            idx = self.priority_count
+            for i in range(self.priority_count):
+                if key < recency_key(self.queue[i]):
+                    idx = i
+                    break
+            self.queue.insert(idx, item)
             self.priority_count += 1
         else:
             self.queue.append(item)
+
+    def priority_head_key(self):
+        """recency_key of the next priority job, or None when none waits."""
+        with self.mutex:
+            if self.priority_count <= 0:
+                return None
+            return recency_key(self.queue[0])
 
     def _get(self):
         item = self.queue.popleft()
@@ -130,6 +167,9 @@ class JobDispatcher(threading.Thread):
         # preemption clock that limits backlog downloads to one yield per
         # cooldown window.
         self._priority_ids: set[int] = set()
+        # recency_key of each in-flight priority job, so preemption can let
+        # an older fast-lane download yield to a newer recording.
+        self._priority_keys: dict[int, tuple] = {}
         self._last_preempt_at: float = float("-inf")
 
         self._active_lock = threading.Lock()
@@ -190,6 +230,7 @@ class JobDispatcher(threading.Thread):
             self._active_set.discard(job_id)
             self._active_folders.pop(job_id, None)
             self._priority_ids.discard(job_id)
+            self._priority_keys.pop(job_id, None)
 
     def _job_is_priority(self, job: Job) -> bool:
         priority = getattr(self.config, "priority", None)
@@ -215,37 +256,56 @@ class JobDispatcher(threading.Thread):
             return any(j in self._priority_ids for j in self._download_active.values())
 
     def should_yield_download(self, worker_name: str) -> bool:
-        """True when this backlog download should give its slot to the fast lane.
+        """True when this download should give its slot to the fast lane.
 
         Called from the DownloadWorker progress callback. Fires when a
-        priority job is sitting in the download queue, every downloader is
-        busy, and this worker's current job is NOT itself a priority job.
-        At most one worker yields per `preempt_cooldown_sec`, so a single
-        waiting Podfactory file knocks out exactly one backlog download.
-        The yielding worker keeps its partial and requeues the job, then
-        its next queue.get() pops the priority job from the head.
+        priority job is sitting in the download queue and every downloader
+        is busy. Who yields:
+          - a backlog download, whenever one is running;
+          - otherwise (every slot already on fast-lane files) the download of
+            the OLDEST recording, and only if the waiting one is newer — a
+            recording made today never waits behind last week's session.
+        At most one worker yields per `preempt_cooldown_sec`. The yielding
+        worker keeps its partial and requeues the job, then its next
+        queue.get() pops the priority job from the head.
         """
         priority = getattr(self.config, "priority", None)
         if priority is None or priority.preempt_downloads is not True:
             return False
-        if self.download_q.priority_count <= 0:
+        head_key = self.download_q.priority_head_key()
+        if head_key is None:
             return False
         workers = max(1, self.config.concurrency.download_workers)
         with self._convoy_lock:
             job_id = self._download_active.get(worker_name)
-            if job_id is None or job_id in self._priority_ids:
+            if job_id is None:
                 return False
             # An idle downloader will pop the priority job by itself — only
             # preempt when every slot is taken.
             if len(self._download_active) < workers:
                 return False
+            active = list(self._download_active.values())
+            backlog_running = any(j not in self._priority_ids for j in active)
+            if job_id in self._priority_ids:
+                if backlog_running:
+                    return False            # backlog yields first
+                mine = self._priority_keys.get(job_id)
+                if mine is None or not head_key < mine:
+                    return False            # waiting file isn't newer
+                oldest = max(
+                    (self._priority_keys.get(j) for j in active
+                     if self._priority_keys.get(j) is not None),
+                    default=None,
+                )
+                if mine != oldest:
+                    return False            # only the oldest session yields
             now = time.monotonic()
             if now - self._last_preempt_at < priority.preempt_cooldown_sec:
                 return False
             self._last_preempt_at = now
         logger.info(
-            "dispatcher: priority file waiting and all %d downloaders busy — "
-            "%s yields its backlog download (job %s; partial kept, resumes later)",
+            "dispatcher: newer fast-lane file waiting and all %d downloaders "
+            "busy — %s yields job %s (partial kept, resumes later)",
             workers, worker_name, job_id,
         )
         return True
@@ -516,6 +576,7 @@ class JobDispatcher(threading.Thread):
                 self._active_set.add(job.id)
                 if self._job_is_priority(job):
                     self._priority_ids.add(job.id)
+                    self._priority_keys[job.id] = recency_key(job)
                 if prioritize_folder and folder is not None:
                     self._active_folders[job.id] = folder
                     # First job admitted after a sticky release becomes the
@@ -546,7 +607,7 @@ class JobDispatcher(threading.Thread):
             return
         jobs = self.db.get_dispatchable_jobs(
             states, limit=self._PRIORITY_FETCH,
-            path_prefix=watch_root, path_globs=globs,
+            path_prefix=watch_root, path_globs=globs, newest_first=True,
         )
         if not jobs:
             return
@@ -562,6 +623,7 @@ class JobDispatcher(threading.Thread):
                     break
                 self._active_set.add(job.id)
                 self._priority_ids.add(job.id)
+                self._priority_keys[job.id] = recency_key(job)
                 if q is self.download_q:
                     logger.info(
                         "dispatcher: priority job %s queued ahead of the "

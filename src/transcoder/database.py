@@ -98,6 +98,13 @@ class Job:
     # measure true time-in-state. None on rows read mid-migration; callers
     # fall back to updated_at.
     state_changed_at: datetime | None = None
+    # Real date of the source recording (client_modified), None on old rows.
+    source_modified: datetime | None = None
+
+    @property
+    def recorded_at(self) -> datetime:
+        """Recording date for fast-lane ordering; discovery time as fallback."""
+        return self.source_modified or self.created_at
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Job:
@@ -113,6 +120,10 @@ class Job:
             state_changed_at = _parse_datetime(row['state_changed_at'])
         except (IndexError, KeyError):
             state_changed_at = None
+        try:
+            source_modified = _parse_datetime(row['source_modified'])
+        except (IndexError, KeyError):
+            source_modified = None
         return cls(
             id=row['id'],
             dropbox_path=row['dropbox_path'],
@@ -137,6 +148,7 @@ class Job:
             updated_at=_parse_datetime(row['updated_at']) or datetime.now(timezone.utc),
             kind=kind,
             state_changed_at=state_changed_at,
+            source_modified=source_modified,
         )
 
 
@@ -162,6 +174,16 @@ class StabilityCheck:
     rev: str
     server_modified: str
     content_hash: str | None
+
+
+def sql_utc(dt: datetime | None) -> str | None:
+    """Format a datetime the way SQLite's datetime('now') does (naive UTC,
+    'YYYY-MM-DD HH:MM:SS') so it sorts and compares against created_at."""
+    if dt is None:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _parse_datetime(value: str | None) -> datetime | None:
@@ -212,6 +234,10 @@ CREATE TABLE IF NOT EXISTS jobs (
     transcode_start TEXT,
     transcode_end TEXT,
     kind TEXT NOT NULL DEFAULT 'video',
+    -- Real date of the source file (Dropbox client_modified = camera/recorder
+    -- time), 'YYYY-MM-DD HH:MM:SS' UTC like created_at. Orders the fast lane
+    -- newest recording first; NULL on pre-8.5.0 rows (created_at stands in).
+    source_modified TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now')),
     -- Timeout clock for the watchdog. The jobs_updated_at trigger refreshes
@@ -422,6 +448,10 @@ class Database:
                 "UPDATE jobs SET state_changed_at = updated_at "
                 "WHERE state_changed_at IS NULL"
             )
+        if 'source_modified' not in existing:
+            # v8.5.0: recording date for fast-lane ordering. Old rows stay
+            # NULL — queries COALESCE to created_at.
+            conn.execute("ALTER TABLE jobs ADD COLUMN source_modified TEXT")
         # Refresh idx_jobs_active_path so newer SKIPPED_* states (added in
         # later versions like SKIPPED_LOW_BITRATE) are treated as terminal
         # by the unique-active-path constraint. SQLite re-creates indexes
@@ -466,9 +496,13 @@ class Database:
         output_path: str,
         state: JobState = JobState.NEW,
         kind: str = "video",
+        source_modified: datetime | None = None,
     ) -> Job | None:
         """
         Create a new job (idempotent by path+rev).
+
+        `source_modified` is the file's real date (Dropbox client_modified);
+        it orders the fast lane newest recording first.
 
         Returns:
             Created or existing Job, or None if conflict.
@@ -478,10 +512,12 @@ class Database:
             try:
                 cursor = conn.execute(
                     """
-                    INSERT INTO jobs (dropbox_path, dropbox_rev, dropbox_size, output_path, state, kind)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO jobs (dropbox_path, dropbox_rev, dropbox_size, output_path, state, kind,
+                                      source_modified)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (dropbox_path, dropbox_rev, dropbox_size, output_path, state.value, kind),
+                    (dropbox_path, dropbox_rev, dropbox_size, output_path, state.value, kind,
+                     sql_utc(source_modified)),
                 )
                 job_id = cursor.lastrowid
             except sqlite3.IntegrityError:
@@ -570,9 +606,14 @@ class Database:
         limit: int,
         path_prefix: str | None = None,
         path_globs: list[str] | None = None,
+        newest_first: bool = False,
     ) -> list[Job]:
         """
         Get jobs eligible for dispatch into a worker queue.
+
+        `newest_first` (fast lane) orders by recording date DESC — the file's
+        real date, discovery time for pre-8.5.0 rows — then by path, so the
+        LIMIT keeps the newest session and its ISOs stay together.
 
         `path_globs` (case-insensitive, `*` crosses folders) narrows the pick
         to fast-lane files; it matches exactly what Config.is_priority_path
@@ -606,7 +647,11 @@ class Database:
                 "LOWER(dropbox_path) GLOB ?" for _ in globs
             ) + ")"
             params.extend(globs)
-        sql += " ORDER BY created_at ASC LIMIT ?"
+        if newest_first:
+            sql += (" ORDER BY COALESCE(source_modified, created_at) DESC,"
+                    " dropbox_path ASC LIMIT ?")
+        else:
+            sql += " ORDER BY created_at ASC LIMIT ?"
         params.append(limit)
         cursor = conn.execute(sql, params)
         return [Job.from_row(row) for row in cursor.fetchall()]
@@ -696,6 +741,46 @@ class Database:
                 f"UPDATE jobs SET state = ?, state_changed_at = datetime('now') "
                 f"WHERE state IN ({placeholders})",
                 [JobState.RETRY_WAIT.value] + [s.value for s in ACTIVE_STATES],
+            )
+            return cursor.rowcount
+
+    def requeue_priority_skips(self, path_globs: list[str]) -> int:
+        """Put fast-lane jobs skipped for size/bitrate back in the queue.
+
+        v8.5.0 removed the min-size and low-bitrate floors for fast-lane
+        folders (every ISO needs its h265/<name> for the auto-edit timeline).
+        Jobs already marked SKIPPED_TOO_SMALL / SKIPPED_LOW_BITRATE there go
+        back to NEW — only the newest row per path, and never when that path
+        already has another job in flight (the active-path index allows one).
+        SKIPPED_HEVC is left alone: HEVC sources are still skipped.
+        """
+        globs = [g.lower() for g in (path_globs or []) if g]
+        if not globs:
+            return 0
+        glob_sql = " OR ".join("LOWER(j.dropbox_path) GLOB ?" for _ in globs)
+        with self.transaction() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE jobs SET state = ?, retry_count = 0, error_message = NULL,
+                       state_changed_at = datetime('now')
+                 WHERE id IN (
+                    SELECT j.id FROM jobs j
+                     WHERE j.state IN (?, ?)
+                       AND ({glob_sql})
+                       AND j.id = (SELECT MAX(id) FROM jobs x
+                                    WHERE x.dropbox_path = j.dropbox_path)
+                       AND NOT EXISTS (
+                            SELECT 1 FROM jobs a
+                             WHERE a.dropbox_path = j.dropbox_path
+                               AND a.id != j.id
+                               AND a.state NOT IN ({",".join("?" * (len(TERMINAL_STATES) + 1))}))
+                 )
+                """,
+                [JobState.NEW.value,
+                 JobState.SKIPPED_TOO_SMALL.value, JobState.SKIPPED_LOW_BITRATE.value,
+                 *globs,
+                 # Same set the idx_jobs_active_path index treats as inactive.
+                 *[s.value for s in TERMINAL_STATES], JobState.FAILED.value],
             )
             return cursor.rowcount
 

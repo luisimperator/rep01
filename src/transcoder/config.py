@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 def path_matches_any(path: str, patterns: list[str]) -> bool:
@@ -340,6 +340,15 @@ class DispatcherSettings(BaseModel):
     )
 
 
+# Built-in fast-lane folders. New releases may append here; machines with a
+# local `priority.paths` still get them through include_default_paths.
+DEFAULT_PRIORITY_PATHS: tuple[str, ...] = (
+    "*/podfactory*/*",
+    # /HeavyDrops/Leo Kuba/Talks by Leo/Arquivo Talks by Leo/<episódio>/...
+    "*/talks by leo/arquivo talks by leo/*",
+)
+
+
 class PrioritySettings(BaseModel):
     """Fast lane for folders the editors are cutting RIGHT NOW (v8.4.0).
 
@@ -357,13 +366,24 @@ class PrioritySettings(BaseModel):
     the normal `reorganize-existing` sweep once the project goes cold.
     """
     paths: list[str] = Field(
-        default_factory=lambda: ["*/podfactory*/*"],
+        default_factory=lambda: list(DEFAULT_PRIORITY_PATHS),
         description=(
             "Case-insensitive glob patterns matched against the full Dropbox "
             "path of each file. `*` also crosses folder boundaries, so "
             "'*/podfactory*/*' matches everything under any folder whose name "
-            "starts with 'Podfactory' (Podfactory, Podfactory3, ...). Empty "
-            "list disables the fast lane."
+            "starts with 'Podfactory' (Podfactory, Podfactory3, ...). A "
+            "non-empty list is merged with the built-in defaults (see "
+            "include_default_paths). Empty list disables the fast lane."
+        ),
+    )
+    include_default_paths: bool = Field(
+        default=True,
+        description=(
+            "Merge the built-in DEFAULT_PRIORITY_PATHS into a non-empty "
+            "`paths` from config.yaml, so a machine whose local config lists "
+            "its own patterns still picks up fast-lane folders added in later "
+            "releases (e.g. Talks by Leo in v8.5.0). Set false to use exactly "
+            "the configured list."
         ),
     )
     proxy_only: bool = Field(
@@ -421,6 +441,16 @@ class PrioritySettings(BaseModel):
             "can't resume). QSV/NVENC handle the extra session fine."
         ),
     )
+
+    @model_validator(mode="after")
+    def _merge_default_paths(self) -> "PrioritySettings":
+        # Empty list = fast lane off; leave it alone.
+        if self.include_default_paths and self.paths:
+            have = {p.lower() for p in self.paths}
+            for p in DEFAULT_PRIORITY_PATHS:
+                if p.lower() not in have:
+                    self.paths.append(p)
+        return self
 
 
 class DropboxApiSettings(BaseModel):
@@ -496,6 +526,56 @@ class WatchdogSettings(BaseModel):
             "flaky-network minute can't churn the same jobs forever. 0 disables."
         ),
     )
+
+
+class ColdSweepSettings(BaseModel):
+    """Daily housekeeping of projects that went cold (v8.5.0).
+
+    Things deferred because a project was still "hot" never came back on
+    their own: the post-upload swap only re-fires on the next upload in that
+    folder (and fast-lane folders skip it entirely), and the scanner only
+    revisits Proxies/ and Premiere previews when Dropbox re-delivers a file
+    — which delta mode does only for changes. Once a day this sweep walks
+    the tree ONCE and, for every folder whose project is settled
+    (is_folder_settled + legacy_reorganize_min_age_days):
+      a) swaps pending H.265/MP3 pairs into place (video + audio layouts,
+         fast-lane folders included; the h264/ + wav/ backups keep their
+         usual delayed cleanup);
+      b) deletes Proxies/ trees and Premiere Video/Audio Previews caches
+         (only with scanner.delete_throwaway_files);
+      c) quarantines ._ resource forks (same rules as the ._ sweep).
+    Stops early when the pipeline is paused (manual or availability).
+    """
+    enabled: bool = Field(default=True, description="Master switch.")
+    daily_run_at: str = Field(
+        default="03:00",
+        description=(
+            "Local clock time HH:MM the sweep starts each day — inside the "
+            "night window by default. /api/cold-sweep/run triggers it now."
+        ),
+    )
+    catch_up_hours: float = Field(
+        default=6.0,
+        ge=0.0,
+        le=23.0,
+        description=(
+            "If the daemon was down (or paused) at daily_run_at, the day's "
+            "sweep still runs when it comes back within this many hours. "
+            "Past that, it waits for the next day's slot so it never starts "
+            "in the middle of the working day."
+        ),
+    )
+
+    @field_validator("daily_run_at")
+    @classmethod
+    def _hhmm(cls, v: str) -> str:
+        try:
+            hh, mm = v.strip().split(":")
+            if not (0 <= int(hh) <= 23 and 0 <= int(mm) <= 59):
+                raise ValueError
+        except ValueError:
+            raise ValueError("daily_run_at must be HH:MM")
+        return f"{int(hh):02d}:{int(mm):02d}"
 
 
 class CensusSettings(BaseModel):
@@ -810,7 +890,10 @@ class Config(BaseModel):
     min_size_gb: float = Field(
         default=6.0,
         ge=0.0,
-        description="Minimum file size in GB (files smaller are skipped)"
+        description=(
+            "Minimum file size in GB (files smaller are skipped). Not applied "
+            "to fast-lane (priority.paths) folders."
+        )
     )
 
     # Bitrate settings for balanced profile
@@ -863,6 +946,10 @@ class Config(BaseModel):
     # folder tree.
     census: CensusSettings = Field(default_factory=CensusSettings)
 
+    # Daily sweep of projects that went cold: deferred swaps + throwaway
+    # Proxies/ and Premiere preview caches.
+    cold_sweep: ColdSweepSettings = Field(default_factory=ColdSweepSettings)
+
     # Dropbox API token-bucket rate limiter
     dropbox_api: DropboxApiSettings = Field(default_factory=DropboxApiSettings)
 
@@ -911,7 +998,8 @@ class Config(BaseModel):
             "scales by resolution: 1080p (~2 MP) skips below ~6 Mbps, "
             "4K (~8 MP) skips below ~25 Mbps. Set to 0 to disable. "
             "Job is marked SKIPPED_LOW_BITRATE and the staging is "
-            "cleaned up — no upload, no reorganize."
+            "cleaned up — no upload, no reorganize. Not applied to "
+            "fast-lane (priority.paths) folders."
         ),
     )
     storage_target_tb: float = Field(
@@ -1257,8 +1345,14 @@ def save_example_config(path: Path) -> None:
             'poll_interval_sec': 2.0,
             'queue_multiplier': 4,
         },
+        'cold_sweep': {
+            'enabled': True,
+            'daily_run_at': '03:00',
+            'catch_up_hours': 6.0,
+        },
         'priority': {
-            'paths': ['*/podfactory*/*'],
+            'paths': list(DEFAULT_PRIORITY_PATHS),
+            'include_default_paths': True,
             'proxy_only': True,
             'stability': {'poll_interval_sec': 300, 'checks_required': 2, 'min_age_sec': 300},
             'preempt_downloads': True,

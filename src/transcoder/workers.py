@@ -897,7 +897,10 @@ class TranscodeWorker(BaseWorker):
         threshold_mbps_per_mp = float(getattr(
             self.config, "low_bitrate_skip_mbps_per_megapixel", 0.0
         ))
-        if threshold_mbps_per_mp > 0:
+        # Fast-lane folders are exempt: every ISO needs its h265/<name> for
+        # the auto-edit timeline, even a low-bitrate one. HEVC sources are
+        # still skipped above.
+        if threshold_mbps_per_mp > 0 and not self.config.is_priority_path(job.dropbox_path):
             vi = probe_result.video_info
             megapixels = (vi.width * vi.height) / 1_000_000.0
             input_mbps = (vi.bitrate_kbps or 0) / 1000.0

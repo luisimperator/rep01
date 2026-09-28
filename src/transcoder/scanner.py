@@ -529,8 +529,10 @@ class Scanner:
             logger.debug(f"Skipping (YouTube download): {path}")
             return 'skipped_youtube'
 
+        # Fast-lane folders have no size floor: the auto-edit timeline links
+        # h265/<name> for EVERY ISO, a short intro included.
         min_bytes = self.config.min_size_bytes()
-        if file_info.size < min_bytes:
+        if file_info.size < min_bytes and not self.config.is_priority_path(path):
             if not dry_run:
                 self._create_skipped_job(file_info, JobState.SKIPPED_TOO_SMALL)
             return 'skipped_small'
@@ -759,6 +761,7 @@ class Scanner:
                     output_path=output_path,
                     state=JobState.NEW,
                     kind="audio",
+                    source_modified=_recorded_at(file_info),
                 )
                 self.db.clear_stability_checks(path)
             logger.info(f"New audio job created: {path}")
@@ -777,6 +780,7 @@ class Scanner:
             output_path=self._audio_output_path(file_info.path),
             state=state,
             kind="audio",
+            source_modified=_recorded_at(file_info),
         )
 
     def _create_new_job(self, file_info: DropboxFileInfo) -> None:
@@ -786,6 +790,7 @@ class Scanner:
             dropbox_size=file_info.size,
             output_path=self._output_path(file_info.path),
             state=JobState.NEW,
+            source_modified=_recorded_at(file_info),
         )
         self.db.clear_stability_checks(file_info.path)
 
@@ -800,6 +805,7 @@ class Scanner:
             dropbox_size=file_info.size,
             output_path=self._output_path(file_info.path),
             state=state,
+            source_modified=_recorded_at(file_info),
         )
 
     # -------------------------------------------------------------- internals
@@ -840,6 +846,12 @@ class Scanner:
 
 class _StopScan(Exception):
     """Signals the outer scan() to bail cleanly on shutdown."""
+
+
+def _recorded_at(file_info: DropboxFileInfo):
+    """The file's real date: client_modified (camera/recorder time), or the
+    Dropbox upload time when the client didn't stamp one."""
+    return file_info.client_modified or file_info.server_modified
 
 
 def _cursor_preview(cursor: str | None) -> str:
